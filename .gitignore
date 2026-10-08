@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 数据与产物（★ 本仓库只带逻辑与设计，不带数据）
+data/
+cache/
+out/
+*.npz
+*.jsonl
+
+# 凭证
+*.key
+credentials*
+.env
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时
+*.tmp
+*.diff
+
+# 本机工作文件（不进版本控制）
+.local/
