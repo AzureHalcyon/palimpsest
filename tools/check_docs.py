@@ -18,8 +18,10 @@
     python tools/check_docs.py <路径> ...   # 查指定的文件或目录
 退出码：0 表示干净，1 表示有问题。
 
-设计约定：本项目的编号一律连续。不提供"允许乱序"的例外机制 ——
+设计约定：**编号一律连续，不提供"允许乱序"的例外。**
 需要例外，说明编号方式有问题，应当改编号，而不是给检查器开洞。
+搬进来的历史记录如果编号不连续，就放进归档目录（`99_归档/`）——
+那里不进检查范围，文档保持原样。
 """
 import io
 import os
@@ -40,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # 跳过：版本控制、本机工作文件、依赖
-SKIP_DIRS = {".git", ".local", "__pycache__", ".venv", "venv", "node_modules"}
+SKIP_DIRS = {".git", ".local", "99_归档", "__pycache__", ".venv", "venv", "node_modules"}
 
 CONFLICT = re.compile(r"^(<{7}|={7}|>{7})(\s|$)")
 BROKEN_TABLE = re.compile(r"\|-{2,}\|###")
