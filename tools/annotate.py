@@ -32,11 +32,22 @@ PROMPT_DOC = os.path.join(ROOT, "docs", "标注提示词.md")
 
 
 def load_prompt(path=PROMPT_DOC):
+    """取文档里当前那版草稿。
+
+    ★ 围栏用通用写法：外层允许用四个反引号（````text … ````），
+      这样提示词内部可以放三反引号的例子代码块而不会被提前截断。
+      实测踩过：外层用三反引号 + 内部有 ```json 时，
+      "匹配到第一个 ``` 就收尾"会把 `# 输出` 后面的东西整段丢掉——
+      而丢掉之后**表面上一切正常**（照样能调用，只是提示词少了一截）。
+    """
     text = io.open(path, encoding="utf-8").read()
-    blocks = re.findall(r"```text\n(.*?)```", text, re.S)
+    blocks = re.findall(r"^(`{3,})text[ \t]*\n(.*?)^\1[ \t]*$", text,
+                        re.S | re.M)
     if not blocks:
         raise SystemExit("提示词文档里没找到 ```text 草稿块：%s" % path)
-    return max(blocks, key=len)
+    # 取最长的那个（文档里可能留着旧版）
+    body = max((b for _, b in blocks), key=len)
+    return body
 
 
 def load_material(path):
