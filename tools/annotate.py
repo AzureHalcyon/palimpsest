@@ -63,7 +63,7 @@ def main():
     ap.add_argument("material")
     ap.add_argument("--model", default="deepseek-v4.1-flash")
     ap.add_argument("--tag", default="v2")
-    ap.add_argument("--max-tokens", type=int, default=20000)
+    ap.add_argument("--max-tokens", type=int, default=200000)
     ap.add_argument("--prompt", default=PROMPT_DOC)
     args = ap.parse_args()
 
@@ -89,6 +89,12 @@ def main():
            ("%.1fs" % r["first_s"]) if r["first_s"] else "未出",
            r["rate"], r["content_tokens"], r["reasoning_tokens"],
            1 if not r["content"].strip() else 0))
+    # ★ 截断要显式报出来：finish=length 时正文可能被砍掉一半，
+    #   而它**看起来像正常结束**（`.local` 里那条 M1 事故就是这么来的）。
+    if r["finish"] == "length":
+        sys.stdout.write(
+            "  ⛔ finish=length：输出被截断了（max_tokens=%d 不够）。\n"
+            "     这一遍的结果不可用——加大 --max-tokens 再跑。\n" % args.max_tokens)
 
     got = llm.parse_json(r["content"])
     if got is None:
