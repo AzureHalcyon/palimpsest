@@ -10,6 +10,7 @@
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -64,8 +65,103 @@ def load_credential(name="DEEPSEEK_API_KEY", path=CRED):
     return refs[name]
 
 
+def chat_stream(messages, model=DEFAULT_MODEL, base=None, key=None,
+                max_tokens=4000, temperature=0.0, timeout=600,
+                retries=3, backoff=4, extra=None, on_delta=None):
+    """流式调用。**长请求必须用它。**
+
+    为什么：非流式时整个生成期连接上没有任何数据流动，
+    中间层会直接把连接掐掉（实测稳定复现 `SSL record layer failure`,
+    连试三次都失败）。流式每个 chunk 都有数据，连接活着。
+
+    返回一个 dict：
+      content    正文（不含思考）
+      reasoning  思考内容（有的端点会给；没有就是空串）
+      finish     结束原因
+      usage      服务端给的用量（流式时常缺；缺了就是 None）
+      first_s    首字延迟（秒）；正文一个 chunk 都没收到时为 None
+      chars      正文字数
+      rate       稳态速率（正文 token/秒，按"思考结束后的那段"算）
+      content_tokens / reasoning_tokens  服务端没给 usage 时的估算值
+
+    ★ 报数时要分清「正文」与「思考」：正文为空才是空回复；
+      思考占掉配额是另一回事。
+    """
+    key = key or resolve_key()
+    base = base or resolve_base()
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens,
+               "temperature": temperature, "stream": True}
+    if extra:
+        payload.update(extra)
+    url = base.rstrip("/") + "/chat/completions"
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    last = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(url, data=data, headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json",
+            "Accept": "text/event-stream"})
+        t0 = time.time()
+        content, reason, finish, usage = [], [], None, None
+        first, marks = None, []
+        try:
+            r = urllib.request.urlopen(req, timeout=timeout)
+            while True:
+                raw = r.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                piece = line[5:].strip()
+                if piece == "[DONE]":
+                    break
+                try:
+                    j = json.loads(piece)
+                except Exception:
+                    continue
+                if j.get("usage"):
+                    usage = j["usage"]
+                ch = (j.get("choices") or [{}])[0]
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+                d = ch.get("delta") or {}
+                if d.get("reasoning_content"):
+                    reason.append(d["reasoning_content"])
+                if d.get("content"):
+                    if first is None:
+                        first = time.time() - t0
+                    content.append(d["content"])
+                    marks.append(time.time() - t0)
+                    if on_delta:
+                        on_delta(d["content"])
+            body = "".join(content)
+            # 稳态速率：只看正文那一段（首字到末字），不含思考期
+            if len(marks) > 10 and marks[-1] > marks[0]:
+                rate = len(body) / (marks[-1] - marks[0])
+            else:
+                rate = len(body) / (time.time() - t0) if body else 0
+            u = usage or {}
+            ct = u.get("completion_tokens") or len(body)
+            rt = u.get("reasoning_tokens") or (
+                (u.get("completion_tokens_details") or {}).get("reasoning_tokens"))
+            if rt is None:
+                rt = sum(len(x) for x in reason)
+            return {"content": body, "reasoning": "".join(reason),
+                    "finish": finish, "usage": usage, "first_s": first,
+                    "chars": len(body), "rate": rate,
+                    "content_tokens": len(body), "reasoning_tokens": rt,
+                    "elapsed": time.time() - t0}
+        except Exception as e:
+            last = "%s: %s" % (type(e).__name__, str(e)[:200])
+        if attempt < retries:
+            time.sleep(backoff * attempt)
+    raise RuntimeError("重试 %d 次仍失败：%s" % (retries, last))
+
+
 def chat(messages, model=DEFAULT_MODEL, base=None, key=None,
-         max_tokens=4000, temperature=0.0, timeout=180, extra=None):
+         max_tokens=4000, temperature=0.0, timeout=180, extra=None,
+         retries=3, backoff=4):
     """一次对话调用。返回 (content, finish_reason, usage)。content 可能是空串。"""
     key = key or resolve_key()
     base = base or resolve_base()
@@ -73,18 +169,33 @@ def chat(messages, model=DEFAULT_MODEL, base=None, key=None,
                "max_tokens": max_tokens, "temperature": temperature}
     if extra:
         payload.update(extra)
-    req = urllib.request.Request(
-        base.rstrip("/") + "/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": "Bearer " + key,
-                 "Content-Type": "application/json"})
-    try:
-        r = urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        raise RuntimeError("HTTP %s：%s" % (e.code, e.read().decode("utf-8", "replace")[:400]))
-    body = json.loads(r.read().decode("utf-8"))
-    ch = body["choices"][0]
-    return (ch["message"].get("content") or ""), ch.get("finish_reason"), body.get("usage")
+    url = base.rstrip("/") + "/chat/completions"
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    # ★ 重试：长请求上实测到过对端直接断连（RemoteDisconnected / SSL record layer failure），
+    #   重发一次通常就好。只重试传输层错误与 429/5xx；
+    #   4xx（除 429）是请求本身有问题，重试没用，直接报出来。
+    last = None
+    for attempt in range(1, retries + 1):
+        req = urllib.request.Request(url, data=data, headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        try:
+            r = urllib.request.urlopen(req, timeout=timeout)
+            body = json.loads(r.read().decode("utf-8"))
+            ch = body["choices"][0]
+            return ((ch["message"].get("content") or ""), ch.get("finish_reason"),
+                    body.get("usage"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:400]
+            if e.code == 429 or e.code >= 500:
+                last = "HTTP %s：%s" % (e.code, detail)
+            else:
+                raise RuntimeError("HTTP %s：%s" % (e.code, detail))
+        except Exception as e:                       # URLError / SSLError / 断连
+            last = "%s: %s" % (type(e).__name__, str(e)[:200])
+        if attempt < retries:
+            time.sleep(backoff * attempt)
+    raise RuntimeError("重试 %d 次仍失败：%s" % (retries, last))
 
 
 def normalize_annotation(obj):
