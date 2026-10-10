@@ -39,7 +39,7 @@ for _stream in ("stdout", "stderr"):
             pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))          # tools/文档/ → 仓库根
 
 # 跳过：版本控制、本机工作文件、依赖
 SKIP_DIRS = {".git", ".local", "99_归档", "__pycache__", ".venv", "venv", "node_modules"}
