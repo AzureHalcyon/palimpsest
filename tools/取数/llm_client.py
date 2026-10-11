@@ -666,14 +666,4 @@ def parse_json(text):
     return None
 
 
-# ================= 主人（以某角色为主人公） =================
-OWNER = None
-_原_fill_material = fill_material
-
-
-def fill_material(template, material, **kw):
-    # ★ 必须在**调用原函数之前**换：原函数内部就检查了
-    #   "拼完之后还剩没换掉的占位符"（实测就是这样被拦住的）。
-    if '<主人>' in template:
-        template = template.replace('<主人>', OWNER or "（未指定主人）")
-    return _原_fill_material(template, material, **kw)
+# ★ v16 起提示词里没有 <主人> 占位符 ⇒ 原来的 OWNER monkeypatch 已删（作者 2026-10-11）。

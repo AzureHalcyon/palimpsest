@@ -215,7 +215,7 @@ def load_prompt(path=PROMPT_DOC, view="同一件事"):
     # 模板里不该再留下没换掉的占位符：留着就是"少了一段而看起来正常"。
     left = re.findall(r"<[^>\n]{1,12}>", text)
     left = [x for x in left
-                if x not in ("<材料原文>", '<主人>')]  # <主人> 由 fill_material 换（主人）
+                if x != "<材料原文>"]  # 占位符只认 <材料原文>；<主人> 已作废（v16）
     if left:
         raise SystemExit("拼完之后还剩没换掉的占位符 %s" % left)
     return text
