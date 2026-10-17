@@ -31,6 +31,7 @@ from . import markset
 from .film import 切回原文, 提示词哈希
 from .graph import 图
 from .knobs import 件 as K件, 标记 as K标记, 判 as K判
+from .prompts import PREDICT_SYS
 
 # --------------------------------------------------------------------------- ⑤ 的提示词（新线，尚未冻结）
 
@@ -70,7 +71,12 @@ def _标准差(xs: Sequence[float]) -> float:
 
 
 def 误差序列(底片数据: Dict) -> List[Dict]:
-    """`②`：每轮一个数 —— 从**那一轮最后一次调用的 `logprobs`** 算 `−mean(logprob)`。
+    """**旧口径（占位）**：每轮一个数 —— 从**那一轮最后一次调用的 `logprobs`** 算 `−mean(logprob)`。
+
+    ⛔ 这不是设计要的那个量（设计要 `预测误差`：用读法预测每一格）。
+      留在这里当**对照**：它一直算、一直存，但不参与标记 ——
+      真机实测它就是"她怎么写、说了多长"的副产物（r 与 token 数 = 0.685）。
+
 
     ★ 只认"出正文"的那次调用（`用途 != 编写`）：编写那一步是**为了给她看**而另做的一次生成，
       它的概率不属于"这一轮她说得有多意外"。
@@ -91,6 +97,72 @@ def 误差序列(底片数据: Dict) -> List[Dict]:
                     "误差_推理": 负均值(推理),
                     "误差_正文": 负均值(正文),
                     "token数": len(全部)})
+    return out
+
+
+def 预测误差(底片数据: Dict, llm, 系统提示词: Optional[str] = None,
+             进度=None) -> List[Dict]:
+    """`②` 按**设计**算误差：用现有读法**预测每一格**，误差 ＝ 那次预测的 `logprobs`。
+
+    ★ 与 `误差序列` 的区别（这是"实现对齐设计"的关键一处）：
+      · `误差序列`（旧口径，占位）＝ 她**生成那句回复时**的 `−mean(logprob)`；
+      · 这里（设计要的口径）＝ 拿这一格的**真实开头**当 prefix，让读法**接着往下写**，
+        读它自己给的 `logprobs` ⇒ "**这一格对读法来说有多难续**"。
+      前者混着"她怎么措辞、说了多长"（实测 r(误差, token 数) = 0.685）；
+      后者问的是"读法对这一处有没有预感"。
+
+    ★ 为什么不直接算"给定文本的交叉熵"：这个端点**没有 scoring**（`待决 §13`）。
+      `prefix:true` 是官方给的那条替代路（`实验-01` 48/48），误差仍然是"真实文本开头的
+      延续有多难猜"，只是**近似** —— 这条近似的位置写在 `docs/待决.md §13` 里，别当精确值用。
+
+    ★ 上下文只给**上一轮的原文**（`流程框架 §五`：实验-19b 3/3）。⛔ 不给整场：
+      整场喂进去会让误差随"聊到多长"漂，而窗口判据比的是**附近的跳变**。
+
+    返回 `[{轮, 误差, token数, 前缀字数, 调用}]`；`调用` 里带这一次的 `logprobs`
+    （它是**记录**：换模型/温度就变，重算不复现 ⇒ 必须落盘，`决策记录 2026-10-16`）。
+    """
+    轮们 = list(底片数据.get("逐轮") or [])
+    前缀字数 = int(K标记["预测前缀字数"]["值"])
+    上下文轮数 = int(K标记["预测上下文轮数"]["值"])
+    out: List[Dict] = []
+    for i, t in enumerate(轮们):
+        轮 = int(t.get("轮") or 0)
+        if 进度 is not None:
+            进度("phase", "② 预测第 %d 轮" % 轮)
+        # 上下文 ＝ 前 `上下文轮数` 轮的**原文**（默认 1 ＝ 上一句）
+        上文 = []
+        for j in range(max(0, i - 上下文轮数), i):
+            tt = 轮们[j]
+            上文.append("他说：%s" % (tt.get("刺激") or ""))
+            if tt.get("她说"):
+                上文.append("我说：%s" % (tt.get("她说") or ""))
+        目标 = (t.get("刺激") or "") + (t.get("她说") or "")
+        前缀 = 目标[:前缀字数]
+        msgs = [{"role": "system", "content": str(系统提示词 or "")}]
+        上一轮 = "\n".join(上文).strip()
+        msgs.append({"role": "user", "content": ("上一轮：\n%s" % 上一轮) if 上一轮
+                                            else "（这是这一场的第一轮，前面没有内容）"})
+        # ★ 最后一条 `assistant` ＝ prefix：模型从它之后往下写（官方端点这条通道 `实验-01` 验过）
+        msgs.append({"role": "assistant", "content": 前缀})
+        row = {"轮": 轮, "误差": None, "token数": 0, "前缀字数": len(前缀), "调用": None}
+        try:
+            # * `fast=True`：预测这一步**不要思考** ——
+            #   ① 它是「接着往下写」，不是推理；② 开着思考会让推理 token 混进误差的均值；
+            #   ③ 每次归档要跑 N 次（一场 N 轮），关思考才跑得起（实测 6.1s → 0.7s）。
+            msg = llm.chat(msgs, logprobs=True, prefix=True, fast=True)
+            lp = (msg.get("logprobs") or {})
+            xs = [float(e.get("logprob") or 0.0) for e in (lp.get("正文") or [])]
+            xs += [float(e.get("logprob") or 0.0) for e in (lp.get("推理") or [])]
+            if xs:
+                row["误差"] = -(_均值(xs))
+            row["token数"] = len(xs)
+            # ★ 这一次预测的调用记下来（含 logprobs）—— 它是记录，不是缓存
+            row["调用"] = dict(msg.get("_call") or {}, 用途="②预测", 前缀=前缀,
+                               logprobs={"推理": lp.get("推理") or [], "正文": lp.get("正文") or []})
+        except Exception as e:  # noqa: BLE001
+            # ⛔ 一格预测不出来不该把整场归档弄挂；如实记，这一格的误差留空（后面按"无窗口"处理）
+            row["调用"] = {"用途": "②预测", "err": "%s: %s" % (type(e).__name__, e)}
+        out.append(row)
     return out
 
 
@@ -138,7 +210,8 @@ def _候选行(图: 图, 候选: List[tuple], 底片们: Dict[str, Dict]) -> str
 
 def 草案(底片数据: Dict, 图: 图, llm, 场id: str,
          嵌入: Optional[Callable[[Sequence[str]], List[List[float]]]] = None,
-         其他底片: Optional[Dict[str, Dict]] = None, 进度: Optional[Callable] = None) -> Dict:
+         其他底片: Optional[Dict[str, Dict]] = None, 进度: Optional[Callable] = None,
+         预测模型=None) -> Dict:
     """只**算**，⛔ 不动图（用户按「完成」之前，池子一字不动）。"""
     底片们 = dict(其他底片 or {})
     底片们[str(场id)] = 底片数据
@@ -152,8 +225,17 @@ def 草案(底片数据: Dict, 图: 图, llm, 场id: str,
         图.按区间找cell(str(场id), t.get("轮") or 0)   # 只为幂等检查，不改图
 
     # ---- ② 误差 → 标记
-    序列 = 误差序列(底片数据)
+    # ★★ 2026-10-17：**按设计来** —— 用读法**预测每一格**（`记忆层 §3 ②`），
+    #   误差＝那次预测的 `logprobs`（`待决 §13` 的 (b)：prefix 把真实开头喂进去）。
+    #   ⛔ 旧的 `误差序列`（她生成时的 `−mean(logprob)`）不是这个量，只留作对照。
+    # `预测模型` 只给自检用：离线时「预测」和「判」各用一份替身，否则脚本会被预测吃光。
+    # 真机上它是 None ⇒ 预测与判用同一个模型。
+    预测 = 预测误差(底片数据, 预测模型 or llm, 系统提示词=PREDICT_SYS, 进度=进度)
+    序列 = [{"轮": r["轮"], "误差": r["误差"], "token数": r["token数"]} for r in 预测]
+    # 定标记 —— **照 `流程框架 [8]`**：`误差 > μ_{t−τ} + γ·σ_{t−τ}` ⇒ 标记。
+    # ⛔ 别在这里换判据（"排名 vs 阈值"是文档之间的事，见 `记忆层 §3` 第 86 与 129 行自相矛盾）。
     标 = 标记(序列)
+    旧序列 = 误差序列(底片数据)          # 对照：不进标记，只存着（"改前 vs 改后"要比）
 
     # ---- ③ 配对（候选件）＋ ⑤ 判
     候选表: Dict[int, List[tuple]] = {}
@@ -211,6 +293,8 @@ def 草案(底片数据: Dict, 图: 图, llm, 场id: str,
 
     return {"场id": str(场id), "cell": 草案cell, "误差": 序列, "标记": 标,
             "候选": 候选表, "判": 判表,
+            # ★ 两份读数都存：`误差` ＝ 设计口径（预测）；`旧误差` ＝ 占位口径（她生成时）
+            "误差": 序列, "旧误差": 旧序列,
             "摘要": _摘要(标, 判表)}
 
 
@@ -235,6 +319,17 @@ def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
                 "err": "草案里没有 场id，没写图"}
 
     层1: List[Dict] = []
+    # ★★ 2026-10-17（真机跑出来的）：**这一场的 cell 无条件落图**。
+    #   原来 cell 只在 `判` 的循环里顺手建 ⇒ 一场"没有标记"的对话在**图里一点痕迹都没有**
+    #   （真机实测：9 轮、含「他上个月把工作辞了」这种明显意外，图版本 +1 但 `cell = 0`）。
+    #   cell 是 ①切cell 的**机械产物**（原文区间），不是记忆判断 ⇒ 它进图不改变
+    #   "记住了什么"；可缺了它，**以后任何要引用那一场原文的东西都做不到**
+    #   （件的成员是 cell；cell 不在，那段原文就永远锚不上）。
+    #   ⇒ 机械归机械：① 在 `完成` 时无条件落图，②③⑤④ 才决定"记成什么"。
+    for c in (草案.get("cell") or []):
+        图.加cell(str(c.get("场id") or 场id), int(c.get("轮") or 0),
+                 int(c.get("起") or 0), int(c.get("止") or 0))
+
     for p in (草案.get("判") or []):
         轮 = int(p["轮"])
         cell = (图.按区间找cell(场id, 轮)

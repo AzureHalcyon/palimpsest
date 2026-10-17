@@ -149,7 +149,7 @@ class BaseLLM:
 
     def chat(self, messages: List[dict], tools: Optional[list] = None, temp: Optional[float] = None,
              json_mode: bool = False, model: Optional[str] = None, progress=None,
-             logprobs: bool = False, fast: bool = False) -> dict:
+             logprobs: bool = False, fast: bool = False, prefix: bool = False) -> dict:
         """一次调用，返回 `message` dict（可能带 `tool_calls`）。
 
         ★ `progress(kind, text)`（2026-10-07）：给了就**走流式**，边收边回调 ——
@@ -164,6 +164,13 @@ class BaseLLM:
               （`max_tokens` 会因为空回复逐级放大，⛔ 不记下来就说不清那一次的指纹）
           ⛔ 这两个键**只是给记录用的**，绝不能被当成消息塞回上下文（`session.ask` 只取
              `content` / `tool_calls` 拼 `msgs`，所以天然不会回流）。
+
+        ★★ `prefix=True`（2026-10-17 · `待决 §13` 的 (b) 那条，`实验-01` 已验 48/48）：
+          **把最后一条 `assistant` 消息当成"开头"，让模型接着往下写** ——
+          ⇒ 拿到的 `logprobs` 就是**那段真实文本**（开头之后的部分）有多难猜。
+          为什么必须要它：这个端点**没有 scoring**，没有它就算不出"给定文本的交叉熵"，
+          而 `②` 的误差正是那个量（`记忆层 §3 ②`：用读法预测每个 cell）。
+          ⛔ 只给 `②` 的预测调用用；对话、编写、判都用不着。
 
         ★★ `fast=True`（2026-10-17）：**关掉思考**（`thinking: {"type": "disabled"}`）。
           为什么要它：编写 `[W]` 那一步只想要一段话，而 `effort` 档位**压不下去** ——
@@ -192,6 +199,9 @@ class BaseLLM:
                 body["tool_choice"] = "auto"
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
+            if prefix:
+                # ★ 官方端点给的通道：最后一条消息是"开头"，模型从它之后往下写。
+                body["prefix"] = True
 
             def 发一次():
                 if progress is not None:
@@ -335,7 +345,7 @@ class ScriptedLLM:
         self.call_log: list = []          # ★ 与 `BaseLLM` 同形（自检要能断言"两段都记了"）
 
     def chat(self, messages, tools=None, temp=None, json_mode=False, model=None,
-             progress=None, logprobs=False, fast=False) -> dict:
+             progress=None, logprobs=False, fast=False, prefix=False) -> dict:
         """⚠️ 签名必须与 [`BaseLLM.chat`] **一致**（含 `progress` / `logprobs`）。
 
         ★ 2026-10-07 踩到过：给 `BaseLLM.chat` 加了 `progress` 却漏了这个替身 ⇒
@@ -349,7 +359,8 @@ class ScriptedLLM:
           ⇒ "回调真的被调到了"这件事在自检里看得见，不用真联网。
         """
         self.calls.append({"messages": messages, "tools": tools, "json_mode": json_mode,
-                           "progress": progress is not None, "logprobs": bool(logprobs), "fast": bool(fast)})
+                           "progress": progress is not None, "logprobs": bool(logprobs),
+                           "fast": bool(fast), "prefix": bool(prefix)})
         self.call_log.append({"ms": 0, "prompt_tokens": None, "completion_tokens": None,
                               "tools": bool(tools), "tool_calls": False,
                               "msgs": len(messages), "chars": 0})

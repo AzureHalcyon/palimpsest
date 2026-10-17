@@ -47,6 +47,32 @@ def main():
          sorted(Config().__dataclass_fields__) == ["chat", "cooldown", "embed", "session"],
          sorted(Config().__dataclass_fields__))
 
+    print("[1b] 宿主胶水：不许引用已经不存在的名字")
+    # ★★ 这条是**真机踩出来的**：`chat_ask` 拼返回 JSON 时还引用着随旧池子删掉的 `_sess`，
+    #   ⇒ 每一轮**答完之后**才抛 `NameError`，界面上显示"这句没发出去"
+    #   （回复其实已经生成、也进了 `pending.json`）。桌面自检一条都没碰过胶水 ⇒ 抓不到。
+    #   查法：逐条看函数里的 `LOAD_GLOBAL`，那个名字必须能在模块全局或内建里找到。
+    import builtins
+    import dis
+    import importlib.util
+    import types
+    glue_path = os.path.join(os.path.dirname(HERE), "..", "app", "app",
+                             "src", "main", "python", "host_glue.py")
+    spec = importlib.util.spec_from_file_location("_host_glue_probe", glue_path)
+    glue = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(glue)
+    未定义 = []
+    for name, obj in vars(glue).items():
+        if not isinstance(obj, types.FunctionType) or obj.__module__ != glue.__name__:
+            continue
+        for ins in dis.get_instructions(obj):
+            if ins.opname == "LOAD_GLOBAL":
+                n = ins.argval
+                if n not in vars(glue) and not hasattr(builtins, n):
+                    未定义.append("%s() 里的 %s" % (name, n))
+    断言("★★ 每个胶水函数用到的全局名都真实存在（真机踩过 `_sess`）",
+         not 未定义, 未定义)
+
     print("[2] 一台机器 + 一场对话")
     tmp = tempfile.mkdtemp(prefix="palm-smoke-")
     cfg = Config()

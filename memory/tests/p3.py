@@ -122,7 +122,8 @@ def main():
     print("[7] 参数账的**形状**：每一项都得能回答「凭什么」")
     from memory.knobs import 参数账
     _账 = 参数账()
-    断言("★ 新线参数账 19 项", len(_账) == 19, len(_账))
+    # ★ 2026-10-17：`②` 换成"用读法预测每一格"之后多了两个旋钮（预测前缀字数 / 预测上下文轮数）
+    断言("★ 新线参数账 21 项", len(_账) == 21, len(_账))
     断言("★★ 每一项都有 值 / 依据（⛔ 裸值不许出现）",
          all(("值" in v and str(v.get("依据") or "").strip()) for v in _账.values()),
          [k for k, v in _账.items() if not str(v.get("依据") or "").strip()])

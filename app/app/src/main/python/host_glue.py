@@ -777,8 +777,11 @@ def chat_ask(data_dir: str, sid: str, text: str, sink=None) -> str:
         "cd_blocked": res.get("cd_blocked", 0),
         "pulls": res["pulls"],
         # ★★ 「那段回忆」：编写出的那一段 + 用了哪几条 + 编写版本/耗时（界面默认不显示，点开才看）
-        "回忆": (res.get("回忆") or ((_sess().rec.get("turns") or [{}])[-1].get("回忆"))
-                  if _sess is not None else None),
+        #   ⛔ 2026-10-17：这里原来还兜了一层 `_sess()`（往"最近一轮"里回捞）——
+        #     那个助手函数随旧池子一起删了，于是每次**答完之后**拼 JSON 都抛
+        #     `NameError: _sess` ⇒ 真机上表现为"这句没发出去"（回复其实已经生成、也进了
+        #     `pending.json`，只是这一句返回给界面时炸了）。⇒ 现在只认 `res` 自己。
+        "回忆": res.get("回忆"),
         # 这一轮花了多少 token（服务端给的，可能缺）；界面把它显示在回复下面。
         "usage": res.get("usage") or {},
     }, ensure_ascii=False)
