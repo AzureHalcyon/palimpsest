@@ -147,6 +147,25 @@ class HashingEmbedder:
         return np.array(rows, dtype=float) if rows else np.zeros((0, self.dim))
 
 
+# --------------------------------------------------------------------------- 统一取向量
+def 取向量(嵌入, 文本们):
+    """统一取向量：`Embedder` / `HashingEmbedder` 走 `raw_embed`；自检里传的是**可调用替身**。
+
+    ★★ 为什么必须有它（2026-10-17 真对话第 2 场抓到的）：
+      原来 `archive_step.草案` 和 `recall.回忆` 两处都写成 `嵌入(texts)`，而真 `Embedder`
+      **不可调用**（它的方法是 `raw_embed`）⇒ `TypeError` 被裸 `except` 吞成空向量
+      ⇒「提候选件」只从**有向量的件**里取 ⇒ 候选恒空 ⇒ **"归进"路径整条是死的**，
+      而且**死锁**：`图.归进` 只能在归进时补写向量，而补写的前提是先成为候选。
+      ⇒ 两个调用点统一走这里，签名只有一种写法，⛔ 再也不会写错。
+    """
+    f = getattr(嵌入, "raw_embed", None)
+    if f is not None:
+        return f(文本们)
+    if callable(嵌入):
+        return 嵌入(文本们)
+    raise TypeError("嵌入既没有 raw_embed 也不可调用：%r" % (type(嵌入),))
+
+
 # --------------------------------------------------------------------------- 坐标系自检
 def frame_angle(V: np.ndarray, W: np.ndarray) -> float:
     """两组向量的**平均夹角**（度）—— 用来量"查询与池子是不是同一个坐标系"。

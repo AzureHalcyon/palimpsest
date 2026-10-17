@@ -30,7 +30,15 @@ import urllib.request
 DEFAULT_BASE = "https://api.daapsaak.top/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash"   # ★ 别再写回 "deepseek-chat"：那条网关已经不提供它了
                                         #   （实测报 model_not_found ⇒ 404，白查半天）
-CRED = r"C:\Users\AzureHalcyon\.dsh\.credentials.yaml"
+# ★ 2026-10-17：原来写死 `C:\Users\AzureHalcyon\.dsh\.credentials.yaml` —— 换人就崩。
+#   改成按顺序找（⛔ 仓库里不出现任何绝对路径）：
+#     ① 环境变量 `DSH_CREDENTIALS`  ② `DSH_HOME` 下的 `.credentials.yaml`  ③ 用户目录下的 `.dsh`
+CRED = (
+    os.environ.get("DSH_CREDENTIALS")
+    or os.path.join(os.environ.get("DSH_HOME") or
+                    os.path.join(os.path.expanduser("~"), ".dsh"),
+                    ".credentials.yaml")
+)
 # 本机覆盖：格式 KEY=VALUE，用于指定某个端点的 key 与地址。不进版本控制。
 # ★ 这里是 tools/取数/，所以仓库根要上溯三层。**工具一挪目录，这种相对层数就得跟着改**
 #   ——挪完必须把每个脚本都真跑一遍（见 tools/README.md 末尾那条）。

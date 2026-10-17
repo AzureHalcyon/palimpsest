@@ -1,45 +1,79 @@
 # 构建包装脚本（DSH 里就用它）
 #
 # 为什么需要它：
-#   1) 工具链在 D:\Android，而本会话的环境快照里没有那几个变量 ⇒ 每次显式给上；
-#   2) Gradle 缓存默认落 %USERPROFILE%\.gradle（C 盘！）⇒ 改到工作区内的
-#      .android-build\gradle-home（**仍在 D 盘**）；
-#   3) ★ **TEMP/TMP 也必须挪进工作区**：沙箱只允许写工作区，而 Gradle / AGP /
-#      pip 都会往 %TEMP% 建临时目录 —— 实测第一次构建就是卡死在这里
-#      （守护进程日志停在 "Chaquopy: Installing for arm64-v8a"，
-#        下面那行 pip 的 "Looking in indexes" 之后 11 分钟没有任何动静）；
+#   1) 工具链不在 PATH 上（2026-10-17 起本机装在 C:\Android，见 README 的历史注记）⇒ 每次显式给上；
+#   2) Gradle 缓存默认落 %USERPROFILE%\.gradle（C 盘用户目录）⇒ 改到 C:\Android\gradle-home；
+#   3) ★ **TEMP/TMP 也必须挪出工作区**：Gradle / AGP / pip 都会往 %TEMP% 建临时目录，
+#      而 pip 下载轮子后要重命名/清理临时目录，撞上工作区继承下来的 ACL 会报
+#      `[Errno 13] Permission denied: '...pip-unpack-xxx\numpy-...whl'`（见 2026-10-04 实测）；
 #   4) 用工程自带 gradlew（Gradle 8.13，分发地址指向腾讯云镜像）。
 #
 # 用法：
 #   pwsh -File build.ps1 :app:assembleDebug
 #   pwsh -File build.ps1 :app:tasks
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GradleArgs)
+#   pwsh -File build.ps1 -Toolchain 'X:\Android' :app:assembleDebug    # 工具链不在默认位置时
+param(
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$GradleArgs,
+    # ★ 工具链根目录（里面要有 jdk-17 / Sdk / Python313）。**⛔ 写死在脚本里** ——
+    #   换机器/换盘是常态。取值顺序见下：
+    #     ① `-Toolchain` 参数  ② 环境变量 `PALIMPSEST_TOOLCHAIN`
+    #     ③ 从已有的 `JAVA_HOME` 与 `ANDROID_HOME` 反推**共同的父目录**
+    #     ④ 都没有 ⇒ **报错说清要设什么**（⛔ 猜一个路径）
+    [string]$Toolchain
+)
 
 $ErrorActionPreference = 'Stop'
 
-$buildRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path + '\.android-build'
-# ★ TEMP 为什么**不能**放在工作区里（2026-10-04 实测真因）：
-#   工作区目录带一条继承下来的 `Everyone:(I)(CI)(DENY)(DC)`（沙箱 ACL 运行器留下的
-#   "拒绝删除子容器"），而 pip 下载轮子后要重命名/清理临时目录 —— 正好撞上它，
-#   报 `[Errno 13] Permission denied: '...pip-unpack-xxx\numpy-...whl'`，
-#   并在工作区里留下 14 个删不掉的 pip-* 残骸。
-#   ⇒ 临时目录放到 D:\Android\tmp（同样是 D 盘，但不沾那套 ACL）。
-$tmp        = 'D:\Android\tmp'
-$gradleHome = Join-Path $buildRoot 'gradle-home'
-New-Item -ItemType Directory -Force -Path $tmp, $gradleHome | Out-Null
+if (-not $Toolchain) { $Toolchain = $env:PALIMPSEST_TOOLCHAIN }
+if (-not $Toolchain -and $env:JAVA_HOME -and $env:ANDROID_HOME) {
+    # 反推：两者若在同一个父目录下，那个父目录就是工具链根
+    $j = (Resolve-Path -LiteralPath $env:JAVA_HOME -ErrorAction SilentlyContinue).Path
+    $a = (Resolve-Path -LiteralPath $env:ANDROID_HOME -ErrorAction SilentlyContinue).Path
+    if ($j -and $a) {
+        $pj = Split-Path $j -Parent
+        if ($pj -eq (Split-Path $a -Parent)) { $Toolchain = $pj }
+    }
+}
+if (-not $Toolchain) {
+    throw @"
+没找到 Android 工具链。请用下面任一方式给出（它下面要有 jdk-17 / Sdk / Python313）：
+  · pwsh -File build.ps1 -Toolchain 'X:\Android' ...
+  · 设环境变量 PALIMPSEST_TOOLCHAIN=X:\Android
+  · 或先设好 JAVA_HOME 与 ANDROID_HOME（两者在同一父目录下）
+"@
+}
+if (-not (Test-Path -LiteralPath $Toolchain)) { throw "工具链目录不存在：$Toolchain" }
 
-$env:JAVA_HOME         = 'D:\Android\jdk-17'
-$env:ANDROID_HOME      = 'D:\Android\Sdk'
-$env:ANDROID_SDK_ROOT  = 'D:\Android\Sdk'
-$env:ANDROID_USER_HOME = 'D:\Android\user-home'
+$tmp        = Join-Path $Toolchain 'tmp'
+$gradleHome = Join-Path $Toolchain 'gradle-home'
+$pipCache   = Join-Path $Toolchain 'pip-cache'
+New-Item -ItemType Directory -Force -Path $tmp, $gradleHome, $pipCache | Out-Null
+
+$env:JAVA_HOME         = Join-Path $Toolchain 'jdk-17'
+$env:ANDROID_HOME      = Join-Path $Toolchain 'Sdk'
+$env:ANDROID_SDK_ROOT  = Join-Path $Toolchain 'Sdk'
+$env:ANDROID_USER_HOME = Join-Path $Toolchain 'user-home'
 $env:GRADLE_USER_HOME  = $gradleHome
 $env:TEMP              = $tmp
 $env:TMP               = $tmp
 $env:GRADLE_OPTS       = "-Djava.io.tmpdir=$tmp"
-$env:Path = "D:\Android\jdk-17\bin;$env:Path"
+$env:Path = "$(Join-Path $Toolchain 'jdk-17\bin');$env:Path"
+
+# ★ Chaquopy 要一个 Python 3.13（用来跑 pip 打包）。**⛔ 写死在 gradle 文件里**，
+#   这里发现后传给 gradle（`-PbuildPython`）。顺序：工具链里 → PATH 上的 python。
+$buildPython = $null
+foreach ($c in @((Join-Path $Toolchain 'Python313\python.exe'),
+                 (Join-Path $Toolchain 'python.exe'))) {
+    if (Test-Path -LiteralPath $c) { $buildPython = (Resolve-Path -LiteralPath $c).Path; break }
+}
+if (-not $buildPython) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { $buildPython = $cmd.Source }
+}
+if (-not $buildPython) { throw "没找到构建用 Python（3.13）。装到 '$Toolchain\Python313\' 或保证 PATH 上有 python。" }
 
 $gradlew = Join-Path $PSScriptRoot 'gradlew.bat'
-$gradleCmd = if (Test-Path $gradlew) { $gradlew } else { 'D:\Android\gradle-8.9\bin\gradle.bat' }
+$gradleCmd = if (Test-Path $gradlew) { $gradlew } else { 'gradle.bat' }
 
 Write-Host "JAVA_HOME        = $env:JAVA_HOME"
 Write-Host "ANDROID_HOME     = $env:ANDROID_HOME"
@@ -81,9 +115,10 @@ function Get-ProxyUrl {
 }
 
 $extra = @()
-$pipCache = Join-Path $buildRoot 'pip-cache'      # 放 app/build 之外 ⇒ 清构建不会清掉轮子
-New-Item -ItemType Directory -Force -Path $pipCache | Out-Null
 $extra += "-PpipCacheDir=$pipCache"
+# ★ 构建用 Python 也走 `-P`（`app/build.gradle.kts` 里 ⛔ 写死路径）
+$extra += "-PbuildPython=$buildPython"
+Write-Host "buildPython = $buildPython"
 $proxy = Get-ProxyUrl
 if ($proxy) {
     Write-Host "pip 走代理 = $proxy（现探）"

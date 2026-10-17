@@ -29,6 +29,7 @@
 # ⛔ 只对 **debug 包**有效（`run-as` 只对 debuggable 应用开放）。
 # ⛔ 不会删旧包的任何东西；旧包也不卸载（留着当对照）。确认无误后你自己决定要不要卸。
 param(
+    [string]$Adb,
     [string]$Device = '',
     [string]$Old = 'com.azurehalcyon.companion',
     [string]$New = 'com.azurehalcyon.palimpsest',
@@ -38,11 +39,21 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # adb 要往 %TEMP% 写 adb.log；沙箱默认的 %TEMP% 在工作区外会 Permission denied。
-$env:TEMP = 'D:\Works\workplace\dsh-workplace\.probe\adb-tmp'
+# ★ 2026-10-17：这里原来写死了这台机器的路径（D:\Android\Sdk\... 之类），换电脑就崩。
+#   ⇒ 改成按顺序发现（⛔ 在仓库里写任何盘符路径）。
+#   adb：-Adb 参数 → 环境变量 PALIMPSEST_ADB → $env:ANDROID_HOME\platform-tools\adb.exe → PATH 上的 adb
+if (-not $Adb) { $Adb = $env:PALIMPSEST_ADB }
+if (-not $Adb -and $env:ANDROID_HOME) { $Adb = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe' }
+if (-not $Adb) { $c = Get-Command adb -ErrorAction SilentlyContinue; if ($c) { $Adb = $c.Source } }
+if (-not $Adb -or -not (Test-Path -LiteralPath $Adb)) {
+    throw "没找到 adb。用 -Adb <路径>，或设 ANDROID_HOME（其下有 platform-tools\adb.exe），或把 adb 放进 PATH。"
+}
+$adb = $Adb
+# ★ TEMP 要挪出工作区（工作区继承的 ACL 会让 adb 的临时文件写不进去，2026-10-04 实测）；
+#   但 ⛔ 写死某个盘 ⇒ 用系统临时区下的固定子目录（跟着用户走，不跟着盘符走）。
+$env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp\palimpsest-adb'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
-
-$adb = 'D:\Android\Sdk\platform-tools\adb.exe'
 if (-not (Test-Path $adb)) { throw "找不到 adb：$adb" }
 
 if (-not $Device) {

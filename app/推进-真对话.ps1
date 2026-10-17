@@ -9,14 +9,26 @@
 #   · 判"这一轮答完了"：数 dump 里 `输出 N` 的个数（每轮助手气泡的 token 脚注），
 #     比上一轮多 1 就是落地了 —— ⛔ 别睡固定秒数，那会在慢的一轮上把回复掐死。
 param(
+    [string]$Adb,
     [string]$Package = 'com.azurehalcyon.palimpsest'
 )
 
 $ErrorActionPreference = 'Stop'
-$env:TEMP = 'D:\Works\workplace\dsh-workplace\.android-build\adb-tmp'
+# ★ 2026-10-17：这里原来写死了这台机器的路径（D:\Android\Sdk\... 之类），换电脑就崩。
+#   ⇒ 改成按顺序发现（⛔ 在仓库里写任何盘符路径）。
+#   adb：-Adb 参数 → 环境变量 PALIMPSEST_ADB → $env:ANDROID_HOME\platform-tools\adb.exe → PATH 上的 adb
+if (-not $Adb) { $Adb = $env:PALIMPSEST_ADB }
+if (-not $Adb -and $env:ANDROID_HOME) { $Adb = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe' }
+if (-not $Adb) { $c = Get-Command adb -ErrorAction SilentlyContinue; if ($c) { $Adb = $c.Source } }
+if (-not $Adb -or -not (Test-Path -LiteralPath $Adb)) {
+    throw "没找到 adb。用 -Adb <路径>，或设 ANDROID_HOME（其下有 platform-tools\adb.exe），或把 adb 放进 PATH。"
+}
+$adb = $Adb
+# ★ TEMP 要挪出工作区（工作区继承的 ACL 会让 adb 的临时文件写不进去，2026-10-04 实测）；
+#   但 ⛔ 写死某个盘 ⇒ 用系统临时区下的固定子目录（跟着用户走，不跟着盘符走）。
+$env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp\palimpsest-adb'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
-$adb = 'D:\Android\Sdk\platform-tools\adb.exe'
 
 # 第 4 句是**真正的意外**（辞职 + 瞒着家里），它该在 ② 里成为标记。
 $话 = @(

@@ -30,6 +30,14 @@ class 图:
         self.件: Dict[str, Dict] = {}       # {id: {id, 成员[], 点亮[], 代表, 强度, 表示[]}}
         self.标记集: Dict[str, float] = {}  # {件id: confidence}
         self.待观察池: List[Dict] = []      # [{单元, 为什么进来, 批号}]
+        # ★★ 2026-10-17（作者定）：**块的「关系」是自由文本，⛔ 写死的槽**。
+        #    原来写的是 `视角 ∈ {类, 情绪}` —— 那等于"块只有两种，而我得事先知道有哪两种"，
+        #    太粗糙（作者原话："得能自己增加块才行"）。
+        #    ⇒ 现在**块的名字由模型给**（"猫的事" · "工作上的事" · "那种沉"），
+        #      同一个名字 ⇒ 同一个块（连通块）；一个件可以同时落在多个块里（多归属）。
+        #    ★ 而「同一类事」「同一种情绪」只是**两个常见的名字**，⛔ 硬性分类。
+        self.块: Dict[str, Dict] = {}       # {块id: {id, 关系, 成员[件id], 说法}}
+        self._下一个块 = 1
         self._下一个件 = 1
 
     # ------------------------------------------------------------------ 路径
@@ -42,7 +50,7 @@ class 图:
             os.makedirs(self.cache_dir, exist_ok=True)
             d = {"版本": self.版本, "cell": self.cell, "件": self.件,
                  "标记集": self.标记集, "待观察池": self.待观察池,
-                 "_下一个件": self._下一个件}
+                 "块": self.块, "_下一个块": self._下一个块, "_下一个件": self._下一个件}
             raw = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             with gzip.GzipFile(self._路径(), "wb", compresslevel=6, mtime=0) as fh:
                 fh.write(raw)
@@ -63,6 +71,8 @@ class 图:
             g.件 = dict(d.get("件") or {})
             g.标记集 = {k: float(v) for k, v in (d.get("标记集") or {}).items()}
             g.待观察池 = list(d.get("待观察池") or [])
+            g.块 = dict(d.get("块") or {})
+            g._下一个块 = int(d.get("_下一个块") or (len(g.块) + 1))
             g._下一个件 = int(d.get("_下一个件") or (len(g.件) + 1))
         except Exception:                        # noqa: BLE001
             pass          # 坏图当空图：它是缓存，能从底片重建
@@ -114,6 +124,49 @@ class 图:
 
     def 件向量表(self) -> Dict[str, List[float]]:
         return {i: list(v.get("表示") or []) for i, v in self.件.items() if v.get("表示")}
+
+    # ------------------------------------------------------------------ 块（多归属）
+    # ★★ 2026-10-17（作者定）：**块的名字由模型给**（自由文本），⛔ 写死的槽。
+    #    ⇒ 同一个名字 ⇒ 同一个块（连通块）；一个件可以同时落在多个块里（多归属）。
+    def 加块(self, 关系: str, 说法: str = "") -> str:
+        关系 = str(关系 or "").strip() or "未命名"
+        for i, it in self.块.items():                 # 同名 ⇒ 复用（⛔ 再建一个同名的）
+            if str(it.get("关系") or "") == 关系:
+                if 说法 and not it.get("说法"):
+                    it["说法"] = str(说法)
+                return i
+        块id = "块-%04d" % self._下一个块
+        self._下一个块 += 1
+        self.块[块id] = {"id": 块id, "关系": 关系, "成员": [], "说法": str(说法 or "")}
+        return 块id
+
+    def 件的块(self, 件id: str, 关系: Optional[str] = None) -> List[str]:
+        """这个件属于哪些块（给了关系名 ⇒ 只找那个名字的块）。"""
+        return [i for i, it in self.块.items()
+                if (关系 is None or str(it.get("关系") or "") == str(关系))
+                and 件id in (it.get("成员") or [])]
+
+    def 并块(self, 关系: str, 件ids: Sequence[str], 说法: str = "") -> str:
+        """把这几个件并进**同一个**块（按关系名）。
+
+        ★ 连通块语义：同一个名字只有一张网 ⇒ "A 和 B 因为 X 连着、B 和 C 也因为 X"
+          ⇒ A/B/C 必须同块（⛔ 留两个块各连各的）。
+        """
+        件ids = [str(x) for x in 件ids]
+        目标 = None
+        for i, it in self.块.items():                 # 先找同名的块
+            if str(it.get("关系") or "") == str(关系 or "").strip():
+                目标 = i
+                break
+        if 目标 is None:
+            目标 = self.加块(关系, 说法=说法)
+        elif 说法:
+            self.块[目标]["说法"] = str(说法)
+        for 件id in 件ids:
+            if 件id and 件id not in self.块[目标]["成员"]:
+                self.块[目标]["成员"].append(件id)
+        return 目标
+
 
     # ------------------------------------------------------------------ 标记集
     def 剪出(self, 件id: str, 为什么: str = "衰减到门槛以下") -> None:

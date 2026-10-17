@@ -17,8 +17,15 @@ pwsh -File build.ps1 :app:assembleDebug     # 需要代理（Chaquopy 装 numpy/
 pwsh -File build.ps1 :app:tasks             # 看有哪些 task
 ```
 
-脚本替你把三件容易踩的事做了：工具链显式给上（`D:\Android`）· Gradle 缓存与 TEMP 挪到
-`.android-build`（不落 C 盘、不撞沙箱）· pip 代理**每次现探**（`chaquo.com` 直连极慢）。
+脚本替你把四件容易踩的事做了：**工具链自动发现**（⛔ 写死在脚本里：`-Toolchain` 参数 →
+`$env:PALIMPSEST_TOOLCHAIN` → 从 `JAVA_HOME`/`ANDROID_HOME` 反推共同父目录）· Gradle 缓存与
+TEMP 挪到工具链目录下（不撞工作区继承的 ACL）· **构建用 Python 同样自动发现**后传给 gradle
+（`-PbuildPython`；`app/build.gradle.kts` 里⛔ 写路径）· pip 代理**每次现探**（`chaquo.com` 直连极慢）。
+
+```powershell
+# 工具链不在上面那些地方时，显式给：
+pwsh -File build.ps1 -Toolchain 'X:\Android' :app:assembleDebug
+```
 
 ## ★ Python 源码只有一份（目录 junction）
 

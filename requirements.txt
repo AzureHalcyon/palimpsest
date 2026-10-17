@@ -1,0 +1,13 @@
+# palimpsest 的运行时依赖（Python 3.13）
+#
+# ★ 只有这两个：`yaml`（配置）、`numpy`（嵌入与向量运算）。
+# ★ ★ 这里只写**名字**，⛔ 不写任何路径 —— 每台机器装到哪是它自己的事。
+#
+# 装法：  python -m pip install -r requirements.txt
+#
+# ⚠️ 装完如果 `import yaml` 还是失败，先看 `python -c "import sys; print(sys.path)"`
+#    里有没有真正的 site-packages —— Windows Store 版 Python 的 user-site 有**两个**
+#    （`AppData\Roaming\Python\...` 与 `AppData\Local\Packages\...\LocalCache\local-packages\...`），
+#    pip 有时只装进后者而 `site` 只报前者。⇒ 用 `PYTHONPATH` 指一下即可，⛔ 把路径写进代码。
+PyYAML>=6.0
+numpy>=2.0

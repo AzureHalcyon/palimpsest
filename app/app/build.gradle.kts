@@ -50,7 +50,20 @@ android {
 chaquopy {
     defaultConfig {
         version = "3.13"                          // 与构建机 Python 3.13.0 同主次版本
-        buildPython("E:/Python3.13/python.exe")   // 不依赖 PATH 上的 py 启动器
+        // ★ 2026-10-17：**不再写死这台机器的 Python 路径**（原来写的是 C:/Android/...，换电脑就崩）。
+        //   和下面的 pipProxy / pipCacheDir 同一个范式：由 `build.ps1` 用 `-P` 传进来。
+        //   取值顺序：`-PbuildPython` → 环境变量 `PALIMPSEST_BUILD_PYTHON` → **报错**（⛔ 猜一个）。
+        //   显式报错比默默用一个不存在的解释器好 —— 后者会在 chaquopy 配置阶段才炸，且报错看不懂。
+        val buildPythonPath = (project.findProperty("buildPython") as String?)?.takeIf { it.isNotBlank() }
+            ?: System.getenv("PALIMPSEST_BUILD_PYTHON")?.takeIf { it.isNotBlank() }
+            ?: error(
+                "没给构建用 Python。请用 `build.ps1` 构建（它会自动发现并传 -PbuildPython），" +
+                "或手工加 `-PbuildPython=<你的 python.exe 绝对路径>`。"
+            )
+        if (!java.io.File(buildPythonPath).isFile) {
+            error("buildPython 指向的文件不存在：$buildPythonPath")
+        }
+        buildPython(buildPythonPath)
         // ★ 下面两个由 `build.ps1` 用 `-P` 传进来。**刻意不做成写死的常量**：
         //   · pipProxy    —— 代理**端口每次现探**（见 ~/.dsh/工具详情.md 的 FlClash 三步探测：
         //                    注册表 → `netstat -ano` 找 LISTENING → `curl -x` 实测 200 才算数）。
