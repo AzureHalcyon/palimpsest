@@ -209,7 +209,7 @@ fun FlatShell(
     LaunchedEffect(vm.tab) {
         when (vm.tab) {
             Tab.Chat -> vm.openChatIfNeeded()
-            Tab.Pool -> vm.loadPool()
+            Tab.Pool -> vm.loadGraph()
             Tab.Settings -> vm.loadSettings()
             Tab.Activity -> vm.loadActivity()
         }

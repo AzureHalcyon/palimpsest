@@ -236,6 +236,10 @@ class ChatTurn(
      *  这是**给用户看的交互信息**，与"模型看到什么"无关。
      *  界面：每轮一个默认折叠的块，摆在回复**上方**（类似 CoT 的位置），不点开不显示。 */
     val push: List<String> = emptyList(),
+    /** ★★ 这一轮**注入的那段回忆**（2026-10-17 新线）：`{编写, 没有, 用了[], 版本, 耗时ms}`。
+     *  外层只显示 `编写` 那一段；点「怎么编的」才展开"用了哪几条 + 编写版本 + 耗时"。
+     *  ⛔ 与 `push` 不是一回事：`push` 是条目清单（旧线），`recall` 是编写出的一段（新线）。 */
+    val recall: org.json.JSONObject? = null,
 ) {
     /** 回复只可能有一条（一问一答）；`Asking` 时为空 = 还没答。 */
     var reply: String? = null
@@ -284,6 +288,8 @@ data class RestoredTurn(
     val usage: Map<String, Int> = emptyMap(),
     /** ★ 这一轮的 CoT（核心侧 `Session.ask` 记的，随 `pending.json` / 转写留档）。 */
     val reasoning: String = "",
+    /** ★★ 这一轮注入的**那段回忆**（新线）：`{编写, 没有, 用了[], 版本, 耗时ms}`。 */
+    val recall: org.json.JSONObject? = null,
 )
 
 sealed interface ChatPhase {
@@ -579,3 +585,30 @@ internal fun parseCreds(raw: String): CredsState {
         hasChatKey = o.bool("has_chat_key"),
     )
 }
+
+// ---------------------------------------------------------------- 件浏览（记忆页的新形状）
+
+/** 一个件 = 一组 cell；`强度` 来自标记集。★ 新线里"层级/四档"都不存在了。 */
+data class 件View(
+    val id: String,
+    val 强度: Double,
+    val 在标记集: Boolean,
+    val 成员: List<件成员View> = emptyList(),
+)
+
+data class 件成员View(val 场id: String, val 轮: Int, val 文本: String, val 点亮: Boolean)
+
+/** 记忆页的整份数据（`graph_view_json`）。 */
+data class GraphView(
+    val ok: Boolean,
+    val err: String = "",
+    val 版本: Int = 0,
+    val cell数: Int = 0,
+    val 件数: Int = 0,
+    val 标记集数: Int = 0,
+    val 待观察数: Int = 0,
+    val 件们: List<件View> = emptyList(),
+    val 待观察池: List<待观察View> = emptyList(),
+)
+
+data class 待观察View(val 单元: String, val 为什么: String)

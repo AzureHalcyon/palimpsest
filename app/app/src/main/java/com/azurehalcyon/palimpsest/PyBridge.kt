@@ -146,6 +146,13 @@ object PyBridge {
     fun chatOpen(dataDir: String): String = json1("chat_open", dataDir)
 
     /** 这一场**已经发生的轮次**（仅文本，不含注入内容）。 */
+    /** ★ 记忆页的新数据源：图里的**件**（旧的四档池子在新线里不存在了）。 */
+    fun graphViewJson(dataDir: String): String = json1("graph_view_json", dataDir)
+
+    /** 件上的删改：`剪出`（掉出标记集、件还在）/ `删`（从图里移除，记一笔）。 */
+    fun graphActionJson(dataDir: String, 件id: String, action: String): String =
+        json3("graph_action_json", dataDir, 件id, action)
+
     fun chatTurnsJson(dataDir: String, sid: String): String =
         json2("chat_turns_json", dataDir, sid)
 

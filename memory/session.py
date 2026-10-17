@@ -261,6 +261,14 @@ class Session:
                 # 这一轮花了多少 token（服务端给的），以及模型自己"再查一次"的痕迹。
                 # ★ 新路：这一轮**取用了哪些件**（旧路为空）+ 没取到的原因（一句话）
                 "取用": 取用, "回忆为什么": 回忆为什么,
+                # ★★ 界面要的两样：**编写出的那一段** + 「怎么编的」（用了哪几条 / 版本 / 耗时）。
+                #   ⛔ 只给用户看；`msgs` 里只有那段文字本身（不进读取路径）。
+                "回忆": ({"编写": 回忆.get("编写") or "",
+                          "没有": bool(回忆.get("没有")),
+                          "用了": [{"文本": x.get("文本"), "强度": x.get("强度")} for x in 件们],
+                          "版本": dict(回忆.get("版本") or {}),
+                          "耗时ms": int(回忆.get("耗时ms") or 0)}
+                         if 回忆 else None),
                 # ★ 两个都是**给用户看的**：与"模型看到什么"无关。
                 "usage": usage, "pulls": pulls,
                 # ★ **这一轮的 CoT**（推理原文，可能在多次往返里）。给界面"点开看推理"用，
@@ -308,6 +316,8 @@ class Session:
                 "cd_blocked": blocked,
                 "gate_blocked": int(res.gate_blocked),
                 "eff_n": res.eff_n, "pulls": pulls, "usage": usage,
+                # ★★ 「那段回忆」（编写原文 + 用了哪几条 + 版本/耗时）—— 界面点开要看的就是它
+                "回忆": 回忆 or None,
                 # ★ 它自己排的唤醒 / 调过的渠道也回给宿主（界面与转写要看"它做过什么"）
                 "wakeups": wake_calls,
                 "human_line": format_turn_line(self.cfg.reader.tau, res.eff_n, len(shown),

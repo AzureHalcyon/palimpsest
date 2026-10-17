@@ -47,7 +47,7 @@ class AppViewModel(private val app: Application) : ViewModel() {
         tab = t
         when (t) {
             Tab.Chat -> Unit
-            Tab.Pool -> if (pool == null && !poolLoading) loadPool()
+            Tab.Pool -> if (graph == null && !graphLoading) loadGraph()
         Tab.Activity -> if (activityLines.isEmpty() && !activityLoading) loadActivity()
             Tab.Settings -> if (knobs.isEmpty() && !settingsLoading) loadSettings()
         }
@@ -260,6 +260,8 @@ class AppViewModel(private val app: Application) : ViewModel() {
                 usage = parseIntMap(e.sub("usage")),
                 // ★ 这一轮的 CoT（2026-10-07 用户要求「聊天的 COT 也记下来」）
                 reasoning = e.str("reasoning"),
+                // ★★ 新线：这一轮注入的那段回忆（编写原文 + 用了哪几条 + 版本/耗时）
+                recall = e.sub("回忆"),
             )
         }
     }
@@ -726,6 +728,11 @@ class AppViewModel(private val app: Application) : ViewModel() {
     }
 
     // ==================================================================== 池子
+    /** ★★ 记忆页的数据（件浏览）—— 旧的四档池子在新线里不存在了。 */
+    var graph by mutableStateOf<GraphView?>(null)
+    var graphLoading by mutableStateOf(false)
+    var graphErr by mutableStateOf("")
+
     var pool by mutableStateOf<PoolView?>(null)
         private set
     var poolLoading by mutableStateOf(false)
@@ -782,6 +789,82 @@ class AppViewModel(private val app: Application) : ViewModel() {
             activityLines = lines
             if (lines.size == 1 && lines[0].startsWith("读不出")) activityErr = lines[0]
             activityLoading = false
+        }
+    }
+
+    /** ★ 记忆页长按某件 ⇒ 待处理（"剪出"还是"删掉"由弹窗问）。 */
+    var 件待处理 by mutableStateOf<String?>(null)
+
+    /** 件上的删改（`剪出` / `删`），做完重读图。 */
+    fun graphAction(件id: String, action: String) {
+        件待处理 = null
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching {
+                PyBridge.graphActionJson(dataDir.trimEnd('/'), 件id, action)
+            }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    graphErr = o?.optString("err").orEmpty().ifBlank { "没做成" }
+                } else {
+                    graph = null
+                    loadGraph()
+                }
+            }
+        }
+    }
+
+    /** 读**件浏览**（`graph_view_json`）。⛔ 只读，不改图。 */
+    fun loadGraph() {
+        if (graphLoading) return
+        graphLoading = true
+        graphErr = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.graphViewJson(dataDir.trimEnd('/')) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                graphLoading = false
+                if (r.isNullOrBlank()) { graphErr = "读不到图"; return@withContext }
+                val o = runCatching { JSONObject(r) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    graphErr = o?.optString("err").orEmpty().ifBlank { "图读不出来" }
+                    return@withContext
+                }
+                val 统计 = o.optJSONObject("统计")
+                val 件们 = java.util.ArrayList<件View>()
+                val arr = o.optJSONArray("件")
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    val 成员 = java.util.ArrayList<件成员View>()
+                    val ms = j.optJSONArray("成员")
+                    if (ms != null) for (k in 0 until ms.length()) {
+                        val m = ms.optJSONObject(k) ?: continue
+                        成员.add(
+                            件成员View(
+                                场id = m.optString("场id"), 轮 = m.optInt("轮"),
+                                文本 = m.optString("文本"), 点亮 = m.optBoolean("点亮"),
+                            )
+                        )
+                    }
+                    件们.add(
+                        件View(
+                            id = j.optString("件id"), 强度 = j.optDouble("强度", 0.0),
+                            在标记集 = j.optBoolean("在标记集", false), 成员 = 成员,
+                        )
+                    )
+                }
+                val 待 = java.util.ArrayList<待观察View>()
+                val ws = o.optJSONArray("待观察池")
+                if (ws != null) for (i in 0 until ws.length()) {
+                    val j = ws.optJSONObject(i) ?: continue
+                    待.add(待观察View(j.optString("单元"), j.optString("为什么进来")))
+                }
+                graph = GraphView(
+                    ok = true, 版本 = o.optInt("版本"),
+                    cell数 = 统计?.optInt("cell") ?: 0, 件数 = 统计?.optInt("件") ?: 0,
+                    标记集数 = 统计?.optInt("标记集") ?: 0, 待观察数 = 统计?.optInt("待观察池") ?: 0,
+                    件们 = 件们, 待观察池 = 待,
+                )
+            }
         }
     }
 

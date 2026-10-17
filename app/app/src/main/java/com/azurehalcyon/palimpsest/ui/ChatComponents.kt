@@ -48,6 +48,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -833,4 +834,100 @@ internal fun turnTopPadding(position: UserBubblePosition, isFirst: Boolean): Mod
         Modifier.padding(top = UserBubbleGap)
 
     else -> Modifier.padding(top = TurnSeparator)
+}
+
+/**
+ * ★★ 「这一轮注入的**那段回忆**」+「怎么编的 ›」（2026-10-17 新线）。
+ *
+ * 用户口径：「原来的条目变成一段」·「加一个能点进去的按钮，看到用哪些条目、怎么编写」。
+ * ⛔ 外层只显示**编写出来的那一段**；条目清单、编写版本、耗时都藏在「怎么编的」里 ——
+ *    正在打字的人看见的应该是"她想起了什么"，不是"检索命中了几条"。
+ */
+@Composable
+fun RecallBlock(
+    recall: org.json.JSONObject,
+    onExpand: () -> Unit = {},
+    onCollapse: () -> Unit = {},
+) {
+    val 编写 = recall.optString("编写").trim()
+    val 没有 = recall.optBoolean("没有", false)
+    var open by rememberSaveable { mutableStateOf(false) }
+    val 用了 = recall.optJSONArray("用了")
+    val n = 用了?.length() ?: 0
+    if (!没有 && 编写.isBlank() && n == 0) return
+
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        if (没有) {
+            Text(
+                "（这一轮她没想起什么）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else if (编写.isNotBlank()) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    编写,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                )
+            }
+        }
+        // ★ 「怎么编的 ›」—— 折叠行，点一下才展开
+        Row(
+            Modifier.fillMaxWidth().clickable {
+                open = !open
+                if (open) onExpand() else onCollapse()
+            }.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "怎么编的 · 用了 $n 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                if (open) " ˅" else " ›",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (open) {
+            if (用了 != null) {
+                for (i in 0 until 用了.length()) {
+                    val o = 用了.optJSONObject(i) ?: continue
+                    Row(Modifier.padding(start = 10.dp, top = 3.dp)) {
+                        Text(
+                            "%.2f".format(o.optDouble("强度", 0.0)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                        Text(
+                            o.optString("文本"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            val 版本 = recall.optJSONObject("版本")
+            val 耗时 = recall.optInt("耗时ms", 0)
+            Text(
+                buildString {
+                    append("编写：")
+                    append(版本?.optString("模型").orEmpty().ifBlank { "—" })
+                    val h = 版本?.optString("提示词哈希").orEmpty()
+                    if (h.isNotBlank()) append(" · 提示词 ").append(h.take(8))
+                    if (耗时 > 0) append(" · ").append(耗时).append(" ms")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 10.dp, top = 8.dp),
+            )
+        }
+    }
 }

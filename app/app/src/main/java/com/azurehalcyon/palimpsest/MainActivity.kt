@@ -24,7 +24,7 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import com.azurehalcyon.palimpsest.ui.ChatScreen
 import com.azurehalcyon.palimpsest.ui.FlatShell
 import com.azurehalcyon.palimpsest.ui.ActivityScreen
-import com.azurehalcyon.palimpsest.ui.PoolScreen
+import com.azurehalcyon.palimpsest.ui.GraphScreen
 import com.azurehalcyon.palimpsest.ui.SettingsScreen
 import com.azurehalcyon.palimpsest.ui.Tab
 import com.azurehalcyon.palimpsest.ui.AppViewModel
@@ -132,7 +132,7 @@ class MainActivity : ComponentActivity() {
                             Box(contentModifier) {
                                 when (vm.tab) {
                                     Tab.Chat -> ChatScreen(vm = vm)
-                                    Tab.Pool -> PoolScreen(vm = vm)
+                                    Tab.Pool -> GraphScreen(vm = vm)
                                     Tab.Activity -> ActivityScreen(vm = vm)
                                     Tab.Settings -> SettingsScreen(vm = vm)
                                 }

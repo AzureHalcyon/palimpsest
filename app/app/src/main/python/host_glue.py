@@ -675,6 +675,98 @@ def chat_open(data_dir: str) -> str:
                           ensure_ascii=False)
 
 
+
+def graph_view_json(data_dir: str) -> str:
+    """★ **件浏览**（记忆页的新数据源，2026-10-17）：图里的件 + 它们锚住的原文。
+
+    ⛔ 旧的四档池子（短期/中期/悬着/长期）在新线里**不存在**了：那边的 `pool_view_json` 读的
+      是已经不再更新的旧池子。这一屏改成显示**件**：每个件 = 一组 cell（场id + 轮 + 原文区间），
+      强度来自标记集；点开能看到它由哪几段原文组成。
+
+    ★ 只读：不建、不删、不改图。
+    """
+    import json
+    try:
+        from memory.film import 读底片, 切回原文
+        from memory.graph import 图
+
+        g = 图.载入(cache_dir(data_dir))
+        底片们 = {}
+
+        def 取原文(场, 轮, 哪句):
+            if 场 not in 底片们:
+                底片们[场] = 读底片(os.path.join(cache_dir(data_dir), "底片", 场 + ".json.gz")) or \
+                    读底片(os.path.join(cache_dir(data_dir), "底片", 场 + ".json"))
+            return 切回原文(底片们[场] or {}, int(轮), 哪句)
+
+        件们 = []
+        for 件id, it in g.件.items():
+            成员 = []
+            for cid in (it.get("成员") or []):
+                c = next((x for x in g.cell if x["id"] == cid), None)
+                if c is None:
+                    continue
+                文本 = (取原文(c["场id"], c["轮"], "刺激") + 取原文(c["场id"], c["轮"], "她说")).strip()
+                成员.append({"场id": c["场id"], "轮": int(c["轮"]), "文本": 文本,
+                             "点亮": cid in (it.get("点亮") or [])})
+            件们.append({"件id": 件id, "强度": float(g.标记集.get(件id, 0.0)),
+                         "在标记集": 件id in g.标记集, "成员": 成员,
+                         "代表": str(it.get("代表") or "")})
+        件们.sort(key=lambda x: (-x["强度"], x["件id"]))
+        return json.dumps({
+            "ok": True,
+            "版本": int(g.版本),
+            "统计": {"cell": len(g.cell), "件": len(g.件), "标记集": len(g.标记集),
+                     "待观察池": len(g.待观察池)},
+            "件": 件们,
+            "待观察池": [{"单元": str(x.get("单元") or ""), "为什么进来": str(x.get("为什么进来") or "")}
+                        for x in g.待观察池],
+        }, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+
+def graph_action_json(data_dir: str, 件id: str, action: str) -> str:
+    """★ **件上的"删改"**（2026-10-17 新线）。作者口径：「删改的功能可以留着的」——
+    留着，但对象从"池子条目"换成**件**。
+
+    · `剪出`：掉出标记集、进待观察池 —— **件还在图里**（下次被碰到还能被拉起）；
+    · `删`  ：从图里把件移除，并在 `图编辑.jsonl` 记一笔（⛔ 不悄悄删，事后要能查）。
+
+    ⛔ 底片/原文**一个字都不动**：原文是根，件只是"读法的产物"。
+    """
+    import json
+    from memory.graph import 图
+
+    try:
+        g = 图.载入(cache_dir(data_dir))
+        件id = str(件id or "")
+        if 件id not in g.件:
+            return json.dumps({"ok": False, "err": "没有这个件：%s" % 件id}, ensure_ascii=False)
+        if action == "剪出":
+            g.剪出(件id, "手动剪出（记忆页）")
+        elif action == "删":
+            g.件.pop(件id, None)
+            g.标记集.pop(件id, None)
+        else:
+            return json.dumps({"ok": False, "err": "不认识的动件：%s" % action}, ensure_ascii=False)
+        g.落盘()
+        try:
+            import time
+            with open(os.path.join(cache_dir(data_dir), "图编辑.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"件id": 件id, "动作": action, "时间": time.time()},
+                                    ensure_ascii=False) + "\n")
+        except Exception:                        # noqa: BLE001
+            pass
+        return json.dumps({"ok": True, "件id": 件id, "动作": action}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+
 def chat_turns_json(data_dir: str, sid: str) -> str:
     """把这一场**已经发生的轮次**原样交给界面（返回 JSON 字符串）。
 
@@ -698,6 +790,8 @@ def chat_turns_json(data_dir: str, sid: str) -> str:
             turns.append({
                 "user": str(t.get("user") or ""),
                 "ai": str(t.get("ai") or ""),
+                # ★★ 那一轮注入的**那段回忆**（重启之后「怎么编的」也点得开）
+                "回忆": t.get("回忆") or None,
                 # ★★ **这一轮的 CoT**（2026-10-07）：用户口径「聊天的 COT 呢？最好也记下来吧？」
                 #   —— 它原先只活在界面的内存里，App 一被回收就没了。
                 #   核心侧现在把它记进轮次（`Session.ask` 的 `item["reasoning"]`）⇒ 这里原样带上，
@@ -815,6 +909,9 @@ def chat_ask(data_dir: str, sid: str, text: str, sink=None) -> str:
         #   ⇒ 界面上 `push` 的条数可能少于 `k`，这个数就是原因。
         "cd_blocked": res.get("cd_blocked", 0),
         "pulls": res["pulls"], "human_line": res["human_line"],
+        # ★★ 「那段回忆」：编写出的那一段 + 用了哪几条 + 编写版本/耗时（界面默认不显示，点开才看）
+        "回忆": (res.get("回忆") or ((_sess().rec.get("turns") or [{}])[-1].get("回忆"))
+                  if _sess is not None else None),
         # 这一轮花了多少 token（服务端给的，可能缺）；界面把它显示在回复下面。
         "usage": res.get("usage") or {},
     }, ensure_ascii=False)
