@@ -1,0 +1,68 @@
+[versions]
+# 版本选取依据（2026-10-04，全部取自 Google Maven / Maven Central 实查）：
+#   · compileSdk 36 ⇒ AGP 需 ≥ 8.9.1（AGP 8.7.3 也能配过，但只到"能跑"，取 8.x 末代更稳）
+#   · Chaquopy 17.0.0 官方支持 AGP 7.3.x–9.2.x ⇒ 不上 AGP 9（也避开 Gradle 9）
+#   · AGP 8.13.x 要求 Gradle 8.13（本机另装 8.9 以外的一版，走 wrapper，镜像下载）
+#   · Kotlin / Compose BOM 取同期版本，避免"新库 + 旧编译器"的元数据不兼容
+agp = "8.13.2"
+kotlin = "2.2.21"
+composeBom = "2025.12.01"
+coreKtx = "1.17.0"
+workRuntime = "2.10.1"           # ★ 空闲窗口的调度（非精确周期任务）
+activityCompose = "1.12.1"
+lifecycleRuntimeKtx = "2.9.3"
+chaquopy = "17.0.0"
+# ⛔ Health Connect 客户端（healthConnect = 1.1.0）已于 2026-10-06 随"手环信源放弃"一起移除。
+#   若将来要复活：把下面两行加回来即可（版本与验证过程见
+#   `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/README.md`）。
+#   healthConnect = "1.1.0"
+#   androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "healthConnect" }
+
+# UI 设计系统（vendored：`ui-kit/` 的源码来自 MIT 的 niki914/zafiro，见 uikit/NOTICE.md）
+# 版本依据（2026-10-05 用 AAR 里的 aar-metadata.properties 实查，不是猜的）：
+#   · Capsule         minCompileSdk=1    minAGP=1.0.0  → JitPack，compileSdk 36 无碍
+#   · backdrop        minCompileSdk=36   minAGP=1.0.0  → **正好卡在我们的 36**，不能再降
+#   · material-kolor  minCompileSdk=1    minAGP=1.0.0
+#   · ★ material3 走 BOM（=1.4.0）。zafiro 原版钉的是 1.5.0-alpha22，但那一版的 AAR 要求
+#     minCompileSdk=37 + minAGP=9.1.0 —— 会逼着升 AGP/Gradle 并补装 android-37。
+#     实测 ui-kit 真正用到的 19 个 material3 符号在 1.4.0 里**全部存在**（见 README 的记录），
+#     所以降回 BOM 版本不影响它。
+#   · 另：backdrop 的 @kotlin.Metadata(mv=[2,3,0]) 与 Capsule 的 Java 21 字节码，
+#     已用 kotlin-compiler-embeddable 2.2.21 与 d8(36.1.0) 实测均能通过。
+capsule = "2.1.0"
+backdrop = "2.0.0-alpha03"
+materialKolor = "2.1.1"
+
+[libraries]
+androidx-work-runtime = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntime" }
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+# ⛔ Health Connect 客户端已于 2026-10-06 随"手环信源放弃"一起移除（app 里不再引用它）。
+#   复活方法见 `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/README.md`。
+# androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "healthConnect" }
+# 也走 BOM（=1.7.8）
+androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
+# ★ 这个**不能换成 core**：实测 ui-kit 用到了 Visibility/VisibilityOff（密钥框的眼睛按钮）
+#   与 Description/Folder/Image/PhotoCamera（附件选择预览），这些只在 extended 里。
+#   代价是图标表很大，正式包要靠 R8 裁掉（release 开 minify 时）。
+androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
+# 与 lifecycle-runtime-ktx 同一个 2.9.3，避免两处版本漂移
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycleRuntimeKtx" }
+
+# 玻璃观感三件套
+kyant-capsule = { module = "com.github.Kyant0:Capsule", version.ref = "capsule" }
+kyant-backdrop = { module = "io.github.kyant0:backdrop", version.ref = "backdrop" }
+material-kolor = { module = "com.materialkolor:material-kolor", version.ref = "materialKolor" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+chaquopy = { id = "com.chaquo.python", version.ref = "chaquopy" }

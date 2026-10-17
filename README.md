@@ -107,6 +107,19 @@
 方向的改变与被否掉的方案见 [`docs/决策记录.md`](docs/决策记录.md)；
 外部材料的调研与参考文献见 [`docs/研究/`](docs/研究/)。
 
+## 代码在哪
+
+| 目录 | 是什么 |
+|---|---|
+| [`memory/`](memory/README.md) | ★ **Python 记忆层**（唯一源码）：归档六步 · 读取 · 编写 · **数据落盘（底片 / 逐轮记录）** |
+| [`app/`](app/README.md) | **Android 宿主**（手机上那个壳）：Chaquopy 把 `memory/` 原样嵌进 APK；`app/app/src/main/python/memory` 是指向 `memory/` 的**目录 junction**（源码只有一份） |
+| [`tools/`](tools/README.md) | 设计仓库这一侧的离线工具（模型客户端 / 取材 / 文档自查） |
+| `docs/` | 设计与记录（见上一节） |
+
+> 这两个目录 2026-10-17 从旧仓 `companion-ai/*` 整体搬来并改名（`companion` → `memory`、
+> `com.azurehalcyon.companion` → `com.azurehalcyon.palimpsest`）。旧仓**冻结只读**、当对照基线；
+> 搬来之后的行为与旧版一致，随后逐块换成这里的设计。
+
 ## 怎么参与
 
 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。

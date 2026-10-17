@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ★ 必须声明，否则 Python 侧的 urllib 连不出去（这是最容易漏的一条） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 主动保活：有一场进行中 / 正在归档时，用前台服务把它钉住。
+         ★ 用 specialUse 而不是 dataSync：dataSync 在 Android 15+ 有每日 6 小时上限，
+           而"聊一场"可能断断续续很久。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- ⚠️ **声明但先不申请**：Android 12+ 上收蓝牙连断广播要不要这个**运行时**权限，
+         官方那页没直接回答（2026-10-05 查过，见 ~/.dsh 与本项目设计稿）。
+         ⇒ 蓝牙只当"可能多一次机会"，**不依赖它**：收不到也不影响周期任务。
+         真要申请，得在界面上走一次系统弹窗。 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- ★ 插件可见性（设计稿 §2.1）：Android 11+ 不声明就**发现不到插件**。
+         实测 `<provider android:authorities=…>` 那一种**没生效**，用**包名**这种最稳的。 -->
+    <queries>
+        <intent>
+            <action android:name="com.azurehalcyon.palimpsest.plugin.BIND" />
+        </intent>
+        <package android:name="com.azurehalcyon.palimpsest.probe" />
+    </queries>
+
+    <!-- ⛔ **2026-10-06：Health Connect 那一整套声明已按用户决定删除**（手环这条信源放弃）。
+         删掉的东西：6 条 `android.permission.health.*`（5 读 + 后台读）·
+         `com.mi.health.permission.DEFAULT_READ_DATA`（实验用）· rationale 页与它的 activity-alias ·
+         `<queries>` 里的 `com.google.android.apps.healthdata`。
+         **为什么放弃（两句话，证据在 `companion-data/`）**：
+           · 小米运动健康在**大陆地区不使用 Health Connect**（它自己的日志/APK：
+             `main land do not use health connect!!`）⇒ 健康库永远是空的，读者侧做得再全也没数据；
+           · 改查它自己的 provider：`.main` 要**签名/特权级**权限（够不着），
+             `.device` 只开了"手环名 + 电量"一格 ⇒ **拿不到健康数据**。
+         代码与"**如何复活**"留档：`companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/`。
+         ⇒ 想要第二个独立信源，走**不依赖厂商**的渠道（日历 / 通知 / 屏幕使用 / 位置…）。 -->
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="companion"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Companion">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 常驻前台服务：只在"真有事在做"的时候驻留（见 CompanionService 的注释）。
+             `specialUse` 必须带下面这条 property 说明用途，否则 Android 14+ 拒绝启动。 -->
+        <service
+            android:name=".CompanionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="keep an in-progress conversation and its archiving alive" />
+        </service>
+
+        <!-- ⛔ Health Connect 的「权限说明」页与 activity-alias 已于 2026-10-06 随那条信源一起删除
+             （手环放弃，详见文件顶部的说明与 `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/`）。 -->
+
+        <!-- ★★ **L0 的唤醒源**（2026-10-05）：全都是"静态注册也豁免"的**系统广播**。
+             ⛔ `ACTION_SCREEN_ON` / `ACTION_POWER_CONNECTED` **不在豁免清单里**
+                （查过官方列表），进程不在时收不到 ⇒ 那个设想已作废。
+             ★ 蓝牙那三条**待验**（可能要 BLUETOOTH_CONNECT 运行时权限）—— 只当"多一次机会"。 -->
+        <receiver
+            android:name=".L0Receiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.app.action.NEXT_ALARM_CLOCK_CHANGED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+                <!-- ★ 调试用：`adb shell am broadcast -a com.azurehalcyon.palimpsest.DEBUG_L0`
+                     踢一脚就跑一次 L0（release 里由代码判 `FLAG_DEBUGGABLE` 拒掉）。 -->
+                <action android:name="com.azurehalcyon.palimpsest.DEBUG_L0" />
+            </intent-filter>
+        </receiver>
+        <!-- ★ 通知上的两个动作（回话 / 我看到了）。`exported=false`：
+             它们的 PendingIntent 是**我们自己 App** 发的，不需要对外开放。 -->
+        <receiver
+            android:name=".NotifyReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.azurehalcyon.palimpsest.DELIVER_REPLY" />
+                <action android:name="com.azurehalcyon.palimpsest.DELIVER_SEEN" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

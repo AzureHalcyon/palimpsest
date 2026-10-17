@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  宿主客户端。两处 manifest 声明是**必须**的，缺一条就静默失败：
+
+  1. `<uses-permission>` —— 持那条签名级权限，否则绑插件时被 SecurityException 挡住；
+  2. ★ `<queries>` —— Android 11+（API 30）的**包可见性**：
+     不声明的话 `queryIntentServices()` **恒返回空**，表现是"插件明明装了却找不到"。
+     官方原文："To view other packages, declare your app's need for increased package
+     visibility using the `<queries>` element."（已实测核对，见设计稿 §2.4）
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="com.azurehalcyon.palimpsest.permission.PLUGIN" />
+
+    <queries>
+        <intent>
+            <action android:name="com.azurehalcyon.palimpsest.plugin.BIND" />
+        </intent>
+        <!-- ★★ 实测教训：`<provider android:authorities=...>` 这一种**没能让 provider 可见**
+             （`dumpsys package` 里 `queries via package name` / `via component` 都是空的，
+              调 `ContentResolver.call` 直接 `IllegalArgumentException: Unknown authority`）。
+             ⇒ 改用**最稳的那种：直接声明包名** —— 该包所有组件立刻可见。
+             ⚠️ 代价：宿主得知道插件的包名（插件多了要维护一份清单）。
+                这是**管线**，不是"渠道规则"，不违反"本体不硬编码行为规则"。
+
+             ⛔ 另外记一条：`<queries>` 只解决"可见性"。
+                跨 App **绑 Service** 在这台设备上本身就是被系统挡的（见 §传输实测），
+                所以传输用 provider，不用 Service。 -->
+        <package android:name="com.azurehalcyon.palimpsest.probe" />
+    </queries>
+
+    <application
+        android:label="插件体检器"
+        android:theme="@android:style/Theme.DeviceDefault.Light">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>
