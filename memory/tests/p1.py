@@ -30,7 +30,8 @@ from memory.engine import Engine                               # noqa: E402
 from memory.film import 切回原文, 底片, 指纹, 读底片            # noqa: E402
 from memory.llm import ScriptedLLM, 收_logprobs                # noqa: E402
 from memory.graph import 图                                    # noqa: E402
-from memory.prompts import SYS1, SYS2, TOOLS_MEMORY, FROZEN_CHANGELOG   # noqa: E402
+from memory.prompts import (SYS1, SYS2, SYS1_不推, TOOLS_MEMORY, FROZEN_CHANGELOG,  # noqa: E402
+                            load_session_prompts)
 from memory.session import Session                             # noqa: E402
 
 坏 = []
@@ -237,6 +238,25 @@ def t_session_and_rename():
     断言("★★ 增量拼回来 == 真实上下文（系统前缀 + 各次增量 = `msgs`）",
          d["系统前缀"] == [str(m.get("content") or "") for m in sess.msgs[:2]]
          and 拼回 == sess.msgs[2:-1], (len(拼回), len(sess.msgs[2:-1])))
+
+    # ★★ 2026-10-17（作者："没有推的时候，就应该鼓励查一下才对吧？"）
+    from memory.prompts import SYS1, SYS1_不推
+    开, _ = load_session_prompts(auto_push=True)
+    关, _ = load_session_prompts(auto_push=False)
+    断言("★★ 自动推送关着 ⇒ SYS1 后面**追加**「开口前先自己查一遍」",
+         SYS1 in 关 and SYS1_不推 in 关 and SYS1_不推 not in 开)
+    断言("★ 那一段写清了「不用查他刚发来的这一句」（否则每轮空查、白花钱）",
+         "刚发来的这一句" in SYS1_不推)
+    _旧 = bool(eng.cfg.session.auto_push)
+    eng.cfg.session.auto_push = False
+    _s_off = Session(eng, 9)
+    断言("★★ 真接上了：关掉推送那场的前缀里就有它（⛔ 只加在变量里）",
+         SYS1_不推 in str(_s_off.msgs[0].get("content") or ""),
+         str(_s_off.msgs[0].get("content") or "")[-80:])
+    断言("★★ 底片指纹按**实际前缀**算（⛔ 还是默认那两条的哈希）",
+         _s_off._底片().指纹 != sess._底片().指纹,
+         (_s_off._底片().指纹, sess._底片().指纹))
+    eng.cfg.session.auto_push = _旧
     断言("★ 参数里记了「这一轮是编写还是清单」",
          bool(d and (d["逐轮"][0].get("参数") or {}).get("注入")),
          d and d["逐轮"][0].get("参数"))

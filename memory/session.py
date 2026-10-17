@@ -41,7 +41,14 @@ class Session:
         self.cfg = engine.cfg
         # ★ 会话前缀走 `load_session_prompts()`：默认就是 `prompts.py` 里那两条**冻结**常量；
         #   用户在界面上改过，就用他改的那一份（整条替换，见 prompts.py 的说明）。
-        s1, s2 = load_session_prompts()
+        # ★★ 2026-10-17（作者："没有推的时候，就应该鼓励查一下才对吧？"）：
+        #   `auto_push=False` ⇒ SYS1 后面追加 `SYS1_不推`（"开口前先自己查一遍"）。
+        #   实现放在 `load_session_prompts` 里（连用户的覆盖一起处理），这里只传开关。
+        _自动推 = bool(getattr(getattr(engine.cfg, "session", None), "auto_push", True))
+        s1, s2 = load_session_prompts(auto_push=_自动推)
+        # ★ 记住**这一场真正生效的前缀**：底片指纹要按它算，⛔ 按模块默认那两条
+        #   （否则"用户改过提示词"和"关掉了自动推送"都会让指纹与实际不符）。
+        self._sys = (s1, s2)
         self.msgs: List[dict] = [{"role": "system", "content": s1},
                                  {"role": "system", "content": s2}]
         self.rec: Dict[str, object] = {
@@ -70,12 +77,13 @@ class Session:
         """这一场的底片（懒开；恢复在途那一场时 `film.py` 自己会把已有的接回来）。"""
         if self._film is None:
             from .film import 底片, 指纹
-            from .prompts import SYS1, SYS2
+            # ★ 指纹按**这一场真正生效的前缀**（`self._sys`）算 —— 用户覆盖过提示词、
+            #   或者关掉自动推送（SYS1 多一段），指纹都得跟着变，⛔ 拿模块默认那两条。
             # ★★ 2026-10-17（审查抓到）：这里没传 `读法版本` ⇒ 永远落默认 0，
             #   而 `版本对` 写的是 `knobs.版本["读法版本"]`（1）⇒ **同一份归档两处说法不一致**。
             from .knobs import 版本 as _K版本
             self._film = 底片(self.场id,
-                              指纹(self.cfg, (SYS1, SYS2),
+                              指纹(self.cfg, self._sys,
                                   读法版本=int(_K版本["读法版本"]["值"])),
                               self.engine.cache_dir,
                               系统前缀=[str(m.get("content") or "") for m in self.msgs[:2]])
