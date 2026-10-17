@@ -297,6 +297,49 @@ def _上一句(底片数据: Dict, 轮: int) -> str:
     return 切回原文(底片数据, 轮 - 1, "她说") if 轮 > 1 else ""
 
 
+class 底片表(Dict[str, Dict]):
+    """`{场id: 底片}`，**缺的那一场第一次被问到才从磁盘读**。
+
+    ★★★ 2026-10-17（"几十场还顶不顶得住"）：`archive_draft` 原来把 `<cache>/底片/` 下的
+      底片**全读**一遍，只因为 `_候选行()` 要拿"**候选件的代表 cell 所在那一场**"的原文。
+      而场次是线性涨的 ⇒ **每归档一次就 O(全部历史) 解压一遍**（9 场 2.5 MB；几十场十几 MB）。
+      ⇒ 改成**按需读一场**，并且读不到就记住（⛔ 同一个场反复试）。
+      ⚠️ 读不到**不许崩**：候选行会明说「原文取不到」（见 `_候选行`），⛔ 渲染成空标题。
+    """
+
+    def __init__(self, 目录: str, 初始: Optional[Dict[str, Dict]] = None):
+        super().__init__(初始 or {})
+        self.目录 = str(目录 or "")
+        self._读不到: set = set()
+
+    def 取(self, 场id) -> Optional[Dict]:
+        k = str(场id or "")
+        if not k:
+            return None
+        if dict.__contains__(self, k):
+            return dict.__getitem__(self, k)
+        if k in self._读不到:
+            return None
+        from .film import 读底片
+        d = None
+        for 名 in (k + ".json.gz", k + ".json"):
+            try:
+                d = 读底片(os.path.join(self.目录, 名))
+            except Exception:                        # noqa: BLE001
+                d = None
+            if d:
+                break
+        if not d:
+            self._读不到.add(k)
+            return None
+        self[k] = d
+        return d
+
+    def get(self, 场id, default=None):              # noqa: D401 —— 只覆盖 `get`
+        d = self.取(场id)
+        return default if d is None else d
+
+
 def _候选行(图: 图, 候选: List[tuple], 底片们: Dict[str, Dict]) -> str:
     行 = []
     for 件id, 分 in 候选:
@@ -325,7 +368,9 @@ def 草案(底片数据: Dict, 图: 图, llm, 场id: str,
          其他底片: Optional[Dict[str, Dict]] = None, 进度: Optional[Callable] = None,
          ) -> Dict:
     """只**算**，⛔ 不动图（用户按「完成」之前，池子一字不动）。"""
-    底片们 = dict(其他底片 or {})
+    # ⚠️ ⛔ 写成 `dict(其他底片 or {})`：那会把 `底片表` 的"按需读"**拷平成普通 dict**
+    #   （于是又变回全读 —— 而且看不出来）。它本来就是 dict 子类，直接用。
+    底片们 = 其他底片 if 其他底片 is not None else {}
     底片们[str(场id)] = 底片数据
 
     # ★★★ 2026-10-17（审查抓到）：`撤回` 那个字段**全仓库没有读者** ——

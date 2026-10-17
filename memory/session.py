@@ -470,23 +470,10 @@ class Session:
         #   （三场 19 处标记，一次"归进"都没有）。
         #   ⇒ 归档前把 `<cache>/底片/` 下的底片都读进来（图是缓存，底片才是存档）。
         #   ⚠️ 这一版是"全读"：场次多了会慢，将来可只读候选涉及的那几场。
-        其他底片: Dict[str, Dict] = {}
-        try:
-            import os as _os
-            from .film import 读底片 as _读底片
-            _目录 = _os.path.join(self.engine.cache_dir, "底片")
-            if _os.path.isdir(_目录):
-                for _名 in _os.listdir(_目录):
-                    # ★ 2026-10-17（审查抓到）：只认 `.json.gz` ⇒ **旧底片（`.json`）读不到**
-                    #   ⇒ 那些场次又变回"候选行是空的"（正是上面刚修的那个病）。
-                    #   `读底片` 本来就两种都认（`film.读底片` 的说明写着），这里别自己判格式。
-                    if not (_名.endswith(".json.gz") or _名.endswith(".json")):
-                        continue
-                    _d = _读底片(_os.path.join(_目录, _名))
-                    if _d and str(_d.get("场id") or ""):
-                        其他底片[str(_d["场id"])] = _d
-        except Exception:                      # noqa: BLE001
-            其他底片 = {}                      # 读不到就退化成"只有本场"（会退回新建，但⛔ 崩）
+        # ★★★ 2026-10-17（"几十场还顶不顶得住"）：这里原来是**全读** `<cache>/底片/` ——
+        #   只为拿"候选件代表 cell 所在那一场"的原文，而场次线性涨 ⇒ **每归档一次就
+        #   O(全部历史) 解压一遍**。改成按需读（`archive_step.底片表`：问哪场读哪场、读不到就记下）。
+        其他底片 = archive_step.底片表(os.path.join(self.engine.cache_dir, "底片"))
         草 = archive_step.草案(底片数据, g, self.engine.llm, f.场id,
                               嵌入=getattr(self.engine.embedder, "raw_embed", None),
                               其他底片=其他底片,
