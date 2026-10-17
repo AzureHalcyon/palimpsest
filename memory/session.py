@@ -129,21 +129,29 @@ class Session:
         #   ⛔ 三条退路都要有：编写挂了 ⇒ 退回条目清单（别把信息丢掉）；模型说"没有" ⇒ 不注入；
         #      开关关着 ⇒ 老样子（`session.render_recall = False`）。
         回忆: dict = {}
+        # ★★★ 2026-10-17（作者指出）：「一条都没注入」有**四种**完全不同的原因，
+        #   原来它们全都记成 `"空"` ⇒ 我上一份汇报就把「这一段两轮前给过、还在 `msgs` 里」
+        #   误读成「编写没写成」。⛔ 混成一个值就会造出**假故障**（也会盖住真故障）。
+        注入方式 = ("空（没取到件）" if not blocked else "空（都在冷却期）")
         if shown:
+            注入方式 = "空（编写说没有）"     # 只有走到「编写说没有」才留这个
             from . import writing          # ★ 懒导入（见文件头那条注释）
             if bool(self.cfg.session.render_recall):
                 回忆 = writing.编写(eng.llm, 件们, 场id=self.场id,
                                     轮=turn_no, 线索=user_text)
                 writing.记说(eng.cache_dir, self.场id, turn_no, user_text, 件们, 回忆)
                 if 回忆.get("编写"):
+                    注入方式 = "编写"
                     turn.append({"role": "system",
                                  "content": self.cfg.session.push_header + "\n" + 回忆["编写"]})
                 elif not 回忆.get("ok"):
                     # 编写失败（或正文被推理吃光）⇒ 退回条目清单：宁可给清单，也别白丢这一轮
+                    注入方式 = "清单"
                     turn.append({"role": "system",
                                  "content": push_block(self.cfg.session.push_header, shown)})
                 # 模型说"没有" ⇒ 这一轮不注入（由它自己判断"此刻想不起什么"）
             else:
+                注入方式 = "清单"
                 turn.append({"role": "system",
                              "content": push_block(self.cfg.session.push_header, shown)})
         pulls, wake_calls = [], []
@@ -291,7 +299,7 @@ class Session:
                          # 回忆那一份参数账（k / α / β / γ / T）原样抄进来 ⇒ 事后能重建
                          "回忆参数": dict(r.get("参数") or {}),  # ★ 同上：r 才是 recall
                          "cd_blocked": int(blocked),
-                         "注入": ("编写" if 回忆.get("编写") else ("清单" if shown else "空")),
+                         "注入": 注入方式,
                          "编写耗时ms": int(回忆.get("耗时ms") or 0),
                          "编写提示词哈希": str(回忆.get("提示词哈希") or "")},
                    成本=dict(usage))
@@ -560,10 +568,18 @@ class Session:
         #   让人再按一次（`完成` 自己有幂等凭据，重复按不会重复建件）。
         if res.get("err"):
             self.rec["archive_draft"] = d               # 原样留着，⛔ 不动
-            return {"ok": False, "land": "no", "err": str(res.get("err")),
+            return {"ok": False, "land": "failed", "err": str(res.get("err")),
                     "新线": {"件": [x.get("件") for x in (res.get("层1") or [])]},
                     "提示": "这一场没归档（图没写成）。草案还在，可以再按一次「完成」。"}
-        self.rec["archive_draft"] = {"land": "no"}      # ★ 借"池子不动，只收尾"那条路
+        # ★★★ 2026-10-17（作者指出："转写里写的是 land=no，屏幕上是 land=yes"）：
+        #   这里原来写 `{"land": "no"}` —— 那是**借旧线"幂等命中 ⇒ 只收尾"**那条路的判据，
+        #   于是转写里「已经落地」和「本来就没落地」是**同一个值**。⇒ 分不清。
+        #   现在四种状态各有一个值，转写一行就看得懂这一场到底走到哪一步：
+        #     `yes`   草案已出、**在等你按完成**（池子一字未动）
+        #     `done`  **已落地**（图写了、版本 +1），正在收尾
+        #     `failed` 图没写成（草案留着，可以再按一次）
+        #     `no`    旧版遗留（等价于"已落地/幂等"），只为读旧数据保留
+        self.rec["archive_draft"] = {"land": "done"}
         self.rec["新线"] = {"件": [x.get("件") for x in (res.get("层1") or [])],
                           "版本": res.get("版本"),
                           "剪出": (res.get("层2") or {}).get("剪出") or []}
@@ -585,7 +601,7 @@ def waiting_for_review(rec) -> bool:
     ★ 反面（**不算**审阅期，照旧补做）：
       · 没有 `ts_end`：聊到一半被杀 ⇒ 那是"接回来继续聊"；
       · 没有草案（`land` 不是 `"yes"`）：归档对话**跑到一半**被杀（`land="failed"`）、
-        或幂等命中（`land="no"`）⇒ 这两条老路本来就是为它们准备的。
+        或已经落地/幂等命中（`land="done"` / 旧数据的 `"no"`）⇒ 这两条老路本来就是为它们准备的。
     """
     if not isinstance(rec, dict) or not rec.get("ts_end"):
         return False
