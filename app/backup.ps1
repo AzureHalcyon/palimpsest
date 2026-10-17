@@ -16,7 +16,7 @@
 #   · 用 `run-as <包名> tar -cf - files/cache` 把数据打到 stdout，
 #     再由 `cmd /c "... > 本地.tar"` 落盘 —— **cmd 的重定向是字节安全的**。
 #     ⚠️ PowerShell 的 `>` 会把二进制当字符串处理、损坏文件；实测取回的
-#     pool.npz 与原始文件 SHA256 一致（49,593 字节）就是走 cmd 这条。
+#     `.npz`（当时还是池子文件）与原始文件 SHA256 一致（49,593 字节）就是走 cmd 这条。
 #   · 不用 `adb pull /data/local/tmp/xxx`：那样 tar 包归应用 uid 所有，
 #     adb shell 反而读不了它。
 #
@@ -82,13 +82,17 @@ Write-Host ""
 Write-Host ("内容（共 {0:N0} 字节）：" -f $total) -ForegroundColor Cyan
 foreach ($f in $files) { "{0,10:N0}  {1}" -f $f.Length, $f.FullName.Substring($dest.Length + 1) }
 
-# 底片单独报行数 —— 那是"永远不改写"的那一份，最该确认它好好的
-$tr = $files | Where-Object { $_.Name -like '*transcripts*.jsonl' }
-foreach ($f in $tr) {
-    $n = (Get-Content $f.FullName | Where-Object { $_.Trim() }).Count
-    Write-Host ("底片 {0}：{1} 行" -f $f.Name, $n) -ForegroundColor Green
+# 底片单独报数 —— 那是"永远不改写"的那一份，最该确认它好好的
+# ★ 2026-10-17 换成新线的形状：`底片/<场id>.json.gz`（整场存档）+ `逐轮记录/*.jsonl`（一轮一行）。
+#	⛔ 别再找 `*transcripts*.jsonl` —— 那是旧线的转写文件，新线已经不写它了
+#	  （找不着的表现是"明明收过场，报告却说还没收过"）。
+$底片 = $files | Where-Object { $_.FullName -match '\\底片\\' -and $_.Name -like '*.json.gz' }
+$逐轮 = $files | Where-Object { $_.FullName -match '\\逐轮记录\\' -and $_.Name -like '*.jsonl' }
+Write-Host ("底片：{0} 场 · 逐轮记录：{1} 个文件" -f $底片.Count, $逐轮.Count) -ForegroundColor Green
+foreach ($f in $底片) {
+    Write-Host ("  {0,10:N0}  {1}" -f $f.Length, $f.Name)
 }
-if (-not $tr) { Write-Host "（这次没有转写 —— 还没在手机上收过场）" -ForegroundColor Yellow }
+if (-not $底片) { Write-Host "（这次没有底片 —— 还没在手机上收过场）" -ForegroundColor Yellow }
 
 # 在途的场次也要报：它在就是"上一场没归档完"
 $pend = $files | Where-Object { $_.Name -eq 'pending.json' }

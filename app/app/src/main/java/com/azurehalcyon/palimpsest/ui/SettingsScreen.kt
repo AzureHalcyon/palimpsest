@@ -169,31 +169,23 @@ private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
                 ).filterNotNull(),
             ),
 
-            // ── 读取与记忆
+            // ── 读取与注入（新线的活开关：编写成一段 / 她再查几次 / 冷却）
             SettingsSectionSpec(
-                title = "读取与记忆",
+                title = "读取与注入",
                 layout = SettingsSectionLayout.GroupedCard,
                 rows = listOf(
-                    knobRow(vm, "reader.mass"),
-                    knobRow(vm, "reader.tau"),
-                    knobRow(vm, "reader.max_items"),
-                    knobRow(vm, "reader.min_items"),
-                    knobRow(vm, "time.tau_state"),
-                    knobRow(vm, "time.eps"),
-                    knobRow(vm, "time.promote_hits"),
+                    knobRow(vm, "session.render_recall"),
+                    knobRow(vm, "session.max_pull"),
+                    knobRow(vm, "cooldown.enabled"),
+                    knobRow(vm, "cooldown.turns"),
                 ).filterNotNull(),
             ),
 
             // ── 收场整理
-            SettingsSectionSpec(
-                title = "归档",
-                layout = SettingsSectionLayout.GroupedCard,
-                rows = listOf(
-                    knobRow(vm, "dream.temperature"),
-                    knobRow(vm, "dream.turns"),
-                    knobRow(vm, "dream.resume_attempts"),
-                ).filterNotNull(),
-            ),
+            // ⛔ 2026-10-17：「归档」这一节（`dream.temperature` / `dream.turns` /
+            //   `dream.resume_attempts`）删掉了 —— 那三个数控制的是**旧归档那条对话**
+            //   （`DreamConfig` + `dreaming.py`），而那条路已经删了。
+            //   新线的归档温度/回合在 `archive_step` 与 `writing` 里，按参数账走。
 
             // ── 提示词（可编辑；默认是 prompts.py 里的冻结稿，改过就存覆盖）
             SettingsSectionSpec(

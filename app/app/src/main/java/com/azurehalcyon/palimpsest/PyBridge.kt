@@ -90,18 +90,15 @@ object PyBridge {
     private fun glue(): PyObject = py.getModule("host_glue")
 
     // ------------------------------------------------------------------ 无参调用
-    /** 离线自检：证明 numpy + companion 包在手机上真跑得起来。 */
-    fun selfCheck(): String = guard { glue().callAttr("selfcheck").toString() }
+    /**
+     * 离线自检：证明 numpy + 业务包在手机上真跑得起来（图落盘 / 标记集加减 / 底片压缩）。
+     *
+     * ★ 要给 `dataDir`：自检在**应用私有目录**下开一个 `_自检/` 干活、跑完删掉
+     *   （`tempfile` 在 Chaquopy 里不一定可写，见 `host_glue.selfcheck` 的说明）。
+     */
+    fun selfCheck(dataDir: String): String = guard { glue().callAttr("selfcheck", dataDir).toString() }
 
     fun pythonInfo(): String = guard { glue().callAttr("python_info_str").toString() }
-
-    /**
-     * 跨平台数值一致性探针 —— **在手机上跑它才有意义**（桌面那份是 x86_64 的答案，
-     * 这里要的是 ARM + Chaquopy 那套 numpy/openblas 的答案）。
-     *
-     * ⚠️ 会阻塞约 1–3 秒 ⇒ **离开主线程调用**（走 [dispatcher]）。
-     */
-    fun precisionLines(): List<String> = call0("precision_lines")
 
     // ------------------------------------------------------------------ 一带参调用
     /**
@@ -115,11 +112,15 @@ object PyBridge {
         return r
     }
 
-    fun hasPool(dataDir: String): Boolean = bool1("has_pool", dataDir)
-
     fun credsOk(dataDir: String): Boolean = bool1("creds_ok", dataDir)
 
     fun stateLines(dataDir: String): List<String> = call1("state_summary_lines", dataDir)
+
+    /**
+     * **新线参数账**（`memory/knobs.py` 那 19 项）：逐项「值 + 依据等级 + 说明」。
+     * ⛔ 只读 —— 改一个要留「改前→改后→为什么」的记录，不是拖滑块。
+     */
+    fun ledgerLines(dataDir: String = ""): List<String> = call0("ledger_lines")
 
     /** 有没有"上一场还没归档完"（进程被杀 / 归档失败过）。 */
     fun pendingLines(dataDir: String): List<String> = call1("pending_lines", dataDir)
@@ -139,14 +140,10 @@ object PyBridge {
     // 下面这些都返回 **JSON 字符串**；解析交给界面侧（`ui/Json.kt`）。
     // 一律不抛：失败时 Python 侧回 `{"ok":false,...}`，读不懂也回一个合法的 JSON。
 
-    /** 两个池子**逐条**交给界面。失败时 `{"ok":false,"err":...}`。 */
-    fun poolViewJson(dataDir: String): String = json1("pool_view_json", dataDir)
-
     /** 开一场。**有在途的就接着那一场**。需要凭证。 */
     fun chatOpen(dataDir: String): String = json1("chat_open", dataDir)
 
-    /** 这一场**已经发生的轮次**（仅文本，不含注入内容）。 */
-    /** ★ 记忆页的新数据源：图里的**件**（旧的四档池子在新线里不存在了）。 */
+    /** ★ 记忆页的数据源：图里的**件**（旧的四档池子在新线里不存在了）。 */
     fun graphViewJson(dataDir: String): String = json1("graph_view_json", dataDir)
 
     /** 件上的删改：`剪出`（掉出标记集、件还在）/ `删`（从图里移除，记一笔）。 */
@@ -191,23 +188,6 @@ object PyBridge {
      */
     fun chatWithdraw(dataDir: String, sid: String): String =
         json2("chat_withdraw", dataDir, sid)
-
-    /**
-     * ★★ **用户手改一条展示出来的条目**（2026-10-06）。
-     *
-     * ⚠️ 它**要调一次编码器**（改完得重算那一行向量）⇒ 约 0.3–1 秒，必须走 [dispatcher]。
-     * 返回里带 `edited`（现在哪些条目是手改过的）⇒ 界面一次往返就能刷新记号。
-     */
-    fun chatEditEntry(dataDir: String, sid: String, oldText: String, newText: String): String =
-        json4("chat_edit_entry", dataDir, sid, oldText, newText)
-
-    /** ★ **用户手删一条**（底色 / 情境也允许）。不跑模型，走 [dispatcher] 是为了状态串行。 */
-    fun chatDeleteEntry(dataDir: String, sid: String, text: String): String =
-        json3("chat_delete_entry", dataDir, sid, text)
-
-    /** 问一次：**现在池子里哪些条目是手机上手改过的**（界面给它们打记号）。 */
-    fun chatEditsJson(dataDir: String, sid: String): String =
-        json2("chat_edits_json", dataDir, sid)
 
     /** 收场并归档。⚠️ **一次 25–60 秒** ⇒ 必须走 [dispatcher]。给了 [sink] 就流式。 */
     fun chatFinish(dataDir: String, sid: String, sink: StreamSink? = null): String =
@@ -257,15 +237,6 @@ object PyBridge {
     /** 存提示词覆盖；两段都传空 = 恢复默认（Python 侧会删掉覆盖文件）。 */
     fun promptSave(dataDir: String, sys1: String, sys2: String): String =
         json3("prompt_save", dataDir, sys1, sys2)
-
-    /**
-     * 按组**分页**取池子条目（懒加载）。
-     *
-     * ★ 池子只会越来越大：一次全取会被主线程解析成上千个对象。
-     * ★ 步长由 Python 侧定（返回 `next_offset`），界面照它走 —— 两边各写一个步长迟早对不上。
-     */
-    fun poolEntriesJson(dataDir: String, group: String, offset: Int): String =
-        json3("pool_entries_json", dataDir, group, offset.toString())
 
     // ------------------------------------------------------------------ 内部
     /** ★ **它最近做了什么**（活动记录；**只读、不推送**）。 */

@@ -72,14 +72,6 @@ class AppViewModel(private val app: Application) : ViewModel() {
         private set
 
     /**
-     * ★ **手机上手改过、且现在还在池子里的**条目文本（界面给它们打记号）。
-     * 来源是 `cache/pool_edits.jsonl`（那份账本是"手机上的临时改动"唯一凭据，
-     * 因为桌面下次推池子会把池子整个覆盖）。
-     */
-    var editedTexts by mutableStateOf<Set<String>>(emptySet())
-        private set
-
-    /**
      * 把**提示**收掉（界面上定时调）。
      *
      * ★ 提示与错误分开：`chatNotice` 是"事情办好了"（已归档、上次补完了），
@@ -113,60 +105,9 @@ class AppViewModel(private val app: Application) : ViewModel() {
      */
     private var withdrawing = false
 
-    /**
-     * 「手改池子里的一条」进行中的闸门（与 `withdrawing` 同样的道理：它是异步的，
-     * 而且要调一次编码器，约 0.3–1 秒 ⇒ 连点两下会改两次）。
-     */
-    private var editingEntry = false
-
-    /**
-     * ★★ **「长按一条 ⇒ 就地改 / 删」那个弹窗的状态**（2026-10-07 从 `ChatScreen` 提到这里）。
-     *
-     * 为什么要提上来：**记忆页**（`PoolScreen`）也要用同一个弹窗。原先这套状态是
-     * `ChatScreen` 的**局部** `remember` ⇒ 另一屏拿不到 —— 真机实测用户的原话是
-     * 「记忆页面长按删不了，**哪一个都是**」（那一屏连长按手势都没挂，见 `PoolScreen`）。
-     * ⛔ 只把**状态**提上来，裁决仍在 [editMemory] / [deleteMemory]（防两处逻辑漂移）。
-     */
-    var memoryTarget by mutableStateOf<String?>(null)
-        private set
-    var memoryDraft by mutableStateOf("")
-    var memoryDeleting by mutableStateOf(false)
-    var memoryIsLast by mutableStateOf(false)
-        private set
-
-    /** 这一次改 / 删是**从记忆页**发起的 ⇒ 提示落在 `poolNotice` / `poolErr`，并顺手重读池子。 */
-    private var memoryFromPool = false
-
-    /**
-     * 打开那个弹窗。[isLast] = 这一条属于**最近一轮**吗（只有那时才给「保存并重新生成」——
-     * 改的是池子，要进上下文得重跑那一轮）。
-     */
-    fun openMemoryEditor(text: String, isLast: Boolean, fromPool: Boolean = false) {
-        memoryTarget = text
-        memoryDraft = text
-        memoryDeleting = false
-        memoryIsLast = isLast
-        memoryFromPool = fromPool
-    }
-
-    fun closeMemoryEditor() {
-        memoryTarget = null
-        memoryDeleting = false
-    }
-
-    /**
-     * 提示 / 报错**按发起的那一屏**落。
-     *
-     * ⛔ 不能一律写 `chatNotice`：记忆页改完一条，人要是在对话页看到一句
-     *   "改好了"（而且那条提示还会按 5 秒自动消失的时机乱掉），那是两个屏串了味。
-     */
-    private fun say(fromPool: Boolean, msg: String, err: Boolean = false) {
-        if (err) {
-            if (fromPool) poolErr = msg else chatErr = msg
-        } else {
-            if (fromPool) poolNotice = msg else chatNotice = msg
-        }
-    }
+    // ⛔ 2026-10-17：`memoryTarget` / `memoryDraft` / `memoryDeleting` / `memoryIsLast` /
+    //   `openMemoryEditor` / `closeMemoryEditor` / `say` 这一整套（"长按条目就地改/删"的
+    //   弹窗状态）都删掉了 —— 弹窗本身（`MemoryEdit.kt`）也删了。
 
     private fun newTurn(userText: String, push: List<String> = emptyList()): ChatTurn =
         ChatTurn(id = nextTurnId++, userText = userText, push = push)
@@ -235,14 +176,6 @@ class AppViewModel(private val app: Application) : ViewModel() {
                 archiveDraft = rd
                 turns.add(newTurn("（归档）").also { it.reply = draftMarkdown(rd) })
                 chatNotice = "上一场归档你还没按「完成」—— 接着审，池子还没动。"
-            }
-            // ★ 问一次：**现在池子里哪些条目是手机上手改过的** —— 界面给它们打记号
-            //   （改过的要一眼看得出来，否则分不清原稿与自己临时改的；用户要求的 (d)）。
-            val editsRaw = withContext(PyBridge.dispatcher) {
-                PyBridge.chatEditsJson(dataDir, sid.orEmpty())
-            }
-            parseObj(editsRaw)?.let { eo ->
-                if (eo.bool("ok")) editedTexts = eo.strList("edited").toSet()
             }
             chatPhase = ChatPhase.Idle
         }
@@ -414,70 +347,9 @@ class AppViewModel(private val app: Application) : ViewModel() {
      *   反过来的话，核心侧一旦拒绝（比如这一轮是旧版本记的），界面就已经把它删掉了，
      *   而它其实还在模型上下文里 —— 那才是真的对不上。
      */
-    /**
-     * ★★ **手改池子里的一条**（2026-10-06，用户要求）。
-     *
-     * 用户的场景原话：「对对话时展示的那些搜到的和 push 的条目，也加上长按修改功能，
-     * 这样我使用时看到不合适的可以自己先手动修改，然后重新生成；之后再在电脑上整理更改。」
-     *
-     * ⚠️ 改的是**池子**，不是这一轮已经发出去的上下文 ⇒ **必须重新生成那一轮**，
-     *    新文本才会进模型。所以这里有个 [regen]：为真时顺手把最近一轮撤了重跑
-     *    （复用已有的撤回，不另造一条"重跑"路径）。
-     */
-    fun editMemory(oldText: String, newText: String, regen: Boolean) {
-        if (editingEntry || chatPhase != ChatPhase.Idle) return
-        val fromPool = memoryFromPool
-        if (newText.isBlank()) {
-            say(fromPool, "改成空的了 —— 要删就点「删除这条」", err = true)
-            return
-        }
-        if (newText == oldText) return
-        editingEntry = true
-        if (!fromPool) chatErr = ""
-        viewModelScope.launch {
-            val o = parseObj(withContext(PyBridge.dispatcher) {
-                // ⚠️ `sid ?: ""`：**没有在跑的那一场也要能改**（记忆页那条路不经过"开一场"）。
-                //    核心侧 `_engine_for_pool_edits` 见空 sid 就退到"用盘上那份"。
-                PyBridge.chatEditEntry(dataDir, sid.orEmpty(), oldText, newText)
-            })
-            editingEntry = false
-            if (o == null || !o.bool("ok")) {
-                say(fromPool, o?.str("err")?.ifBlank { null } ?: "没改成", err = true)
-                return@launch
-            }
-            editedTexts = o.strList("edited").toSet()
-            if (regen && turns.isNotEmpty()) {
-                withdraw(turns.lastIndex, regen = true)
-            } else if (fromPool) {
-                say(true, "改好了 —— 池子里这一条已经换了。")
-                refreshPoolAfterEdit()
-            } else {
-                // 改的是池子，这一轮的上下文里还是旧文本 ⇒ 如实告诉他怎么让它生效
-                say(false, "改好了 —— 要让它用上，长按那句话选「重新生成」。")
-            }
-        }
-    }
-
-    /** ★ **手删池子里的一条**（底色/情境也允许）。删掉就不会再被想起来。 */
-    fun deleteMemory(text: String) {
-        if (editingEntry || chatPhase != ChatPhase.Idle) return
-        val fromPool = memoryFromPool
-        editingEntry = true
-        if (!fromPool) chatErr = ""
-        viewModelScope.launch {
-            val o = parseObj(withContext(PyBridge.dispatcher) {
-                PyBridge.chatDeleteEntry(dataDir, sid.orEmpty(), text)
-            })
-            editingEntry = false
-            if (o == null || !o.bool("ok")) {
-                say(fromPool, o?.str("err")?.ifBlank { null } ?: "没删成", err = true)
-                return@launch
-            }
-            editedTexts = o.strList("edited").toSet()
-            say(fromPool, "删了 —— 它不会再被想起来。原稿还在电脑上，这次改动记在 pool_edits.jsonl 里。")
-            if (fromPool) refreshPoolAfterEdit()
-        }
-    }
+    // ⛔ 2026-10-17：`editMemory` / `deleteMemory`（手改、手删**池子里的条目**）删掉了 ——
+    //   它们调的 `chat_edit_entry` / `chat_delete_entry` 写的是已经不存在的池子。
+    //   改 / 删现在在**记忆页的件**上（长按件 → 剪出 / 删）。
 
     fun withdraw(index: Int, regen: Boolean) {
         if (chatPhase != ChatPhase.Idle || withdrawing) return
@@ -733,24 +605,6 @@ class AppViewModel(private val app: Application) : ViewModel() {
     var graphLoading by mutableStateOf(false)
     var graphErr by mutableStateOf("")
 
-    var pool by mutableStateOf<PoolView?>(null)
-        private set
-    var poolLoading by mutableStateOf(false)
-        private set
-    var poolErr by mutableStateOf("")
-        private set
-
-    /**
-     * ★ 记忆页上的**提示**（"改好了" / "删了"）—— 与 [poolErr] 分开：
-     *   提示看一眼就够、**自己走**；错误得摆着等人处理（和对话页那两件是一套道理）。
-     */
-    var poolNotice by mutableStateOf("")
-        private set
-
-    fun dismissPoolNotice() {
-        poolNotice = ""
-    }
-
     // ---- 活动记录（它最近做了什么）
     /**
      * ★ **可查，不可见**（设计稿 §5）：这本记录**不发通知**，只在用户自己翻的时候读。
@@ -868,72 +722,9 @@ class AppViewModel(private val app: Application) : ViewModel() {
         }
     }
 
-    fun loadPool(reloadGroups: Boolean = false) {
-        if (poolLoading) return
-        poolLoading = true
-        poolErr = ""
-        // ★ 手改/手删之后要**把已经展开过的那几组重新取一遍**：条目文本与条数都变了。
-        //   重读会把分页缓存清掉，不清的话那几组还摆着旧文本，而且"已经取过"的标志
-        //   会让它们不再去取（`loadGroup` 对 `loaded` 直接返回）⇒ 只能在这儿补。
-        val pages = if (reloadGroups) poolGroups.keys.toList() else emptyList()
-        viewModelScope.launch {
-            val raw = withContext(PyBridge.dispatcher) { PyBridge.poolViewJson(dataDir) }
-            // ★ 池子视图里带着**空间图的 331 个点** ⇒ 解析是一块实打实的同步开销
-            val v = parseOffMain { parsePoolView(raw) }
-            pool = v
-            if (!v.ok) poolErr = v.err.ifBlank { "读不出池子" }
-            // 分页缓存跟着一起作废：池子重读了，旧的分页就是旧数据
-            poolGroups = emptyMap()
-            poolLoading = false
-            pages.forEach { loadGroup(it) }
-        }
-    }
-
-    /**
-     * ★ 记忆页上**改 / 删了一条之后**重读池子。
-     *   池子视图本来就没取过（用户还没进过记忆页）就不用管 —— 一进那一屏就会重读。
-     */
-    private fun refreshPoolAfterEdit() {
-        if (pool == null && poolGroups.isEmpty()) return
-        loadPool(reloadGroups = true)
-    }
-
-    // ---- 池子分页（懒加载）
-    /**
-     * 每一组已取到哪儿了。键 = **代码里的层键**（底色 / 情境 / 记忆 / 临时）。
-     *
-     * ★ 为什么必须分页：池子只会越来越大，而条目要在**主线程**上解析成对象。
-     *   一次吐上千条，卡的是解析，不是别的。
-     */
-    var poolGroups by mutableStateOf<Map<String, PoolGroup>>(emptyMap())
-        private set
-
-    /** 展开某组时取第一页；点「加载更多」取下一页。重复调用会被吃掉。 */
-    fun loadGroup(layer: String, more: Boolean = false) {
-        val cur = poolGroups[layer]
-        if (cur?.loading == true) return
-        if (!more && cur?.loaded == true) return
-        val off = if (more) (cur?.nextOffset ?: 0) else 0
-        poolGroups = poolGroups + (layer to (cur ?: PoolGroup()).copy(loading = true))
-        viewModelScope.launch {
-            val raw = withContext(PyBridge.dispatcher) {
-                PyBridge.poolEntriesJson(dataDir, layer, off)
-            }
-            val p = parseOffMain { parsePoolPage(raw) }
-            val prev = poolGroups[layer] ?: PoolGroup()
-            poolGroups = poolGroups + (layer to if (!p.ok) {
-                prev.copy(loading = false, err = p.err)
-            } else {
-                PoolGroup(
-                    loading = false, loaded = true, err = "",
-                    total = p.total, nextOffset = p.nextOffset, hasMore = p.hasMore,
-                    // 「加载更多」是**追加**；重新展开则是替换
-                    long = if (more) prev.long + p.long else p.long,
-                    temp = if (more) prev.temp + p.temp else p.temp,
-                )
-            })
-        }
-    }
+    // ⛔ 2026-10-17：`loadPool` / `loadGroup` / `poolGroups` / `refreshPoolAfterEdit`
+    //   整套**池子浏览**都删掉了 —— 它读的 `pool_view_json` / `pool_entries_json` 已经没了。
+    //   记忆页现在读的是 `loadGraph()`（图里的件）。
 
     // ==================================================================== 设置
     var knobs by mutableStateOf<List<Knob>>(emptyList())
@@ -1152,16 +943,17 @@ class AppViewModel(private val app: Application) : ViewModel() {
         diagRunning = true
         viewModelScope.launch {
             val lines: List<String> = when (kind) {
-                // ★ 自检/探针要跑 numpy —— 一样不许压主线程。
+                // ★ 自检要跑 numpy —— 一样不许压主线程。
                 Diag.SelfCheck -> {
-                    val a = withContext(PyBridge.dispatcher) { PyBridge.selfCheck() }
+                    // ⚠️ 先 `setPaths`：自检要在**应用私有目录**下干活，而 Python 侧得先知道那个目录。
                     val cred = withContext(PyBridge.dispatcher) { PyBridge.setPaths(dataDir) }
+                    val a = withContext(PyBridge.dispatcher) { PyBridge.selfCheck(dataDir) }
                     val info = withContext(PyBridge.dispatcher) { PyBridge.pythonInfo() }
                     listOf("解释器　$info", "数据目录　$dataDir", "凭证路径　$cred", "", a)
                 }
 
-                Diag.Precision -> withContext(PyBridge.dispatcher) { PyBridge.precisionLines() }
-                Diag.PoolState -> withContext(PyBridge.dispatcher) { PyBridge.stateLines(dataDir) }
+                Diag.Memory -> withContext(PyBridge.dispatcher) { PyBridge.stateLines(dataDir) }
+                Diag.Ledger -> withContext(PyBridge.dispatcher) { PyBridge.ledgerLines(dataDir) }
                 Diag.Pending -> withContext(PyBridge.dispatcher) { PyBridge.pendingLines(dataDir) }
             }
             diagResult = DiagResult(kind.label, lines)
@@ -1192,10 +984,9 @@ class AppViewModel(private val app: Application) : ViewModel() {
 
 enum class Tab(val routeKey: String, val title: String) {
     Chat("chat", "对话"),
-    // ★ 显示名与代码里的层名（`LAYERS` = 底色/情境/记忆/临时）是两件事：
-    //   界面用正式的词（自我/情境/事实/短期记忆），代码键是**数据契约**的一部分。
-    //   ⚠️ 2026-10-05 键整体改过一次（`情境负面`→`情境`）—— 有意的、带过渡别名的一次性改动，
-    //   ⛔ 不是"以后可以随手改键"的许可：键一改，已有的池子就对不上。
+    // ★ 这一屏现在显示的是**图里的件**（2026-10-17）。键仍是 `pool`：
+    //   它是深链里的老键（`Tab` 的 routeKey 已经进了别人的书签/脚本），
+    //   为一个内部改名去动它没有好处，而改错了会让 `am start` 那类入口静默失效。
     Pool("pool", "记忆"),
     Settings("settings", "设置"),
     // ★ **它最近做了什么**（活动记录）。★ 用户定："另开一页"、**只可查不推送**。
@@ -1204,8 +995,9 @@ enum class Tab(val routeKey: String, val title: String) {
 
 enum class Diag(val label: String) {
     SelfCheck("环境自检"),
-    Precision("跨平台探针"),
-    PoolState("池子状态"),
+    Memory("记忆现状"),
+    // ★ 新线参数账（只读）：19 项，逐项带依据等级
+    Ledger("参数账"),
     Pending("在途场次"),
 }
 

@@ -443,8 +443,6 @@ internal fun ToolCallRow(
     got: List<String>,
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
-    edited: Set<String> = emptySet(),
-    onItemLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -483,67 +481,30 @@ internal fun ToolCallRow(
                 modifier = Modifier.padding(start = 22.dp, top = 2.dp, bottom = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                got.forEach { t ->
-                    MemoryItemLine(text = t, edited = t in edited, onLongPress = onItemLongPress)
-                }
+                got.forEach { t -> MemoryItemLine(text = t) }
             }
         }
     }
 }
 
 /**
- * ★★ **展示一条"被想起的条目"** —— `push` 的与「再查一次」带回的都用它（2026-10-06）。
+ * ★ **展示一条原文/一件的文本** —— `push` 的与「再查一次」带回的都用它。
  *
- * 为什么单独抽出来：这两处的条目现在都要能**长按就地改**。
- * 用户的场景原话：「对对话时展示的那些搜到的和 push 的条目，也加上长按修改功能，
- * 这样我使用时看到不合适的可以自己先手动修改，然后重新生成；之后再在电脑上整理更改。」
- *
- * ★ `edited` = **手机上手改过**（来源 `cache/pool_edits.jsonl`）⇒ 带一个「改」记号。
- *   没有这个记号就分不清"原稿"和"我临时改的"。
- * ⚠️ 长按用 `detectTapGestures`：与气泡那处长按**同一套写法**（不吃滚动、不带涟漪）。
- * ⛔ `onLongPress == null` 时一个手势都不挂 —— 不给"按了没反应"的假入口。
- * ★ 2026-10-07 加了两个字号参数：**记忆页**（`PoolScreen`）也要用它 ——
- *   那一屏的条目是 `bodyMedium`，对话里那几行是 `bodySmall`。
- *   ⛔ 手势与「改」记号只有这一份实现，别在别处再抄一套（抄就会漂）。
+ * ★★ 2026-10-17：**收成只读一行**。原来这里有"长按就地改 / 删 + 一个「改」记号"，
+ *   而它背后那一整条路（`chat_edit_entry` → `pool_edits.jsonl` → 旧池子）已经删掉了 ——
+ *   手势挂着却改不动，是最糟的那种"按了没反应"。改 / 删现在在**记忆页的件**上。
  */
 @Composable
 internal fun MemoryItemLine(
     text: String,
-    edited: Boolean = false,
-    onLongPress: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
-    textStyle: TextStyle = MaterialTheme.typography.bodySmall,
-    textColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(
-                if (onLongPress != null) {
-                    Modifier.pointerInput(text) {
-                        detectTapGestures(onLongPress = { onLongPress(text) })
-                    }
-                } else {
-                    Modifier
-                },
-            ),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Text(
-            text = text,
-            style = textStyle,
-            color = textColor,
-            modifier = Modifier.weight(1f),
-        )
-        if (edited) {
-            Text(
-                text = "改",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.fillMaxWidth(),
+    )
 }
 
 /**

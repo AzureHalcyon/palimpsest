@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""搬迁冒烟：**只证明"搬过来还是同一台机器"，不证明效果好不好。**
-
-为什么单开这一份（⛔ 不搬旧仓那 539 条断言）：`分支声明 §4` 说过 ——
-旧断言里相当一部分守的是**旧形状**（比如逐字钉住 `DREAM_SYS` 里"条目要独立包含完整意思"那句），
-而新方向（锚回原文）正要推翻它。把旧断言混进来，最后会变成"为了让断言过而改设计"。
-⇒ 新仓要自己的自检；这一份是**搬迁期的最低保证**，`P2` 换上 ①–⑤ 之后它会自然变薄。
+"""搬迁冒烟（P0 的守门人）：搬过来之后**还是同一台机器**、而且新线能跑起来。
 
 跑：`python memory/tests/smoke.py`
+
+★ 2026-10-17 改：旧池子（`pool`/`reader`/`dreaming`/`merging`）已经删掉，
+  这一份不再验"旧归档把事实写进池子"，改成验**新线**：一轮聊得通、底片落盘、
+  归档出草案、按「完成」写图。细节在 `p1/p2/p3`，这里只守最基本的一条路。
 """
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))   # 让 `import memory` 成立
@@ -26,67 +26,54 @@ def 断言(名, 条件, 实际=None):
 
 
 def main():
-    print("[1] 包与模块")
-    import memory
-    断言("`import memory` 成立（包名已从 companion 改掉）", hasattr(memory, "__file__"), memory)
-    from memory import (activity, budgets, channels, config, deliver, embedder, engine,  # noqa: F401
-                        layout, llm, pool, prompts, reader, session, settings, transcript)
-
-    print("[2] 冻结提示词")
-    from memory.prompts import FROZEN_CHANGELOG, SYS1, SYS2
-    断言("SYS1 / SYS2 都在且非空", bool(SYS1.strip()) and bool(SYS2.strip()))
-    断言("冻结记录还在（改提示词必须追加一条）", isinstance(FROZEN_CHANGELOG, list)
-         and len(FROZEN_CHANGELOG) >= 1, FROZEN_CHANGELOG)
-
-    print("[3] 一次离线对话（脚本替身，无网络）")
-    import tempfile
+    from memory import archive_step, film, graph, markset, recall, writing   # noqa: F401
     from memory.config import Config
     from memory.embedder import HashingEmbedder
     from memory.engine import Engine
     from memory.llm import ScriptedLLM
-    from memory.pool import TempPool
+    from memory.session import Session
 
+    print("[1] 模块在不在")
+    断言("★ 新线的模块都能 import",
+         all(x is not None for x in (film, graph, markset, recall, writing, archive_step)))
+    断言("★ 旧线的模块一个都不在了（reader / dreaming / merging / pool / 空间图 / 探针）",
+         not any(os.path.exists(os.path.join(os.path.dirname(HERE), f))
+                 for f in ("reader.py", "dreaming.py", "merging.py", "pool.py",
+                           "layout.py", "axes.py", "precision.py")))
+    # ★★ 2026-10-17：配置也剪了 —— 只剩还在起作用的四节。
+    #   ⛔ 这条钉的是"删干净"：留着 `reader` / `dream` / `merge` / `salience`，
+    #   会让 `Config` 看起来还有那些功能，别人照着它写代码就会写进空气里。
+    断言("★★ `Config` 只剩四节（embed / chat / session / cooldown）",
+         sorted(Config().__dataclass_fields__) == ["chat", "cooldown", "embed", "session"],
+         sorted(Config().__dataclass_fields__))
+
+    print("[2] 一台机器 + 一场对话")
     tmp = tempfile.mkdtemp(prefix="palm-smoke-")
     cfg = Config()
     emb = HashingEmbedder(dim=64)
-    pool = Engine.build_pool(cfg, emb, ["底色一条"], ["情境一条"], ["他养了只猫"])
-    llm = ScriptedLLM([{"role": "assistant", "content": "嗯，我在。"}])
-    eng = Engine(cfg, emb, llm, pool, TempPool(cfg.time), tmp)
+    llm = ScriptedLLM([{"role": "assistant", "content": "嗯，我在。"}] * 8,
+                      fallback={"role": "assistant", "content": "嗯"})
+    # ★ 引擎**不再需要池子**：空目录就能开场（这正是新引擎与旧引擎最大的不同）。
+    eng = Engine(cfg, emb, llm, tmp)
     eng.advance_to_wall(ts=1_000_000.0)
     eng.save()
-    sess = session.Session(eng, 1)
+    sess = Session(eng, 1)
     out = sess.ask("在吗")
-    断言("一轮对话跑通（有回复）", bool(out.get("reply")), out.get("reply"))
-    断言("这一轮记进了 `rec['turns']`", len(sess.rec.get("turns") or []) == 1)
+    断言("★ 一轮聊得通", bool(out.get("reply")), out.get("reply"))
+    断言("★ 底片落盘了（`.json.gz`）",
+         os.path.isdir(os.path.join(tmp, "底片"))
+         and len(os.listdir(os.path.join(tmp, "底片"))) == 1,
+         os.listdir(os.path.join(tmp, "底片")) if os.path.isdir(os.path.join(tmp, "底片")) else None)
 
-    print("[4] 一次离线归档（脚本替身）")
-    ar = ('{"facts":[{"text":"他搬到城东了","changes":false,"src":[1]}],'
-          '"kept":[],"again":[],"done":[],"promote":[],"note":"ok"}')
-    eng.llm = ScriptedLLM(fallback={"role": "assistant", "content": ar})
-    rec = {"sid": 2, "turns": [{"user": "我搬城东了", "ai": "嗯"}], "msgs": []}
-    # ⚠️ rchive() 返回的是**收场后的 rec**（不是 draft/land 那两个的返回）；
-    #    要看三态得单独调 rchive_draft。这条搬迁冒烟只求"落地没落地"。
-    rec2 = eng.archive(rec)
-    断言("归档落定了：新事实 1 条且进了长期池",
-         int((rec2 or {}).get("facts_added") or 0) == 1
-         and any("城东" in t for t in eng.long_pool.texts),
-         ((rec2 or {}).get("facts_added"), eng.long_pool.texts[-2:]))
-    断言("落地之后场次 +1、pending 清掉",
-         eng.sessions_done == 1 and not eng.pending.exists(), eng.sessions_done)
-
-    print("[5] 宿主胶水能编译（语法级）")
-    glue = os.path.join(HERE, "..", "..", "app", "app", "src", "main", "python", "host_glue.py")
-    glue = os.path.normpath(glue)
-    if os.path.exists(glue):
-        import py_compile
-        try:
-            py_compile.compile(glue, doraise=True, cfile=os.path.join(tmp, "glue.pyc"))
-            断言("host_glue.py 语法过、且已改成 `import memory`",
-                 "from memory" in open(glue, encoding="utf-8").read())
-        except Exception as e:                                # noqa: BLE001
-            断言("host_glue.py 能编译", False, e)
-    else:
-        print("  (跳过：找不到 %s)" % glue)
+    print("[3] 归档：草案 → 完成 → 图落盘")
+    草 = sess.archive_draft()
+    断言("★ 草案是新形状（`草` + 摘要）",
+         草.get("land") == "yes" and isinstance(草.get("草"), dict)
+         and bool(str(草["草"].get("摘要") or "")), 草.get("land"))
+    sess.archive_commit()
+    断言("★ 图落盘了（`图.json.gz`）", os.path.exists(os.path.join(tmp, "图.json.gz")))
+    断言("★ 场次 +1、pending 清掉", eng.sessions_done == 1 and not eng.pending.exists(),
+         (eng.sessions_done, eng.pending.exists()))
 
     print()
     if 坏:

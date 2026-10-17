@@ -16,26 +16,59 @@ from typing import Dict, List
 
 
 # --------------------------------------------------------------------------- 自检
-def selfcheck() -> str:
-    """把 numpy + 业务包的核心检索在手机上跑一遍。**离线、不需要凭证。**"""
-    import numpy
-    import memory
-    from memory.embedder import HashingEmbedder
-    from memory.pool import LongPool, TempPool
-    from memory.reader import Reader
-    from memory.settings import load_config
+def selfcheck(data_dir: str = "") -> str:
+    """把 numpy + 新线那几件**机械活**在手机上跑一遍：图落盘 / 取回 · 强化 · 衰减 · 底片压缩。
 
-    # ★ 走 load_config（= 默认值 + 用户覆盖），不要直接 `Config()` ——
-    #   否则"他在设置里改的温度"在这个路径上会被无声忽略。
-    cfg = load_config()
-    emb = HashingEmbedder()
-    texts = ["他喜欢在深夜写代码", "他上周搬了家", "他不爱解释自己"]
-    pool = LongPool(texts=list(texts), V=emb.raw_embed(texts), n_baseline=len(texts))
-    pool.prep()
-    res = Reader(cfg.reader, emb, cfg.salience).retrieve_range(
-        "最近怎么样", 0.0, pool, TempPool(cfg.time), None)
-    return ("companion %s · numpy %s · 池子 %d 条 · 检索到 %d 条（截断前 %d）"
-            % (companion.__version__, numpy.__version__, len(texts), res.k, res.k_raw))
+    **离线、不要凭证、不碰用户数据**（在应用私有目录下开一个 `_自检/`，跑完就删）。
+
+    ★ 2026-10-17 重写：原来这一条检的是"池子检索"（`LongPool` + `Reader`）——
+      那两样都不存在了，而且它引用的 `companion.__version__` 早就改名叫 `memory` ⇒
+      这个自检本身是**坏的**（点了只会抛 NameError）。现在检的是新线真用得上的东西：
+      图能不能落盘再读回来、标记集的加减是不是按旋钮走、底片压缩是不是真的压得动。
+    ★ 为什么不用 `tempfile`：Chaquopy 里 `tempfile.gettempdir()` 不一定可写 ⇒
+      "自检自己先崩"比检不出问题更糟。这里用**应用自己的私有目录**，`finally` 里删干净。
+    """
+    import shutil
+
+    import numpy
+
+    import memory
+    from memory import markset
+    from memory.film import 底片
+    from memory.graph import 图
+
+    base = cache_dir(data_dir) if data_dir else os.path.join(os.path.expanduser("~"),
+                                                             ".palimpsest-selftest")
+    tmp = os.path.join(base, "_自检")
+    shutil.rmtree(tmp, ignore_errors=True)           # 上次跑了一半留下的
+    os.makedirs(tmp, exist_ok=True)
+    图行 = ""
+    try:
+        g = 图(tmp)
+        c1 = g.加cell("自检-1", 1, 0, 6)
+        c2 = g.加cell("自检-1", 2, 7, 13)
+        猫 = g.新件([c1["id"]], [1.0, 0.0, 0.0], 代表="他养了只猫")
+        g.新件([c2["id"]], [0.0, 1.0, 0.0], 代表="他上周搬了家")
+        g.归进(猫, c2["id"])                    # 第 2 轮又提到猫 ⇒ 归进同一个件
+        g.标记集[猫] = 0.5
+        g.落盘()
+        g2 = 图.载入(tmp)
+        # ④ 层1：归进 ⇒ +增量（上限 1.0）；④ 层2：过窗口 ⇒ −衰减率，到地板不再掉
+        原先 = float(g2.标记集.get(猫, 0.0))
+        markset.强化(g2.标记集, 归进的件=猫)
+        强化后 = float(g2.标记集.get(猫, 0.0))
+        新, 剪出 = markset.衰减(g2.标记集, 窗口数=3)
+        衰减后 = float(新.get(猫, 0.0))
+        f = 底片("自检-1", {"模型": "selfcheck", "temperature": 0.0}, tmp)
+        f.加轮(1, "他说他搬家了", "嗯")
+        f.落盘()
+        压缩后 = os.path.getsize(os.path.join(tmp, "底片", "自检-1.json.gz"))
+        图行 = ("图 %d 个件 / %d 段 · 强化 %.2f→%.2f · 衰减后 %.2f · 底片 %d B"
+                % (len(g2.件), len(g2.cell), 原先, 强化后, 衰减后, 压缩后))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)      # ⛔ 别在用户的数据目录里留垃圾
+
+    return "memory %s · numpy %s · %s" % (memory.__version__, numpy.__version__, 图行)
 
 
 def python_info() -> Dict[str, str]:
@@ -74,26 +107,6 @@ def cache_dir(data_dir: str) -> str:
     return d
 
 
-def has_pool(data_dir: str) -> bool:
-    d = cache_dir(data_dir)
-    return all(os.path.exists(os.path.join(d, f))
-               for f in ("pool.npz", "pool_texts.jsonl"))
-
-
-# --------------------------------------------------------------------------- 精度探针
-def precision_lines() -> List[str]:
-    """跨平台数值一致性探针 —— **在手机上跑它，与桌面参考值比对**。
-
-    ★ 它调的是 `companion/precision.py` 里那份实现（手机装的就是那个包），
-      不是重写的一份 ⇒ "手机与桌面是不是同一套结果"这句话是可验证的。
-    """
-    try:
-        from memory.precision import report, verdict
-        _ok, lines = verdict(report())
-        return lines
-    except Exception as exc:  # noqa: BLE001
-        return ["探针跑不起来：%s: %s" % (type(exc).__name__, exc)]
-
 
 # --------------------------------------------------------------------------- 在途那一场
 def pending_path(data_dir: str) -> str:
@@ -122,7 +135,7 @@ def pending_lines(data_dir: str) -> List[str]:
     return ["在途场次：第 %s 场 · %d 轮 · 开始于 %s"
             % (rec.get("sid") or rec.get("k"), len(rec.get("turns") or []), when),
             "已试 %s 次（最多 %s 次）" % (rec.get("attempts", 0),
-                                          "见 config.dream.resume_attempts")]
+                                          "见 docs/流程框架.md 的归档那一节")]
 
 
 def resume_pending(data_dir: str) -> List[str]:
@@ -161,12 +174,14 @@ def resume_pending(data_dir: str) -> List[str]:
         rec = eng.resume_pending(transcript=tr)
     finally:
         tr.close()
-    if rec.get("dream_rounds", 0) < 0:
-        return ["补归档仍然失败（第 %s 次）：%s"
+    if not isinstance(rec, dict):
+        return ["补做完了（那一场已经收过尾）"]
+    if (rec.get("archive_draft") or {}).get("land") == "failed":
+        return ["补做仍然失败（第 %s 次）：%s"
                 % (rec.get("attempts"), (rec.get("archive") or {}).get("note") or "")]
-    return ["补完了：新事实 %s 条 · 留下的 %s 条 · 长期池 %s 条"
-            % (rec.get("facts_added", 0), rec.get("kept_added", 0),
-               len(eng.long_pool.texts))]
+    g = _图摘要(data_dir)
+    return ["收尾完毕：这一场已记账（图里现在 %s 个件 · 底片 %s 场）"
+            % (g.get("件"), g.get("场"))]
 
 
 def has_cred(data_dir: str) -> bool:
@@ -182,26 +197,45 @@ def creds_ok(data_dir: str) -> bool:
         return False
 
 
+def _图摘要(data_dir: str) -> Dict[str, object]:
+    """**图 + 底片**的只读小账（读不到就当空，⛔ 不抛 —— 只读页面不该把 App 弄崩）。"""
+    d = cache_dir(data_dir)
+    out: Dict[str, object] = {"件": 0, "标记": 0, "cell": 0, "场": 0, "版本": 0}
+    try:
+        from memory.graph import 图
+        g = 图.载入(d)
+        out["件"] = len(g.件)
+        out["标记"] = len(g.标记集)
+        out["cell"] = len(g.cell)
+        out["版本"] = int(g.版本)
+    except Exception as exc:  # noqa: BLE001
+        out["图错"] = "%s: %s" % (type(exc).__name__, exc)
+    try:
+        bd = os.path.join(d, "底片")
+        if os.path.isdir(bd):
+            out["场"] = sum(1 for n in os.listdir(bd)
+                            if n.endswith(".json.gz") or n.endswith(".json"))
+    except Exception:                                            # noqa: BLE001
+        pass
+    return out
+
+
 def state_summary(data_dir: str) -> Dict[str, object]:
-    """给手机界面看的池子现状（读不到就报空，不抛）。"""
+    """给手机界面看的**记忆现状**（= 图 + 底片 + 时钟；读不到就报空，不抛）。
+
+    ★ 2026-10-17：原来是"长期池几条 / 临时池几条" —— 池子没了，这两个数也没了。
+      现在报的是新线的实体：**件**（图里的节点）、**标记**（件的置信度）、**场**（底片）。
+    """
     import json
     d = cache_dir(data_dir)
     sp = os.path.join(d, "state.json")
-    n_long = 0
-    tp = os.path.join(d, "pool_texts.jsonl")
-    if os.path.exists(tp):
-        with open(tp, encoding="utf-8") as f:
-            n_long = sum(1 for line in f if line.strip())
+    g = _图摘要(data_dir)
     if not os.path.exists(sp):
-        return {"inited": False, "long": n_long, "temp": 0, "alive": 0, "clock": 0.0,
-                "sessions": 0}
+        return {"inited": False, "clock": 0.0, "sessions": 0, "graph": g}
     with open(sp, encoding="utf-8") as f:
         st = json.load(f)
-    temp: List[dict] = st.get("temp") or []
-    return {"inited": True, "long": n_long, "temp": len(temp),
-            "alive": sum(1 for t in temp if not t.get("long")),
-            "clock": float(st.get("clock", 0.0)),
-            "sessions": int(st.get("sessions", 0))}
+    return {"inited": True, "clock": float(st.get("clock", 0.0)),
+            "sessions": int(st.get("sessions", 0)), "graph": g}
 
 
 def state_summary_lines(data_dir: str) -> List[str]:
@@ -210,185 +244,17 @@ def state_summary_lines(data_dir: str) -> List[str]:
         s = state_summary(data_dir)
     except Exception as exc:  # noqa: BLE001
         return ["读状态失败：%s: %s" % (type(exc).__name__, exc)]
-    return ["池子状态：%s" % ("已建" if s["inited"] else "还没建"),
-            "长期池　：%s 条" % s["long"],
-            "临时池　：%s 条（存活 %s）" % (s["temp"], s["alive"]),
-            "时钟　　：%.2f 天" % float(s["clock"]),
-            "已归档场次：%s" % s["sessions"]]
-
-
-# --------------------------------------------------------------------------- 池子浏览
-def pool_view_json(data_dir: str) -> str:
-    """把两个池子**逐条**交给界面（返回 JSON 字符串）。
-
-    ★ 为什么是 JSON 字符串而不是 dict：
-      Chaquopy 的 `asMap()` 给的是 `Map<PyObject, PyObject>`，Kotlin 侧按键取值会
-      类型推不出来（`PyBridge` 踩过这个坑）。嵌套结构一律先 JSON 化，
-      Kotlin 用 kotlinx-serialization 解析 —— 好处是**以后加字段不用改桥**。
-    ★ 读不到就返回 `{"ok": false, ...}`，**不抛**：
-      一个"看池子"的页面不该因为池子还没建就把 App 弄崩。
-    """
-    import json
-    try:
-        from memory.engine import Engine
-        from memory.settings import load_config
-
-        cfg = load_config(data_dir=data_dir)
-        # ★ 用 peek（只读）而不是 load：看池子**不该要 API Key**。
-        #   没配凭证时，这里给出的应该是"池子还没建"这句真话。
-        snap = Engine.peek(cfg, cache_dir(data_dir))
-        now = float(snap.clock)
-        long_e = snap.long_pool.entries()
-        temp_e = snap.temp_pool.entries(now)
-
-        # ★★ 这里**只给统计与分布图，不给条目**。
-        #   条目改走 `pool_entries_json` 分页取 —— 原来一次吐全部（上千条）会被
-        #   主线程用 org.json 解析成上千个对象，**那个比分布图更早卡**。
-        by_layer = snap.long_pool.counts()
-        alive = sum(1 for e in temp_e if e["alive"])
-        # ⚠️ `promoted` = `long`（慢衰减那一档）；**悬着的事不算在里面** ——
-        #   它不衰减、也不 `long`，是**第三类**（用户 2026-10-05 裁）。
-        hanging = sum(1 for e in temp_e if e.get("hanging"))
-        promoted = sum(1 for e in temp_e if e["long"] and not e.get("hanging"))
-        fading = len(temp_e) - alive
-        # ★★ **各档"本场收进来几条"按条目现算**（2026-10-06）。
-        #   为什么不用 `delta.temp.add`：那是**整个临时池**的增减；印到"短期记忆"那一行
-        #   就会出现自相矛盾 —— 实测用户看到的就是「短期 0，上次 +1」，
-        #   而那一条其实落进了**「悬着的事」**（tag=还没说完的 ⇒ hanging）。
-        #   每条临时条目都带 `from_session`，所以这件事**不用改归档记账**就能算准。
-        #   ⛔ 减/退那一边算不出来（条目已经删了）⇒ 那个数在 `delta.temp.del_by_tier` 里，
-        #      由 `apply_archive` 按档记下来。
-        sid_now = int(snap.sessions)
-
-        def _added(pred) -> int:
-            n = 0
-            for e in temp_e:
-                if int(e.get("from_session") or -1) != sid_now:
-                    continue
-                if pred(e):
-                    n += 1
-            return n
-
-        added_short = _added(lambda e: (not e.get("hanging")) and (not e["long"]))
-        added_mid = _added(lambda e: (not e.get("hanging")) and e["long"])
-        added_hang = _added(lambda e: bool(e.get("hanging")))
-        # 上一次归档**动了什么**（每层增/减、临时池增/减/升迁）。
-        # ★ 从 state 里读，不现算：现算只能算"现在有多少"，
-        #   而"那一场带来了什么变化"是**事件**，事后重建不出来。
-        delta = (snap.meta or {}).get("last_delta") or {}
-
-        # 分布图：**按需算**。实测 N=1000 只要 12 ms（手机约 50 ms），
-        # 而且在 Python 那个独占线程上，不占主线程 ⇒ 不必缓存进 state。
-        #
-        # ★ 2026-10-05：改走**定轴重心图**（`frame_layout`）。旧画法（未中心化 PCA）
-        #   实测第一根主方向 97% 是"全体往同一侧偏"这个常数 ⇒ 所有点必然挤在一侧；
-        #   而"把轴从数据里算"（PCA/MDS）自己会均匀化 ⇒ 画出来必然填满 ⇒ 没信息。
-        #   新画法：**几何方向 = 约定**（所以空轴也画得出来）· **落点 = 锚算出来的 top-2** ·
-        #   **半径 = 离底色的余弦距离**（与 Reader 同一把尺子）。锚向量在 `axes.npz` 里，
-        #   已经建池时预编码好 ⇒ **开图不调编码器**。
-        try:
-            from memory import axes as _ax
-            from memory.layout import frame_layout
-            ax_data = _ax.load_axes_npz(os.path.join(cache_dir(data_dir), _ax.AXES_NPZ))
-            if ax_data is None:
-                lay = {"ok": False, "why": "缓存里没有轴框架（axes.npz）—— 建池时要带 --axes",
-                       "points": [], "axes": []}
-            else:
-                lay = frame_layout(snap.long_pool, snap.temp_pool, snap.temp_V,
-                                   ax_data, now=now)
-        except Exception as exc:  # noqa: BLE001  画不出图不该让整页打不开
-            lay = {"ok": False, "why": "%s: %s" % (type(exc).__name__, exc),
-                   "points": [], "axes": []}
-
-        return json.dumps({
-            "ok": True,
-            "clock": now,
-            "sessions": int(snap.sessions),
-            "delta": delta,
-            "layout": lay,
-            "stats": {
-                "long_total": len(long_e),
-                "long_by_layer": by_layer,
-                "temp_total": len(temp_e),
-                "temp_alive": alive,
-                "temp_promoted": promoted,
-                "temp_hanging": hanging,
-                # ★ "正在淡出"要单独报出来：临时池是**归档时才结算**的，
-                #   两次归档之间本来就躺着一些 w < eps 的条目。界面上看不见它们，
-                #   用户就会以为规则和实际不一致。
-                "temp_fading": fading,
-                # ★ 各档"本场收进几条"（界面各档显示自己的，别把整个池子的数印到一档上）
-                "added_short": added_short,
-                "added_mid": added_mid,
-                "added_hang": added_hang,
-                "eps": float(cfg.time.eps),
-            },
-        }, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
-                          ensure_ascii=False)
-
-
-# --------------------------------------------------------------------------- 池子分页
-POOL_PAGE = 50
-
-
-def pool_entries_json(data_dir: str, group: str, offset: str) -> str:
-    """按组**分页**取条目 —— 池子只会越来越大，一次全取迟早把主线程压住。
-
-    ★ `group` 用的是**代码里的层键**（底色 / 情境 / 记忆 / 临时），
-      不是界面上的显示名 —— 显示名随便改（池子→记忆、底色→自我），
-      键是**数据契约**的一部分。⚠️ 2026-10-05 键**整体改过一次**（`情境负面`→`情境`），
-      那是有意的、带过渡别名的一次性改动（见 `companion/CHANGELOG.md`）；
-      ⛔ **不是"以后可以随手改键"的许可**。
-    ★ `offset` 走字符串（桥只传字符串）；页大小在服务端定，返回 `next_offset`，
-      界面照它走就行 —— 免得两边各写一个步长、哪天对不上。
-    """
-    import json
-    try:
-        from memory.engine import Engine
-        from memory.pool import LAYERS
-        from memory.settings import load_config
-
-        cfg = load_config(data_dir=data_dir)
-        snap = Engine.peek(cfg, cache_dir(data_dir))
-        now = float(snap.clock)
-        g = str(group or "").strip()
-        off = max(0, int(str(offset or "0").strip() or 0))
-
-        if g == "临时":
-            # ★ 2026-10-05：临时池**内部**现在分三类，界面上是三个组 ——
-            #   `临时` = **短期**（刚归档留下、几天就淡）
-            #   `中期` = **慢衰减**（τ=45 天，一个季度不提才退）
-            #   `悬着` = **不按时间退**（只由 `done` 结束；用户 2026-10-05 裁）
-            # ⚠️ 前两个**不是 `LAYERS` 里的层**（那四个键没动，用户定的硬规矩）——
-            #   它们只是临时池内部的**档位名**，这里当界面组键用。
-            # ⛔ 三者**互斥且覆盖全**：每条临时条目必落在恰好一个组里。
-            items = [e for e in snap.temp_pool.entries(now)
-                     if not e.get("hanging") and e.get("tier") != "中期"]
-        elif g == "中期":
-            items = [e for e in snap.temp_pool.entries(now)
-                     if not e.get("hanging") and e.get("tier") == "中期"]
-        elif g == "悬着":
-            items = [e for e in snap.temp_pool.entries(now) if e.get("hanging")]
-        elif g in LAYERS:
-            items = [e for e in snap.long_pool.entries() if e["layer"] == g]
-        else:
-            return json.dumps({"ok": False, "err": "没有这一组：%s" % g},
-                              ensure_ascii=False)
-
-        page = items[off:off + POOL_PAGE]
-        nxt = off + len(page)
-        return json.dumps({
-            "ok": True, "group": g, "total": len(items),
-            "offset": off, "limit": POOL_PAGE,
-            "items": page,
-            "next_offset": nxt,
-            "has_more": nxt < len(items),
-        }, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
-                          ensure_ascii=False)
+    g = s.get("graph") or {}
+    out = ["记忆：%s" % ("已有图" if g.get("件") else "还是空的（还没归档过一场）"),
+           "件　　　：%s 个（标记集 %s 条）" % (g.get("件"), g.get("标记")),
+           "cell　　：%s 段原文" % g.get("cell"),
+           "底片　　：%s 场" % g.get("场"),
+           "图版本　：%s" % g.get("版本"),
+           "时钟　　：%.2f 天" % float(s["clock"]),
+           "已归档场次：%s" % s["sessions"]]
+    if g.get("图错"):
+        out.append("⚠️ 图读不出来：%s" % g["图错"])
+    return out
 
 
 # --------------------------------------------------------------------------- 对话
@@ -633,7 +499,7 @@ def chat_open(data_dir: str) -> str:
         #      池子一字不动。2026-10-07 补的：老代码在这儿会**自动落地**）；
         #   · 有 `ts_end` 且没有可落地的草案 ⇒ 归档跑到一半被打断 ⇒ **补做完**。
         #   判据就用现成的字段：`Session.archive_draft()` 在调归档**之前**写下 `ts_end`
-        #   （见 companion/session.py），所以有它就是"已收场"。
+        #   （见 memory/session.py），所以有它就是"已收场"。
         #   ⛔ 少了这个区分，"收场时被杀"的那一场会**永远停在未归档状态**，
         #     而且越聊越长 —— 实测踩到：杀了之后重开，场次仍是 2、pending 还是 10 轮。
         archived = False
@@ -659,11 +525,12 @@ def chat_open(data_dir: str) -> str:
             resumed = False
         sid = "s%d.%d" % (sess.k, len(_SESS) + 1)
         _SESS[sid] = sess
+        _g = _图摘要(data_dir)
         return json.dumps({
             "ok": True, "sid": sid, "k": sess.k, "resumed": resumed,
             "turns": len(sess.rec.get("turns") or []),
-            "long": len(eng.long_pool.texts),
-            "temp": len(eng.temp_pool.items),
+            # ★ 原来这里是"长期池/临时池条数" —— 池子没了，换成新线的实体（件 / 底片场数）。
+            "件": _g.get("件"), "标记": _g.get("标记"), "底片": _g.get("场"),
             "clock": float(eng.clock),
             # 上一场是"收工时被杀"、这次启动把它补归档了 —— 界面该说一声。
             "archived_pending": archived,
@@ -799,7 +666,7 @@ def chat_turns_json(data_dir: str, sid: str) -> str:
                 "reasoning": str(t.get("reasoning") or ""),
                 "push": [str(x) for x in (t.get("push_items") or [])],
                 "push_n": int(t.get("push_n") or 0),
-                "layers": {k: int(v) for k, v in (t.get("layers") or {}).items()},
+                "件数": int(t.get("件数") or 0),
                 # 给用户看的两个量：这一轮花了多少 token、模型自己"再查一次"查了什么。
                 "usage": {k: int(v) for k, v in (t.get("usage") or {}).items()},
                 "pulls": [{"query": str(p.get("query") or ""),
@@ -904,11 +771,11 @@ def chat_ask(data_dir: str, sid: str, text: str, sink=None) -> str:
         #   打字的人一旦看见"它想起了什么"，就会不自觉被带着走 —— 那会污染数据。
         #   事后可看（桌面版是 `/push`）。
         "push": res["push"],
-        "k": res["k"], "k_raw": res["k_raw"], "eff_n": res["eff_n"],
-        # ★ 注入冷却掩膜：这一轮被掩掉几条（"读取器想起 k 条，其中几条刚说过 ⇒ 不注入"）。
-        #   ⇒ 界面上 `push` 的条数可能少于 `k`，这个数就是原因。
+        # ★ 这一轮取到**几件**（件层；旧池子那套 `k_raw` / `eff_n` 已经删了）。
+        "k": res["k"],
+        # ★ 注入冷却掩膜：这一轮被掩掉几条（刚说过的原文不再注入）。
         "cd_blocked": res.get("cd_blocked", 0),
-        "pulls": res["pulls"], "human_line": res["human_line"],
+        "pulls": res["pulls"],
         # ★★ 「那段回忆」：编写出的那一段 + 用了哪几条 + 编写版本/耗时（界面默认不显示，点开才看）
         "回忆": (res.get("回忆") or ((_sess().rec.get("turns") or [{}])[-1].get("回忆"))
                   if _sess is not None else None),
@@ -955,91 +822,13 @@ def chat_withdraw(data_dir: str, sid: str) -> str:
     }, ensure_ascii=False)
 
 
-def _engine_for_pool_edits(data_dir: str, sid: str):
-    """手改 / 手删要动的**那一份池子** —— 返回 `(engine, via_session)`。
-
-    ⛔ **有在跑的那一场，就必须走它的 engine**：那一场手里是**内存池**，
-      另开一个去改盘上的，改了等于没改，而且它下次 `save()` 会把改动**盖回去**
-      （`companion/CHANGELOG.md` 里记着这条）。
-    ★ **但一场都没有时得自己开一个**（`via_session=False`）：记忆页那条路
-      **根本不经过"开一场"** —— 用户 2026-10-07 真机实测「记忆页长按删不了，
-      哪一个都是」。那时盘上那份就是唯一的真相，开出来改完 `save()` 即可。
-    ⚠️ 先按 `sid` 找，再退到"任意一场"：界面手里的 `sid` 可能已经过期
-      （归档落地会把那一场 pop 掉），而**在跑的那一场**才是必须照顾的对象。
-    """
-    sess = _SESS.get(str(sid))
-    if sess is not None and getattr(sess, "engine", None) is not None:
-        return sess.engine, True
-    for s in list(_SESS.values()):
-        eng = getattr(s, "engine", None)
-        if eng is not None:
-            return eng, True
-    return _open_engine(data_dir), False
-
-
-def chat_edit_entry(data_dir: str, sid: str, old_text: str, new_text: str) -> str:
-    """★ **用户手改一条条目**（2026-10-06 用户要求；2026-10-07 记忆页也能改）。
-
-    场景是他自己说的：「对对话时展示的那些搜到的和 push 的条目，也加上长按修改功能，
-    这样我使用时看到不合适的可以自己先手动修改，然后重新生成；之后再在电脑上整理更改。」
-    ★ 2026-10-07 补：**记忆页**上的条目走的是**同一个函数**（同一个弹窗），
-      所以这里不再要求"必须在某一场上"（见 `_engine_for_pool_edits`）。
-    ★ 改完把"现在哪些条目是手改过的"一起回给界面（省一次往返）。
-    """
-    import json
-    try:
-        eng, _via = _engine_for_pool_edits(data_dir, sid)
-        r = eng.user_edit_entry(str(old_text), str(new_text))
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
-                          ensure_ascii=False)
-    if not r.get("ok"):
-        return json.dumps({"ok": False, "err": r.get("err") or "改不了"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "n": int(r.get("n") or 0),
-                       "where": list(r.get("where") or []),
-                       "edited": eng.edited_texts()}, ensure_ascii=False)
-
-
-def chat_delete_entry(data_dir: str, sid: str, text: str) -> str:
-    """★ **用户手删一条** —— 底色 / 情境也允许（那两层本来就是他写的）。
-
-    ⚠️ 与 `chat_edit_entry` 同一套"用哪份池子"的规矩：见 `_engine_for_pool_edits`。
-    """
-    import json
-    try:
-        eng, _via = _engine_for_pool_edits(data_dir, sid)
-        r = eng.user_delete_entry(str(text))
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
-                          ensure_ascii=False)
-    if not r.get("ok"):
-        return json.dumps({"ok": False, "err": r.get("err") or "删不了"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "n": int(r.get("n") or 0),
-                       "where": list(r.get("where") or []),
-                       "edited": eng.edited_texts()}, ensure_ascii=False)
-
-
-def chat_edits_json(data_dir: str, sid: str) -> str:
-    """界面开屏问一次：**现在池子里哪些条目是手机上手改过的**（给它们打记号）。"""
-    import json
-    sess = _SESS.get(str(sid))
-    if sess is None:
-        return json.dumps({"ok": False, "err": "这一场不在了"}, ensure_ascii=False)
-    try:
-        return json.dumps({"ok": True, "edited": sess.engine.edited_texts()},
-                          ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
-                          ensure_ascii=False)
-
-
 def _finish_json(rec: dict) -> str:
     """收场/落地之后给界面的那份 JSON（`chat_finish` 与 `chat_archive_commit` 共用一份）。"""
     import json
     return json.dumps({
         "ok": True,
         # 归档失败**不是异常**：它按空归档落地、把失败写进转写、场次照样 +1
-        # （见 config.dream.resume_attempts）。界面该把这件事显示出来，而不是假装成功。
+        # （`archive_step` 那边）。界面该把这件事显示出来，而不是假装成功。
         "failed": int(rec.get("dream_rounds", 0)) < 0,
         "facts_added": rec.get("facts_added", 0),
         "kept_added": rec.get("kept_added", 0),
@@ -1204,6 +993,36 @@ def chat_archive_commit(data_dir: str, sid: str, sink=None) -> str:
 
 
 # --------------------------------------------------------------------------- 设置
+def ledger_lines(data_dir: str = "") -> List[str]:
+    """**新线的参数账**（`memory/knobs.py` 那 19 项），拼成人读的行 —— **只读**。
+
+    ★ 为什么只读：这些数按 `docs/参数账.md` 的规矩各带依据等级（【实测】【推导】【假设】），
+      改一个要「改前 → 改后 → 为什么」留一行记录。⛔ 不是滑块 ——
+      作者口径：「⛔ 不许散落在代码里凭手感调」。
+    ★ 为什么放在设置页：旧池子那一堆旋钮（`reader.*` / `time.*` / `dream.*`）
+      已经删了（它们拧了什么都不变），页面上需要**真的在控制这台机器的数**。
+    """
+    from memory.knobs import 参数账
+
+    rows = 参数账()
+    out = ["新线参数账：%d 项（参考值，改要留记录，不是滑块）" % len(rows), ""]
+    for name, one in rows.items():
+        依据 = str(one.get("依据") or "")
+        说明 = str(one.get("说明") or "")
+        out.append("%s = %s  %s" % (name, one.get("值"), 依据))
+        if 说明:
+            # 说明可能很长：按 40 字折行，前端只负责显示
+            line = ""
+            for ch in 说明:
+                line += ch
+                if len(line) >= 40:
+                    out.append("    " + line)
+                    line = ""
+            if line:
+                out.append("    " + line)
+    return out
+
+
 def knobs_json(data_dir: str) -> str:
     """可改参数的清单 + 当前生效值。
 

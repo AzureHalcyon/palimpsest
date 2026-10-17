@@ -253,13 +253,9 @@ fun ChatScreen(
                     },
                     onWithdrawEdit = { vm.withdraw(index, regen = false) },
                     onRegenerate = { vm.withdraw(index, regen = true) },
-                    // ★ 记忆条目：手改过的打记号；长按就地改/删（2026-10-06）
-                    edited = vm.editedTexts,
-                    onItemLongPress = { t ->
-                        // 「保存并重新生成」只在这条属于**最近一轮**时才有意义
-                        //（改的是池子；要让它进上下文，得重跑那一轮）
-                        vm.openMemoryEditor(t, isLast = thisIsLast, fromPool = false)
-                    },
+                    // ⛔ 2026-10-17：条目上的"长按就地改/删"跟着旧池子一起删了
+                    //   （它写的那份账本 `pool_edits.jsonl` 已经没有任何代码在写）。
+                    //   改/删现在在**记忆页的件**上（长按件 → 剪出 / 删）。
                     // ★ 流式状态只给最后一轮（归档/生成时那三个才有值）
                     streamPhase = if (thisIsLast) vm.streamPhase else "",
                     streamReasoning = if (thisIsLast) vm.streamReasoning else "",
@@ -351,14 +347,9 @@ fun ChatScreen(
         )
     }
 
-    // ★★ **长按"想起的那一条" ⇒ 就地改 / 删**（2026-10-06，用户要求 a–d）
-    //   用户的场景原话：「这样我使用时看到不合适的可以自己先手动修改，然后重新生成；
-    //   之后再在电脑上整理更改。」
-    //   ⚠️ 改的是**池子**，不是这一轮已经发出去的上下文 ⇒ 只有"最近一轮"能顺手重新生成。
-    //   ★ 2026-10-07：弹窗与它的状态都**搬到公共处**了（`MemoryEditDialog` + VM 里的
-    //     `memoryTarget/memoryDraft/memoryDeleting/memoryIsLast`）—— 记忆页要用同一个。
-    //     这里只剩"重新生成时把列表贴回底部"这件**本屏才知道**的事。
-    MemoryEditDialog(vm, onRegen = { followBottom = true })
+    // ⛔ 2026-10-17：`MemoryEditDialog`（长按条目就地改/删）整块删掉了 ——
+    //   它改的是**旧池子里的条目**，而池子已经不存在（`chat_edit_entry` 也删了）。
+    //   改 / 删现在在**记忆页的件**上（长按件 → 剪出 / 删）。
 }
 
 /** 一轮：用户气泡 → 助手正文 → 折叠行（紧贴正文下方 [DisclosureGap]，不当孤儿）。 */@Composable
@@ -371,8 +362,6 @@ private fun ChatTurnItem(
     menuUnavailable: String?,
     onWithdrawEdit: () -> Unit,
     onRegenerate: () -> Unit,
-    edited: Set<String> = emptySet(),
-    onItemLongPress: ((String) -> Unit)? = null,
     // ★ 流式（2026-10-07）：只有**最后一轮**才拿得到这三个（别处一律空）。
     streamPhase: String = "",
     streamReasoning: String = "",
@@ -446,8 +435,6 @@ private fun ChatTurnItem(
                     push = pushItems,
                     onExpand = onDisclosureExpand,
                     onCollapse = onDisclosureCollapse,
-                    edited = edited,
-                    onItemLongPress = onItemLongPress,
                 )
             }
 
@@ -464,8 +451,6 @@ private fun ChatTurnItem(
                     got = p.got,
                     onExpand = onDisclosureExpand,
                     onCollapse = onDisclosureCollapse,
-                    edited = edited,
-                    onItemLongPress = onItemLongPress,
                 )
             }
 
@@ -496,8 +481,6 @@ private fun PushDisclosure(
     push: List<String>,
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
-    edited: Set<String> = emptySet(),
-    onItemLongPress: ((String) -> Unit)? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     LaunchedEffect(expanded) {
@@ -540,14 +523,7 @@ private fun PushDisclosure(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        // ★ 长按这一条 ⇒ 就地改 / 删（2026-10-06）；
-                        //   `edited` 命中时右边带一个「改」记号。
-                        MemoryItemLine(
-                            text = p,
-                            edited = p in edited,
-                            onLongPress = onItemLongPress,
-                            modifier = Modifier.weight(1f),
-                        )
+                        MemoryItemLine(text = p, modifier = Modifier.weight(1f))
                     }
                 }
             }

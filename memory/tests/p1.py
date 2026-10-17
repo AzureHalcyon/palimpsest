@@ -30,7 +30,6 @@ from memory.engine import Engine                               # noqa: E402
 from memory.film import 切回原文, 底片, 指纹, 读底片            # noqa: E402
 from memory.llm import ScriptedLLM, 收_logprobs                # noqa: E402
 from memory.graph import 图                                    # noqa: E402
-from memory.pool import TempPool                               # noqa: E402
 from memory.prompts import SYS1, SYS2, TOOLS_MEMORY, FROZEN_CHANGELOG   # noqa: E402
 from memory.session import Session                             # noqa: E402
 
@@ -185,14 +184,13 @@ def t_session_and_rename():
     tmp = tempfile.mkdtemp(prefix="palm-p1-")
     cfg = Config()
     emb = HashingEmbedder(dim=64)
-    pool = Engine.build_pool(cfg, emb, ["底色一条"], [], ["他养了只猫"])
     # 注意顺序：`render_recall=True` ⇒ 先调一次编写，再调主回答
     llm = ScriptedLLM([
         {"role": "assistant", "content": "我想起他养了只猫。"},
         {"role": "assistant", "content": "记得，你养了只猫。",
          "reasoning_content": "他问猫，我手里有那条。"},
     ], fallback={"role": "assistant", "content": "嗯"})
-    eng = Engine(cfg, emb, llm, pool, TempPool(cfg.time), tmp)
+    eng = Engine(cfg, emb, llm, tmp)
     eng.advance_to_wall(ts=1_000_000.0)
     eng.save()
 
@@ -239,9 +237,14 @@ def t_session_and_rename():
     断言("★★ 增量拼回来 == 真实上下文（系统前缀 + 各次增量 = `msgs`）",
          d["系统前缀"] == [str(m.get("content") or "") for m in sess.msgs[:2]]
          and 拼回 == sess.msgs[2:-1], (len(拼回), len(sess.msgs[2:-1])))
-    断言("★ 参数里记了「这一轮是编写还是清单」（过渡期也要看得见）",
+    断言("★ 参数里记了「这一轮是编写还是清单」",
          bool(d and (d["逐轮"][0].get("参数") or {}).get("注入")),
          d and d["逐轮"][0].get("参数"))
+    # ★★ 2026-10-17：底片是**存档**，记的必须是真的 —— 别再把旧池那一套留在里面。
+    _参 = (d["逐轮"][0].get("参数") or {}) if d else {}
+    断言("★★ 底片里的参数是**件层**的真相（形状 / 件数 / 回忆参数），不是旧池那一套",
+         _参.get("形状") == "件层" and "件数" in _参 and isinstance(_参.get("回忆参数"), dict)
+         and "gate_tau" not in _参 and "旧池取用" not in d["逐轮"][0], _参)
 
     说目录 = os.path.join(tmp, "说")
     断言("★ 编写产物落 `说/`（模型生成过的东西必须留档）",

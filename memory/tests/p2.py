@@ -10,6 +10,8 @@
   ② **标记为空就不问模型** —— 第一批归档必然没候选，⛔ 不该白花一次调用；
   ③ **按完成才写** —— ④ 层1/层2 + 版本 +1 只发生在 `完成()`。
 """
+import io
+import json
 import os
 import sys
 import tempfile
@@ -144,7 +146,6 @@ def main():
     from memory.config import Config as _Cfg
     from memory.embedder import HashingEmbedder as _Emb
     from memory.engine import Engine as _Eng
-    from memory.pool import TempPool as _TP
     from memory.session import Session as _S
 
     tmp3 = _tf.mkdtemp(prefix="palm-p2s-")
@@ -152,8 +153,7 @@ def main():
     emb3 = _Emb(dim=64)
     llm3 = ScriptedLLM([{"role": "assistant", "content": "嗯，我在。"}] * 8,
                       fallback={"role": "assistant", "content": "嗯"})
-    eng3 = _Eng(cfg3, emb3, llm3, _Eng.build_pool(cfg3, emb3, ["底色一条"], [], ["他养了只猫"]),
-                _TP(cfg3.time), tmp3)
+    eng3 = _Eng(cfg3, emb3, llm3, tmp3)
     eng3.advance_to_wall(ts=1_000_000.0)
     eng3.save()
     s3 = _S(eng3, 1)
@@ -185,15 +185,16 @@ def main():
          "没认出" in str(r2.get("err") or ""), r2.get("err"))
 
     v0 = eng3.sessions_done
-    池子前 = (len(eng3.long_pool.texts), len(eng3.temp_pool.items))
     s3.archive_commit()
-    断言("★★ 按「完成」⇒ 场次 +1、pending 清掉（收尾走的是旧线那条幂等路）",
+    断言("★★ 按「完成」⇒ 场次 +1、pending 清掉（收尾只做收尾，不再碰记忆）",
          eng3.sessions_done == v0 + 1 and not eng3.pending.exists(),
          (eng3.sessions_done, eng3.pending.exists()))
     断言("★ 图版本 +1（新线真的写了图）", 图.载入(tmp3).版本 == 1, 图.载入(tmp3).版本)
-    断言("★ 旧的池子**一分没动**（借「池子不动」那条收尾）",
-         (len(eng3.long_pool.texts), len(eng3.temp_pool.items)) == 池子前,
-         (池子前, len(eng3.long_pool.texts), len(eng3.temp_pool.items)))
+    断言("★ 幂等账记下了这一场（`applied_sids`，守「转写永远只写一行」）",
+         int(s3.k) in eng3.applied_sids, (s3.k, eng3.applied_sids))
+    断言("★ 引擎自己不装记忆：state.json 里**没有** `temp` 那一格",
+         "temp" not in json.loads(io.open(os.path.join(tmp3, "state.json"),
+                                         encoding="utf-8").read()))
 
     print()
     if 坏:

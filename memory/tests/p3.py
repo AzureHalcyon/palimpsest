@@ -119,6 +119,30 @@ def main():
     断言("★ 每次回忆都回一份「这次用的参数」（要能进逐轮记录）",
          r["参数"]["k"] == 4 and "β" in r["参数"], r["参数"])
 
+    print("[7] 参数账的**形状**：每一项都得能回答「凭什么」")
+    from memory.knobs import 参数账
+    _账 = 参数账()
+    断言("★ 新线参数账 19 项", len(_账) == 19, len(_账))
+    断言("★★ 每一项都有 值 / 依据（⛔ 裸值不许出现）",
+         all(("值" in v and str(v.get("依据") or "").strip()) for v in _账.values()),
+         [k for k, v in _账.items() if not str(v.get("依据") or "").strip()])
+    # ★★ 2026-10-17 加：设置页的每一条旋钮都必须**真的存在**于 Config 上。
+    #   这条抓的是一类真出过的错：`render_recall` 被写错了类（挂在 `CooldownConfig` 上），
+    #   而读它的地方用 `getattr(cfg.session, ..., True)` 兜着 ⇒ 界面上拧它**一点用都没有**。
+    from memory.config import Config
+    from memory.settings import KNOBS
+    _c = Config()
+    _坏路 = []
+    for _k in KNOBS:
+        _cur = _c
+        try:
+            for _part in _k.path.split("."):
+                _cur = getattr(_cur, _part)
+        except AttributeError:
+            _坏路.append(_k.path)
+    断言("★★ 设置页每条旋钮的路径都能在 Config 上解析到（⛔ 不许靠 getattr 兜底）",
+         not _坏路, _坏路)
+
     print()
     if 坏:
         print("有 %d 处不过：%s" % (len(坏), 坏))

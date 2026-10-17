@@ -52,14 +52,6 @@ def push_block(header: str, texts: Sequence[str]) -> str:
     return header + "\n" + "\n".join("- " + t for t in texts)
 
 
-def format_turn_line(tau: float, eff_n: float, n_push: int, k_raw: int, items) -> str:
-    """人读版的一行：参数 + 有效条目数 + 实际条数（截断前条数不同就标出来）。"""
-    return ("  [连续表示 · tau=%.3f · 有效条目数 %.1f · 注入 %d 条%s] %s …"
-            % (tau, eff_n, n_push,
-               "" if k_raw == n_push else "(截断前 %d)" % k_raw,
-               " | ".join(str(x)[:30] for x in list(items)[:12])))
-
-
 def format_archive_line(rounds: int, repairs: int, ar: dict, temp_n: int, alive_n: int) -> str:
     """人读版的一行：这一场归档产出了什么、池子变成什么样。
 

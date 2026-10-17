@@ -120,7 +120,7 @@ TOOLS_AUTONOMY = [
 
 # --------------------------------------------------------------------------- 会话前缀的可编辑覆盖
 # ★ 上面那两条 `SYS1` / `SYS2` **永远是默认值**，覆盖单独存盘 ——
-#   与 `companion/settings.py` 同一套规矩，理由也一样：
+#   与 `memory/settings.py` 同一套规矩，理由也一样：
 #   · 默认改了要能传下去（存盘里只放"他改过的"，不是整份拷贝）；
 #   · 改过的那一份要能看出是改过的，也能一键回到默认。
 # ⚠️ 一旦有覆盖，跑的**就不再是"逐字冻结"的那一份**了 —— 这是用户自己的选择，
@@ -173,7 +173,7 @@ def save_session_prompts(sys1, sys2, path=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("# companion 的提示词覆盖（**整条替换**，不是追加）\n"
-                    "# 删掉本文件即回到 `companion/prompts.py` 里的冻结默认。\n")
+                    "# 删掉本文件即回到 `memory/prompts.py` 里的冻结默认。\n")
             f.write(body)
             f.flush()
             os.fsync(f.fileno())
@@ -197,6 +197,11 @@ def clear_session_prompts(path=None) -> bool:
 
 
 # --------------------------------------------------------------------------- 归档（dreaming）
+# ⛔⛔ 2026-10-17：本节的三段（`DREAM_SYS` / `DREAM_TOOLS` / 后面的 `MERGE_SYS`）**已经下线** ——
+#   驱动它们的 `dreaming.py` / `merging.py` 已删，新线的归档走 `archive_step`（另一套提示词）。
+#   ★ 为什么留在原地不删：这是**冻结面**，台账里几十条「动了哪一句」要靠这份原文对照
+#     （作者删代码的口径是「删掉，反正旧仓库有完整的」，但那说的是代码）。
+#   ⛔ 以后再引用它们之前，先确认现在跑的是哪一套：`archive_step` + `writing`。
 DREAM_SYS = """你在做一次**归档**。
 
 ★ **用中文想、也用中文写** —— 推理（思考）过程与输出都用中文。
@@ -701,4 +706,14 @@ FROZEN_CHANGELOG = [
      "note": "⛔ **只改名字**：`description` 与 `parameters` 一字未动，`SYS2` / `DREAM_SYS` / `MERGE_SYS` 未动。"
              "`memory/session.py:_dispatch` **保留旧名当别名**（`name in ('recall', 'read_z')`）——"
              "老 `pending.json` 的历史里有 `read_z` 的 tool 记录，恢复在途那一场时不该因为改名而认不出来。"},
+    {"date": "2026-10-17",
+     "what": "`DREAM_SYS` / `DREAM_TOOLS` / `MERGE_SYS` **随旧归档路下线**（状态变更，"
+             "⛔ 一个字都没删也没改）：它们现在没有任何代码引用 —— "
+             "`dreaming.py` / `merging.py` 已删，新线的归档走 `archive_step`（另一套提示词）。",
+     "why": "作者删代码的口径是「删掉，反正旧仓库有完整的」，那对**代码**成立；"
+            "但这段是**冻结面**，本文件开头的规矩是「任何对冻结段的改动都要记台账」⇒ "
+            "删掉原文会让台账里几十条「动了 `DREAM_SYS` 的哪一句」失去可对照的底本。"
+            "★ 所以记的是**状态**：从「在跑的提示词」变成「历史稿」。",
+     "note": "在跑的冻结面仍是 `SYS1` / `SYS2` / `TOOLS_MEMORY` / `TOOLS_AUTONOMY` / `TOOLS_WEB`；"
+             "`DREAM_SYS` / `DREAM_TOOLS` / `MERGE_SYS` 只作历史对照。"},
 ]
