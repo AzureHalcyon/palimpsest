@@ -134,6 +134,10 @@ class 图:
                          "强度": float(强度 if 强度 is not None else K件["初始置信度"]["值"]),
                          # ★★ 2026-10-17：件的**来源**决定衰减档（手工 ⇒ 更慢 + 地板 0.5 ⇒ 永不剪出）。
                          "来源": str(来源 or "意外"),
+                         # ★★ 2026-10-17（艾宾浩斯）：`稳定度`（只增，初值 1.0）。
+                         #   每被重提一场就 `+= 平均激活 × 增益`；衰减率 ＝ `每窗口衰减 / 稳定度`。
+                         #   ⚠️ 初值必须是 **1.0**（= 除出来和原来一样），⛔ 0（那会除崩）。
+                         "稳定度": 1.0,
                          # ⛔ 不能写 `表示 or []`：向量可能是 numpy 数组，真值判定会抛
                          #    `ValueError: truth value of an array is ambiguous`（自检抓到过）
                          "表示": [float(x) for x in (表示 if 表示 is not None else [])]}
@@ -160,8 +164,42 @@ class 图:
             it["来源"] = "手工"
 
     def 件来源表(self) -> Dict[str, str]:
-        """`{件id: "意外"|"手工"}` —— 衰减按它分档。"""
+        """`{件id: "意外"|"手工"|"自报"}` —— 衰减按它分档。
+        ⚠️ **只有 `手工`（用户明说）** 是永久的；`自报`（她自己标）按普通档走。"""
         return {i: str(v.get("来源") or "意外") for i, v in self.件.items()}
+
+    def 件稳定度表(self) -> Dict[str, float]:
+        """`{件id: 稳定度}` —— **艾宾浩斯**：重提越多 ⇒ 衰减越慢（见 `markset.衰减`）。
+        ⚠️ 老图里没有这一格 ⇒ 默认 **1.0**（除出来与原来一样，⛔ 0）。"""
+        return {i: max(1.0, float(v.get("稳定度") or 1.0)) for i, v in self.件.items()}
+
+    # ------------------------------------------------------------------ 改口（冲突）
+    # ★★★ 2026-10-17（作者问）：「如果新的记忆，和旧记忆有冲突呢？比如之前说不喜欢的食物，
+    #   今天试了发现还不错，怎么说？显然直接覆盖不太好。但是怎么合理地表述，区分？」
+    #   ⇒ **⛔ 覆盖**：两条都留（"当时确实说过"是事实，"现在不一样了"是另一件事）。
+    #   ⇒ 落一条**有方向**的关系：`新件.修正 → 旧件`（旧的记 `被修正`），带一句说法。
+    #   ⇒ 取用时**成对带出、按时间排** ⇒ 她看到的是「以前…… 后来……」，⛔ 只拿一半。
+    def 记改口(self, 新件: str, 旧件: str, 说法: str = "") -> bool:
+        a, b = self.件.get(str(新件)), self.件.get(str(旧件))
+        if not isinstance(a, dict) or not isinstance(b, dict) or str(新件) == str(旧件):
+            return False
+        修 = [x for x in (a.get("修正") or []) if isinstance(x, dict)]
+        if not any(str(x.get("件")) == str(旧件) for x in 修):
+            修.append({"件": str(旧件), "说法": str(说法 or "")[:120]})
+        a["修正"] = 修
+        被 = [str(x) for x in (b.get("被修正") or []) if str(x or "")]
+        if str(新件) not in 被:
+            被.append(str(新件))
+        b["被修正"] = 被
+        return True
+
+    def 修正伙伴(self, 件id: str) -> List[str]:
+        """这一件的「改口」伙伴（**只一层**）：它改掉了谁 ＋ 谁改掉了它。"""
+        it = self.件.get(str(件id)) or {}
+        出 = [str(x.get("件") or "") for x in (it.get("修正") or []) if isinstance(x, dict)]
+        出 += [str(x or "") for x in (it.get("被修正") or [])]
+        好 = [x for x in dict.fromkeys(出) if x and x in self.件 and x != str(件id)]
+        return 好
 
     def 件向量表(self) -> Dict[str, List[float]]:
         return {i: list(v.get("表示") or []) for i, v in self.件.items() if v.get("表示")}

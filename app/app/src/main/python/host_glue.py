@@ -787,6 +787,31 @@ def chat_ask(data_dir: str, sid: str, text: str, sink=None) -> str:
     }, ensure_ascii=False)
 
 
+def chat_remember(data_dir: str, sid: str, why: str = "") -> str:
+    """★★ **「这条记住」**：把**这一场的最后一轮**标成 `手工`（来源=手工 ⇒ 永不剪出）。
+
+    ★★★ 2026-10-17（作者定）：「她自报的给普通，当兜底用」⇒ **永久这一档必须由用户触发**。
+      在这之前全仓只有她那一条路（`remember` 工具、`谁=她`）⇒ `手工` 档**没有生产者**。
+      所以这是用户那一侧的唯一入口（业务侧：`Session.记住这一轮`）。
+
+    ⛔ 不跑模型、⛔ 改图 —— 只往这一场底片的 `手工标记` 里写一条（归档时才进记忆）。
+    """
+    import json
+    sess = _SESS.get(str(sid))
+    if sess is None:
+        return json.dumps({"ok": False, "err": "这一场不在了（重开一场）"},
+                          ensure_ascii=False)
+    try:
+        r = sess.记住这一轮(str(why or ""))
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+    if r.get("err"):
+        return json.dumps({"ok": False, "err": str(r["err"])}, ensure_ascii=False)
+    return json.dumps({"ok": True, "轮": r.get("轮"), "谁": r.get("谁")},
+                      ensure_ascii=False)
+
+
 def chat_withdraw(data_dir: str, sid: str) -> str:
     """★ **撤回这一场的最后一轮**（2026-10-06）——「撤回上一次对话，重新编辑」。
 
