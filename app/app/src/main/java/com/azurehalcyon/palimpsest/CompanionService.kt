@@ -78,7 +78,7 @@ class CompanionService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("companion")
+            .setContentTitle("palimpsest")
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)

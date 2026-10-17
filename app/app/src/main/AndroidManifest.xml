@@ -44,7 +44,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="companion"
+        android:label="palimpsest"
         android:supportsRtl="true"
         android:theme="@style/Theme.Companion">
         <activity
