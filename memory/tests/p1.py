@@ -29,6 +29,7 @@ from memory.embedder import HashingEmbedder                    # noqa: E402
 from memory.engine import Engine                               # noqa: E402
 from memory.film import 切回原文, 底片, 指纹, 读底片            # noqa: E402
 from memory.llm import ScriptedLLM, 收_logprobs                # noqa: E402
+from memory.graph import 图                                    # noqa: E402
 from memory.pool import TempPool                               # noqa: E402
 from memory.prompts import SYS1, SYS2, TOOLS_MEMORY, FROZEN_CHANGELOG   # noqa: E402
 from memory.session import Session                             # noqa: E402
@@ -125,6 +126,25 @@ def t_film():
                                       {"token": "丙", "logprob": -2.0}], 汇)
 
 
+def 造底片(dir_, 场id, 轮们):
+    """写一份**真的** `.json.gz` 底片（`[R]` 取整组原文时要按区间回来切）。"""
+    import gzip as _gz
+    import json as _json
+    逐轮, 原文 = [], ""
+    for i, (刺, 说) in enumerate(轮们, start=1):
+        s0 = len(原文)
+        原文 += 刺 + 说
+        逐轮.append({"轮": i, "刺激": 刺, "她说": 说,
+                     "刺激区间": [s0, s0 + len(刺)], "她说区间": [s0 + len(刺), len(原文)],
+                     "调用": [], "取用": None})
+    d = {"场id": 场id, "系统前缀": ["s1", "s2"], "原文": 原文, "逐轮": 逐轮,
+         "撤回记录": [], "指纹": {}}
+    os.makedirs(os.path.join(dir_, "底片"), exist_ok=True)
+    with _gz.GzipFile(os.path.join(dir_, "底片", 场id + ".json.gz"), "wb",
+                      compresslevel=6, mtime=0) as fh:
+        fh.write(_json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode())
+
+
 # --------------------------------------------------------------------- ⑦ 编写
 def t_writing():
     print("[2] 编写 [W]")
@@ -175,6 +195,20 @@ def t_session_and_rename():
     eng = Engine(cfg, emb, llm, pool, TempPool(cfg.time), tmp)
     eng.advance_to_wall(ts=1_000_000.0)
     eng.save()
+
+    # ★★ 取件源已经换成 `[R] 回忆`：图里**得先有一个件**，这一轮才"想得起什么"。
+    #    造一份真的底片（回忆要按区间回去切原文）+ 一个件指向它的 cell。
+    造底片(tmp, "2026-10-16-01", [("我要睡了", "那就睡吧，我在这儿。")])
+    g = 图(tmp)
+    g.版本 = 1
+    一个cell = g.加cell("2026-10-16-01", 1, 0, 0)
+    向 = emb.raw_embed(["我要睡了"])[0]      # ★ 用**真**嵌入（numpy 数组 —— 正好压这条路径）
+    # ⚠️ 件向量就是一条**和线索同向**的假向量：这条自检只验"取件→编写→注入"通不通，
+    #    ⛔ 不比语义质量（那是真材料上的事）。
+    一号件 = g.新件([一个cell["id"]], 向, 代表=一个cell["id"], 强度=1.0)
+    g.标记集 = {一号件: 1.0}
+    g.落盘()
+
     sess = Session(eng, 1)
     out = sess.ask("我的猫叫什么来着")
     断言("★ 一轮跑通", bool(out.get("reply")), out.get("reply"))
@@ -186,7 +220,8 @@ def t_session_and_rename():
          and "·" not in 注入[0]["content"].split("】")[-1], 注入)
 
     底片目录 = os.path.join(tmp, "底片")
-    文件们 = os.listdir(底片目录) if os.path.isdir(底片目录) else []
+    文件们 = [f for f in (os.listdir(底片目录) if os.path.isdir(底片目录) else [])
+              if f != "2026-10-16-01.json.gz"]      # 种的那个件是另一份底片
     断言("★ 底片落盘了", len(文件们) == 1, 文件们)
     断言("★★ 底片是 `.json.gz`、写进去能**原样**读回（无损压缩，结构没动）",
          文件们 and 文件们[0].endswith(".json.gz")

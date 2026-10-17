@@ -95,7 +95,9 @@ class 图:
         self.件[件id] = {"id": 件id, "成员": 成员, "点亮": list(成员),
                          "代表": 代表 or (成员[0] if 成员 else ""),
                          "强度": float(强度 if 强度 is not None else K件["初始置信度"]["值"]),
-                         "表示": [float(x) for x in (表示 or [])]}
+                         # ⛔ 不能写 `表示 or []`：向量可能是 numpy 数组，真值判定会抛
+                         #    `ValueError: truth value of an array is ambiguous`（自检抓到过）
+                         "表示": [float(x) for x in (表示 if 表示 is not None else [])]}
         return 件id
 
     def 归进(self, 件id: str, cell_id: str, 表示: Optional[Sequence[float]] = None) -> None:
@@ -107,7 +109,7 @@ class 图:
             it["成员"].append(cell_id)
         if cell_id not in it["点亮"]:
             it["点亮"].append(cell_id)
-        if 表示 and not it.get("表示"):
+        if 表示 is not None and not it.get("表示"):
             it["表示"] = [float(x) for x in 表示]
 
     def 件向量表(self) -> Dict[str, List[float]]:

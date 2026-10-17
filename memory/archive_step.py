@@ -165,7 +165,8 @@ def 草案(底片数据: Dict, 图: 图, llm, 场id: str,
         vec: List[float] = []
         if 嵌入 is not None and 文本.strip():
             try:
-                vec = list((嵌入([文本]) or [[]])[0])
+                _e = 嵌入([文本])                      # ⛔ 别对返回值用 `or`（可能是 ndarray）
+                vec = [float(x) for x in (_e[0] if len(_e) else [])]
             except Exception:                    # noqa: BLE001
                 vec = []
         候选 = markset.提候选件(vec, 向量表, 图.标记集, k=int(K判["候选件数"]["值"])) if vec else []
@@ -227,13 +228,17 @@ def _摘要(标: List[Dict], 判表: List[Dict]) -> str:
 
 def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
     """**这一下才写**：`④ 层1`（强化/新建/冷成员）＋ `④ 层2`（衰减/剪出）＋ 版本 +1 + 落盘。"""
-    from .knobs import 件 as K
+    场id = str(草案.get("场id") or "")
+    if not 场id:
+        # ⛔ 没有场id 就没法锚 cell（cell 的身份是原文区间 + 场）。宁可如实报，不建孤儿。
+        return {"场id": "", "版本": 图.版本, "层1": [], "层2": None,
+                "err": "草案里没有 场id，没写图"}
 
     层1: List[Dict] = []
     for p in (草案.get("判") or []):
         轮 = int(p["轮"])
-        cell = (图.按区间找cell(草案["场id"], 轮)
-                or 图.加cell(草案["场id"], 轮, int(p.get("起") or 0), int(p.get("止") or 0)))
+        cell = (图.按区间找cell(场id, 轮)
+                or 图.加cell(场id, 轮, int(p.get("起") or 0), int(p.get("止") or 0)))
         vec = p.get("向量") or []
         if p.get("归进"):
             件id = p["归进"]
@@ -260,7 +265,7 @@ def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
 
     图.版本 += 1
     图.落盘()
-    return {"场id": 草案["场id"], "版本": 图.版本, "层1": 层1,
+    return {"场id": 场id, "版本": 图.版本, "层1": 层1,
             "层2": {"衰减": 旧, "现在": dict(图.标记集), "剪出": 剪出},
             "摘要": 草案.get("摘要") or ""}
 

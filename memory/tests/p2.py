@@ -139,6 +139,62 @@ def main():
          and K件["遍历门槛"]["值"] == 0.2 and K件["冷成员拉起"]["值"] == 0.25)
     断言("★ ⑤ 的候选件数 = 8（区间 5–10）", K判["候选件数"]["值"] == 8)
 
+    print("[7] 新线归档入口（Session 层）：草案是新形状 · 改按字面 · 完成才写")
+    import tempfile as _tf
+    from memory.config import Config as _Cfg
+    from memory.embedder import HashingEmbedder as _Emb
+    from memory.engine import Engine as _Eng
+    from memory.pool import TempPool as _TP
+    from memory.session import Session as _S
+
+    tmp3 = _tf.mkdtemp(prefix="palm-p2s-")
+    cfg3 = _Cfg()
+    emb3 = _Emb(dim=64)
+    llm3 = ScriptedLLM([{"role": "assistant", "content": "嗯，我在。"}] * 8,
+                      fallback={"role": "assistant", "content": "嗯"})
+    eng3 = _Eng(cfg3, emb3, llm3, _Eng.build_pool(cfg3, emb3, ["底色一条"], [], ["他养了只猫"]),
+                _TP(cfg3.time), tmp3)
+    eng3.advance_to_wall(ts=1_000_000.0)
+    eng3.save()
+    s3 = _S(eng3, 1)
+    s3.ask("在吗")
+    草 = s3.archive_draft()
+    断言("★ 草案是新形状：`land=yes` + `草` + 一句摘要",
+         草.get("land") == "yes" and isinstance(草.get("草"), dict)
+         and bool(str(草["草"].get("摘要") or "")), 草.get("land"))
+    断言("★ 没标记 ⇒ 摘要如实说「没有值得记的地方」（⛔ 不编）",
+         "没有值得记的地方" in str(草["草"].get("摘要") or ""), 草["草"].get("摘要"))
+
+    # 手写一份有判的草案，验「第 N 轮别记」
+    s3.rec["archive_draft"] = {"land": "yes", "talk": [],
+                               "草": {"摘要": "这一场认出 2 处：",
+                                     "判": [{"轮": 3, "归进": None, "新建": True, "说法": "a"},
+                                           {"轮": 5, "归进": "件-0001", "新建": False, "说法": "b"}]}}
+    r = s3.archive_revise("第 3 轮别记")
+    断言("★★ 「第 3 轮别记」⇒ 那一处标成 `跳过`，另一处不动",
+         r.get("改了") == [3]
+         and s3.rec["archive_draft"]["草"]["判"][0].get("跳过") is True
+         and not s3.rec["archive_draft"]["草"]["判"][1].get("跳过"), r)
+    r2 = s3.archive_revise("随便说点什么")
+    from memory.session import waiting_for_review as _wfr
+    断言("★★ 审阅期判定**认新草案**（否则重启会被当「归档跑一半」补做、写进旧池子）",
+         _wfr({"ts_end": 1.0, "archive_draft": {"land": "yes", "草": {"判": []}}}) is True
+         and _wfr({"ts_end": 1.0, "archive_draft": {"land": "yes", "ar": {"facts": []}}}) is True,
+         _wfr({"ts_end": 1.0, "archive_draft": {"land": "yes", "草": {"判": []}}}))
+    断言("★ 认不出要改哪一处 ⇒ **如实说**没认出（⛔ 不假装改过）",
+         "没认出" in str(r2.get("err") or ""), r2.get("err"))
+
+    v0 = eng3.sessions_done
+    池子前 = (len(eng3.long_pool.texts), len(eng3.temp_pool.items))
+    s3.archive_commit()
+    断言("★★ 按「完成」⇒ 场次 +1、pending 清掉（收尾走的是旧线那条幂等路）",
+         eng3.sessions_done == v0 + 1 and not eng3.pending.exists(),
+         (eng3.sessions_done, eng3.pending.exists()))
+    断言("★ 图版本 +1（新线真的写了图）", 图.载入(tmp3).版本 == 1, 图.载入(tmp3).版本)
+    断言("★ 旧的池子**一分没动**（借「池子不动」那条收尾）",
+         (len(eng3.long_pool.texts), len(eng3.temp_pool.items)) == 池子前,
+         (池子前, len(eng3.long_pool.texts), len(eng3.temp_pool.items)))
+
     print()
     if 坏:
         print("有 %d 处不过：%s" % (len(坏), 坏))

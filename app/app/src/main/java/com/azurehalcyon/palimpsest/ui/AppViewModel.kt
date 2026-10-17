@@ -674,6 +674,29 @@ class AppViewModel(private val app: Application) : ViewModel() {
      */
     private fun draftMarkdown(d: JSONObject?): String {
         if (d == null) return "（这次没出成草案）"
+        // ★★ 新线草案（2026-10-17）：`摘要` = 「这一场认出 N 处 → 归进件X / 新建件Y」。
+        //   ⛔ 别再去读 facts/kept（那两格在新线里是空的）。
+        val 摘要 = d.str("摘要")
+        if (摘要.isNotBlank()) {
+            return buildString {
+                append(摘要)
+                val 判 = d.arr("判")
+                if (判 != null) {
+                    for (i in 0 until 判.length()) {
+                        val p = 判.optJSONObject(i) ?: continue
+                        if (p.bool("跳过")) continue
+                        val 轮 = p.int("轮")
+                        val 归进 = p.str("归进")
+                        if (归进.isNotBlank()) {
+                            append("\n- 第 ").append(轮).append(" 轮 → 归进 ").append(归进)
+                        } else {
+                            append("\n- 第 ").append(轮).append(" 轮 → 新建一件")
+                        }
+                    }
+                }
+                append("\n\n要改哪条你直接说（说「第 3 轮别记」就行）；就这样的话点「完成」。")
+            }
+        }
         return buildString {
             append("这一场我打算记下这些：\n")
             val facts = d.strList("facts")

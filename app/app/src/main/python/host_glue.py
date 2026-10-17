@@ -958,6 +958,21 @@ def _draft_brief(rec) -> dict:
       是从 `pending.json` 里读出来的（那一刻还没有 session，见 `_review_payload`）。
     """
     d = (rec.get("archive_draft") or {}) if isinstance(rec, dict) else {}
+    # ★★ 新线（2026-10-17）：草案是「这一场认出哪几处 → 归进件X / 新建件Y」，形状完全不同
+    if isinstance(d.get("草"), dict):
+        草 = d["草"]
+        return {
+            "形状": "新线",
+            "land": d.get("land"),
+            "摘要": str(草.get("摘要") or ""),
+            "标记": [{"轮": int(m.get("轮") or 0), "误差": float(m.get("误差") or 0.0),
+                      "阈值": float(m.get("阈值") or 0.0)} for m in (草.get("标记") or [])],
+            "判": [{"轮": int(p.get("轮") or 0), "归进": p.get("归进"),
+                    "新建": bool(p.get("新建")), "说法": str(p.get("说法") or ""),
+                    "跳过": bool(p.get("跳过"))} for p in (草.get("判") or [])],
+            # 老字段留空，让界面那几条旧分支自然不显示
+            "facts": [], "kept": [], "again": [], "done": [], "promote": [], "note": "",
+        }
     ar = d.get("ar") or {}
     return {
         "land": d.get("land"),

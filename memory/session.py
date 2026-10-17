@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Dict, List, Optional, Sequence
 
@@ -29,6 +30,22 @@ from .transcript import format_turn_line, push_block
 #    memory.session 弄成"半初始化"⇒ 宿主 rom memory.session import Session 当场
 #    ImportError: cannot import name 'Session' from partially initialized module。
 #    ⇒ 改成**用的时候再 import**（与 ilm 同一个做法）。桌面复现不出来，只有真机报。
+
+
+class _替身结果:
+    """给"新路"造一个与旧读取器**同形**的结果（`texts/hits/k/k_raw/eff_n/gate_blocked`）。
+
+    为什么不一处处改：下游（记账、`human_line`、逐轮记录）都按这几个字段读；
+    新路换的是**取件方式**，不是下游的形状。等旧路删掉时再把这些字段一起收掉。
+    """
+
+    def __init__(self, texts: List[str], 件数: int = 0):
+        self.texts = list(texts)
+        self.hits: List[object] = []
+        self.k = int(件数)
+        self.k_raw = int(件数)
+        self.eff_n = float(len(texts))
+        self.gate_blocked = 0
 
 
 class Session:
@@ -90,20 +107,49 @@ class Session:
         #   为什么只记长度就够：`ask` 只往 `msgs` 的**尾巴上追加**（user / push / 工具往返 /
         #   最终那条 assistant），从不动前面已有的条 ⇒ 一个长度就能精确截回去。
         msgs_len_before = len(self.msgs)
-        res = eng.reader.retrieve_range(user_text, now, eng.long_pool, eng.temp_pool, eng.temp_V)
-        # ★★ 掩膜在这**最后一步**生效：读取器给的那 k 条里，冷却期内的**不注入**。
-        #   ⛔ `res` 本身不动（`k` / `k_raw` / `eff_n` 都还是读取器的读数，诊断要用）。
-        masked = self._cd_masked(turn_no)
-        shown = [t for t in res.texts if t not in masked]
-        shown_hits = [h for h in res.hits if h.text not in masked]
-        blocked = len(res.texts) - len(shown)
+        # ★★ **取件源**（2026-10-17）：新路 = `[R] 回忆`（件 / 标记集 / 传播）；
+        #   旧路 = 池子 + 余弦 + softmax。旧路**留着当兜底**（`session.use_recall=False`），
+        #   真机验过之后删（作者口径：旧池子删掉，旧仓库有完整的）。
+        取用: List[dict] = []
+        回忆为什么 = ""
+        用回忆 = bool(getattr(self.cfg.session, "use_recall", True))
+        if 用回忆:
+            from . import recall as _回忆          # ★ 懒导入（见文件头那条注释）
+            from .graph import 图 as _图
+            g = _图.载入(eng.cache_dir)
+            r = _回忆.回忆(user_text, g, os.path.join(eng.cache_dir, "底片"),
+                          嵌入=getattr(eng.embedder, "raw_embed", None))
+            回忆为什么 = str(r.get("为什么") or "")
+            masked = self._cd_masked(turn_no)
+            件们 = []
+            for one in (r.get("件") or []):
+                原文们 = [t for t in (one.get("原文们") or []) if t not in masked]
+                if not 原文们:
+                    continue        # 这一件全在冷却期里 ⇒ 不注入（⛔ 不找替补，沿用旧规）
+                for 文本 in 原文们:
+                    件们.append({"文本": 文本, "强度": float(one.get("分数") or 0.0)})
+                取用.append({"件id": one["件id"], "分数": float(one.get("分数") or 0.0),
+                             "强度": float(one.get("强度") or 0.0)})
+            shown = [x["文本"] for x in 件们]
+            shown_hits = []
+            blocked = 0
+            res = _替身结果(shown, 件数=len(取用))
+        else:
+            res = eng.reader.retrieve_range(user_text, now, eng.long_pool, eng.temp_pool, eng.temp_V)
+            # ★★ 掩膜在这**最后一步**生效：读取器给的那 k 条里，冷却期内的**不注入**。
+            #   ⛔ `res` 本身不动（`k` / `k_raw` / `eff_n` 都还是读取器的读数，诊断要用）。
+            masked = self._cd_masked(turn_no)
+            shown = [t for t in res.texts if t not in masked]
+            shown_hits = [h for h in res.hits if h.text not in masked]
+            blocked = len(res.texts) - len(shown)
+            件们 = [{"文本": h.text, "强度": float(getattr(h, "score", 0.0) or 0.0)}
+                   for h in shown_hits]
         turn = self.msgs + [{"role": "user", "content": user_text}]
         # ★★ **注入从"条目清单"改成"一段回忆"**（2026-10-17 作者口径：
         #   「原来的条目变成一段」·「编写的时候，把原文和节点强度给编写模型」）。
         #   取件（`shown`）不变 —— 变的是"给她看什么"：先 `[W] 编写` 成一段，再注入。
         #   ⛔ 三条退路都要有：编写挂了 ⇒ 退回条目清单（别把信息丢掉）；模型说"没有" ⇒ 不注入；
         #      开关关着 ⇒ 老样子（`session.render_recall = False`）。
-        件们 = [{"文本": h.text, "强度": float(getattr(h, "score", 0.0) or 0.0)} for h in shown_hits]
         回忆: dict = {}
         if shown:
             from . import writing          # ★ 懒导入（见文件头那条注释）
@@ -213,6 +259,8 @@ class Session:
                 "gate_blocked": int(res.gate_blocked),
                 "eff_n": res.eff_n, "layers": _layer_count(shown_hits),
                 # 这一轮花了多少 token（服务端给的），以及模型自己"再查一次"的痕迹。
+                # ★ 新路：这一轮**取用了哪些件**（旧路为空）+ 没取到的原因（一句话）
+                "取用": 取用, "回忆为什么": 回忆为什么,
                 # ★ 两个都是**给用户看的**：与"模型看到什么"无关。
                 "usage": usage, "pulls": pulls,
                 # ★ **这一轮的 CoT**（推理原文，可能在多次往返里）。给界面"点开看推理"用，
@@ -242,7 +290,7 @@ class Session:
             全流程 = ([dict(回忆["调用"], 序=0)] if 回忆.get("调用") else []) + 调用记录
             全流程 = [dict(c, 序=i) for i, c in enumerate(全流程)]
             f.加轮(turn_no, user_text, reply, 调用=全流程,
-                   取用=None,                       # 件层还没接进来 ⇒ 规范里的合法值 `null`
+                   取用=(取用 or None),             # ★ 新路给件id+分数；旧路仍是 `null`（合法值）
                    旧池取用=shown,                   # 过渡字段：件层接上就删
                    参数={"形状": "旧池（无件层）",
                          "k": int(res.k), "k_raw": int(res.k_raw),
@@ -403,17 +451,84 @@ class Session:
     # 用户设计：归档 = **接着刚才对话的特殊对话** —— 它发完草案你还能接着说，
     # 最后按「完成」才落地。三条路分开，都是为了"池子在你按完成之前一字不动"。
     def archive_draft(self, progress=None) -> dict:
-        """★ **只出草案**（不落地），草案存进 `rec["archive_draft"]` 并随 pending 落盘。"""
+        """★ **只出草案**（不落地），草案存进 `rec["archive_draft"]` 并随 pending 落盘。
+
+        ★★ 2026-10-17 换成**新线**（`archive_step`）：草案不再是"我打算记哪几条"，而是
+          「**这一场认出了哪几处 → 每处归进件X / 新建件Y**」。⛔ 图与标记集一字不动。
+        """
         self.rec["ts_end"] = time.time()
-        return self.engine.archive_draft(self.rec, progress=progress)
+        from . import archive_step                 # ★ 懒导入（模块级 import 会踩循环，见文件头）
+        from .graph import 图
+        f = self._底片()
+        f.落盘()
+        底片数据 = {"场id": f.场id, "系统前缀": f.系统前缀, "原文": f.原文(),
+                    "逐轮": f.逐轮, "撤回记录": f.撤回记录, "指纹": f.指纹}
+        g = 图.载入(self.engine.cache_dir)
+        草 = archive_step.草案(底片数据, g, self.engine.llm, f.场id,
+                              嵌入=getattr(self.engine.embedder, "raw_embed", None),
+                              进度=progress)
+        self.rec["archive_draft"] = {"land": "yes", "草": 草, "talk": [],
+                                     "rounds": len(草.get("标记") or []), "repairs": 0}
+        self.engine.pending.save(self.rec)
+        return {"land": "yes", "草": 草}
 
     def archive_revise(self, user_text: str, progress=None) -> dict:
-        """★ 归档期里用户又说了话 ⇒ 改草案（**池子仍然一字不动**）。"""
-        return self.engine.archive_revise(self.rec, user_text, progress=progress)
+        """★ 归档期里用户又说了话 ⇒ 改草案（**图与标记集仍然一字不动**）。
+
+        ⚠️ 过渡实现（诚实版）：新线的草案是"几处 → 归进/新建"，
+          这里按**字面**理解用户的意见 —— 认出「第 N 轮」就**跳过**那一处（标成 跳过），
+          认不出就把话记进 `talk` 并如实说"没认出要改哪一处"。
+          ⛔ 不偷偷调模型重判（那会花钱且不可预期）；等这一版上了真机、看清真实说法再升。
+        """
+        import re
+        d = dict(self.rec.get("archive_draft") or {})
+        草 = d.get("草")
+        if not 草:
+            return {"land": "failed", "err": "还没有草案可改（先跑一次归档）"}
+        轮们 = {int(x) for x in re.findall(r"第\s*(\d+)\s*轮", str(user_text))}
+        改了 = []
+        if 轮们:
+            for p in (草.get("判") or []):
+                if int(p.get("轮") or 0) in 轮们 and not p.get("跳过"):
+                    p["跳过"] = True
+                    改了.append(int(p["轮"]))
+            if 改了:
+                草["摘要"] = (草.get("摘要") or "") + "\n（按你说的，第 %s 轮这次不记。）" % (
+                    "、".join(str(x) for x in sorted(改了)))
+        d["talk"] = (list(d.get("talk") or []) + [str(user_text)])[-20:]
+        d["草"] = 草
+        self.rec["archive_draft"] = d
+        self.engine.pending.save(self.rec)
+        return {"land": "yes", "草": 草, "改了": 改了,
+                "err": "" if 改了 else "没认出要改哪一处 —— 说「第 3 轮别记」就行"}
+
+    
 
     def archive_commit(self, transcript=None, progress=None) -> dict:
-        """★ 「完成」：把草案**落地**（这一步才真正写池子/写底片/场次 +1）。"""
-        return self.engine.archive_land(self.rec, transcript=transcript, progress=progress)
+        """★ 「完成」：把草案**落地**（这一步才真正写图/标记集，然后收尾）。
+
+        ★★ 新线（2026-10-17）：先 `archive_step.完成`（④ 层1/层2 + 版本 +1 + `判/`），
+          再把 `land` 置成 `"no"` **借旧线那条"幂等收尾"** 走一遍收尾
+          （写转写 / 场次 +1 / 清 pending）—— ⛔ 不重写收尾，也不让旧池子动一分。
+        """
+        d = dict(self.rec.get("archive_draft") or {})
+        草 = d.get("草")
+        if not 草:
+            return self.engine.archive_land(self.rec, transcript=transcript, progress=progress)
+        from . import archive_step
+        from .graph import 图
+        g = 图.载入(self.engine.cache_dir)
+        # 「跳过」的那些不算：先滤掉再落地
+        有效 = dict(草)
+        有效.setdefault("场id", self.场id)      # ★ 旧版本存下的草案可能没有这一格
+        有效["判"] = [p for p in (草.get("判") or []) if not p.get("跳过")]
+        res = archive_step.完成(g, 有效)
+        self.rec["archive_draft"] = {"land": "no"}      # ★ 借"池子不动，只收尾"那条路
+        self.rec["新线"] = {"件": [x.get("件") for x in (res.get("层1") or [])],
+                          "版本": res.get("版本"),
+                          "剪出": (res.get("层2") or {}).get("剪出") or []}
+        out = self.engine.archive_land(self.rec, transcript=transcript, progress=progress)
+        return out
 
 
 def waiting_for_review(rec) -> bool:
@@ -437,7 +552,27 @@ def waiting_for_review(rec) -> bool:
     d = rec.get("archive_draft")
     if not isinstance(d, dict):
         return False
-    return str(d.get("land") or "") == "yes" and bool(d.get("ar"))
+    # ★★ 两代草案都要认：旧线 `ar`（dream 产出的 JSON）；新线 `草`（archive_step 的「判」）。
+    #   ⛔ 只认 `ar` 的后果很实：新线的草案被当成"没有草案"⇒ 重启时走**旧路补做**，
+    #      直接写进旧池子，而用户从没按过「完成」。
+    return str(d.get("land") or "") == "yes" and bool(d.get("ar") or d.get("草"))
+
+
+def _回忆工具(eng, 线索: str):
+    """`recall` 工具走新线：`[R]` 取件 → 把**整组原文**当作"查到的内容"回给它。
+
+    ★ 返回的形状与旧读取器一致（`_替身结果`：`texts/hits/k/k_raw/eff_n/gate_blocked`），
+      因为下游那段"拼话"的代码一行都不用改。
+    """
+    from . import recall as _回忆
+    from .graph import 图 as _图
+    g = _图.载入(eng.cache_dir)
+    r = _回忆.回忆(线索, g, os.path.join(eng.cache_dir, "底片"),
+                  嵌入=getattr(eng.embedder, "raw_embed", None))
+    文本们: List[str] = []
+    for one in (r.get("件") or []):
+        文本们.extend(one.get("原文们") or [])
+    return _替身结果(文本们, 件数=len(r.get("件") or []))
 
 
 def _dispatch(eng, call: dict, now: float):
@@ -463,7 +598,12 @@ def _dispatch(eng, call: dict, now: float):
     #   恢复在途那一场时不该因为改名而认不出来。
     if name in ("recall", "read_z"):
         q = str(args.get("query") or "")
-        got = eng.reader.retrieve_range(q, now, eng.long_pool, eng.temp_pool, eng.temp_V)
+        # ★ 2026-10-17：她"自己再查一次"也走 **`[R] 回忆`**（与自动注入同一条路）；
+        #   `use_recall=False` 时才退回旧读取器（过渡兜底）。
+        if bool(getattr(eng.cfg.session, "use_recall", True)):
+            got = _回忆工具(eng, q)
+        else:
+            got = eng.reader.retrieve_range(q, now, eng.long_pool, eng.temp_pool, eng.temp_V)
         # ★★ 2026-10-06：**空结果要有一句话**，而且这句话**不许有任何歧义**。
         #   为什么不能是空字符串：那正是"问了一件池子里没有的事"的现场 —— 旧写法回 `""`，
         #   模型只看到"工具没给东西"，于是**当成查到了**、拿自己手里的规矩顶上（真机抓到过）。
