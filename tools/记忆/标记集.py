@@ -1,115 +1,29 @@
 # -*- coding: utf-8 -*-
-"""标记集：提候选件 · 强化 · 衰减。
+"""标记集（**规格测试**）：提候选件 · 强化 · 衰减 —— 实现已经搬进包里，这里只留断言。
 
-★ 这三块是「还没写，但写不出来？不是」的那一类 —— 纯算法，不依赖训练。
-  判据与来历：`docs/流程框架.md` §3.2 · §四 · `docs/研究/REM-SWS-机制参考.md` ⑧
+★ 2026-10-17 起：**实现只有一份**，在 `memory/markset.py`（运行时用它）。
+  这个文件按依赖 import 过来，然后把原来那 17 条断言当**规格测试**继续跑 ——
+  ⛔ 不再各留一份实现（`分支声明 §4`：「要复用就按依赖引用，不抄」）。
+★ 参数不在这里写死：全部来自 `memory/knobs.py`（带依据等级）。
 
-数据结构（都不落盘，是运行时的字典）：
-    标记集   = {件id: confidence ∈ [0,1]}      ← 当前"活着的件"
-    件向量表 = {件id: [float, ...]}            ← 件的代表那句的嵌入（1024 维）
-
-★ 一条口头规矩：**只动 confidence，⛔ 删任何件**。
-  掉下去的只是"剪出标记集"，件本身还在图里（`记忆层 §3 ④` 层2）。
+跑：`python tools/记忆/标记集.py`
 """
-import io, json, math, os, sys, urllib.request
+import os
+import sys
 
-# ---------------- 旋钮（先给值，待标定；见 docs/流程框架.md §五） ----------------
-K = 5              # 提候选件取几个
-增量 = 0.05         # 强化一次加多少（抄 remnic）
-拉起到 = 0.25       # 冷成员被拉起的目标（★ 刚好过可用线 0.2）
-每窗口 = 0.1        # 每过一个窗口掉多少（抄 remnic）
-地板 = 0.1          # 掉到这儿就不再掉（抄 remnic）
-遍历门槛 = 0.2      # 低于它就不参与回忆（抄 remnic）
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))       # 仓库根 ⇒ 能 import memory
 
+from memory.markset import 余弦, 提候选件, 强化, 衰减              # noqa: E402,F401
+from memory.knobs import 件 as K件                                  # noqa: E402
 
-def 余弦(a, b):
-    """两向量的余弦。任一为零向量 ⇒ 0（⛔ 让 0/0 抛异常，那会让整批崩）。"""
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return sum(x * y for x, y in zip(a, b)) / (na * nb)
+# 自测里用的这些名字，与 `knobs` 里的值保持一致（改旋钮 ⇒ 断言读数也要跟着改）
+增量 = float(K件["强化增量"]["值"])
+拉起到 = float(K件["冷成员拉起"]["值"])
+每窗口 = float(K件["每窗口衰减"]["值"])
+地板 = float(K件["地板"]["值"])
+遍历门槛 = float(K件["遍历门槛"]["值"])
 
-
-def 提候选件(线索向量, 件向量表, 标记集=None, k=K):
-    """从【标记集里的件】中取 k 个候选（相似度 ＝ 余弦）。
-
-    ★ 相似度在这里是正当的 —— 它只"提候选/排序"，⛔ 不"定去留"（去留归 `⑤` 判）。
-    ★ 只从标记集里取：已剪出去的件⛔ 参与候选。
-    返回 [(件id, 分数), …]，按分数降序，最多 k 个。
-    """
-    池 = list(标记集.keys()) if 标记集 is not None else list(件向量表.keys())
-    分 = [(i, 余弦(线索向量, 件向量表[i])) for i in 池 if i in 件向量表]
-    分.sort(key=lambda t: (-t[1], t[0]))        # ★ 同分按 id 定序 ⇒ 跨进程可复现
-    return 分[:k]
-
-
-def 强化(标记集, 归进的件=None, 新建的件=None, 冷成员=(), 增量_=增量, 拉起=拉起到):
-    """`⑤` 判完后的两段 ④ 层1：写标记集。
-
-    · 归进的件  ⇒ 该件 +增量（上限 1.0）
-    · 新建的件  ⇒ 进标记集，confidence = 1.0
-    · 冷成员    ⇒ **拉到 max(当前, 拉起)**  ← 【作者定：第二次就强化到能用上就行】
-      ⚠️ 这一条是"低频重要"的活路：旧的不被拉起，"第二次被提起"就永远不成立。
-
-    ★ 就地改 标记集 并返回它（调用方通常直接接着用）。
-    """
-    if 新建的件 is not None:
-        标记集[新建的件] = 1.0
-    if 归进的件 is not None:
-        标记集[归进的件] = min(1.0, 标记集.get(归进的件, 1.0) + 增量_)
-    for i in (冷成员 or ()):
-        标记集[i] = max(标记集.get(i, 0.0), 拉起)   # ★ 只往上拉，⛔ 往下按
-    return 标记集
-
-
-def 衰减(标记集, 窗口数=1, 衰减率=每窗口, 底=地板):
-    """④ 层2 的长期维护：每过一个窗口 −衰减率；到地板不再掉。
-
-    ★ **⛔ 删件** —— 掉下去的只是"剪出标记集"，件还在图里（下次被碰到还能拉起）。
-    返回 (新标记集, 被剪出去的件id 列表)。两者都要给调用方：剪出去的进"待观察池"。
-    """
-    新 = {}
-    剪出 = []
-    for i, c in 标记集.items():
-        c2 = max(底, c - 衰减率 * 窗口数)
-        新[i] = c2
-        if c2 < 遍历门槛:
-            剪出.append(i)
-    return 新, 剪出
-
-
-# ---------------- 嵌入（要网络；只在真要跑的时候用） ----------------
-
-def 嵌入(文本们, 模型="qwen3.7-text-embedding", 批量=20):
-    """调阿里云的嵌入端点。★ 批量 ≤ 20（实测上限）。"""
-    E = {}
-    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "..", ".local", "接入凭证.env")
-    p = os.path.normpath(p)
-    if os.path.exists(p):
-        for ln in open(p, encoding="utf-8"):
-            ln = ln.strip()
-            if ln and not ln.startswith("#") and "=" in ln:
-                a, b = ln.split("=", 1)
-                E[a.strip()] = b.strip()
-    基 = E.get("ALIYUN_MAAS_BASE_URL", "").rstrip("/")
-    键 = E.get("ALIYUN_MAAS_API_KEY", "")
-    if not 基 or not 键:
-        raise RuntimeError("缺 ALIYUN_MAAS_BASE_URL / ALIYUN_MAAS_API_KEY")
-    出 = []
-    for i in range(0, len(文本们), 批量):
-        块 = 文本们[i:i + 批量]
-        体 = {"model": 模型, "input": 块}
-        r = urllib.request.Request(基 + "/embeddings", data=json.dumps(体).encode(),
-                                   headers={"Authorization": "Bearer " + 键,
-                                            "Content-Type": "application/json"})
-        d = json.loads(urllib.request.urlopen(r, timeout=120).read().decode())
-        出.extend(x["embedding"] for x in d["data"])
-    return 出
-
-
-# ---------------- 自测（⛔ 联网） ----------------
 
 def _自测():
     坏 = 0

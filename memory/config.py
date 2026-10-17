@@ -171,6 +171,13 @@ class ChatConfig:
     escalate: bool = True
     """空回复时 `max_tokens` ×2 / ×4 再试（空回复是**真问题**，不是偶发）。"""
 
+    top_logprobs: int = 5
+    """每轮要几个候选的 `logprobs`（**底片要存档**，2026-10-17）。
+    【实测 2026-10-17】官方 `api.deepseek.com` 非流式与**流式每个 chunk** 都给；
+    形状是**两串**（`logprobs.reasoning_content[]` / `logprobs.content[]`）。
+    ⛔ `temperature` 必须 > 0：`temperature = 0` 会把分布压成 one-hot、`logprob` 恒 0 ⇒ 整份作废。
+    ⚠️ 只增大响应体积，不多收 token 钱。"""
+
 
 # --------------------------------------------------------------------------- 读取器
 @dataclass
@@ -378,6 +385,12 @@ class CooldownConfig:
     （这个混法在 `00_项目文档.md §8.3` 错题集里一天犯过四次）。
     """
 
+    render_recall: bool = True
+    """★ 注入要不要走 `[W] 编写`（把件整理成**一段回忆**）—— 2026-10-17 作者口径：
+    「原来的条目变成一段」。
+    · `True`（默认）：取件 → 编写 → 一段；编写产物落 `<cache>/说/`
+    · `False`：退回旧样子（直接铺条目清单，省一次调用）
+    ⚠️ 编写要多一次模型调用 ⇒ 那一轮首字延迟会多 1–3 s；先按 True 跑，量过再定默认。"""
     enabled: bool = True
     """★ 总开关。开着 = 每次 push 之后，把这一轮**真正注进去的**那几条冷却掉。
 

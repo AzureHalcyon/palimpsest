@@ -24,6 +24,11 @@ from typing import Dict, List, Optional, Sequence
 
 from .prompts import load_session_prompts
 from .transcript import format_turn_line, push_block
+# ⚠️ [W] 编写 **不要**在模块级 import（2026-10-17 真机踩到）：
+#    rom . import writing 会在 memory/__init__.py 还在跑的时候反过来把
+#    memory.session 弄成"半初始化"⇒ 宿主 rom memory.session import Session 当场
+#    ImportError: cannot import name 'Session' from partially initialized module。
+#    ⇒ 改成**用的时候再 import**（与 ilm 同一个做法）。桌面复现不出来，只有真机报。
 
 
 class Session:
@@ -51,6 +56,23 @@ class Session:
         #     这一轮 push 就是空的 —— 不去捞第 k+1 名。
         #   单位 = **一轮**（一次 `ask`）；**一场之内有效**，新场从空开始。
         self.cd_mask: Dict[str, int] = {}
+        self._film = None
+
+    # ------------------------------------------------------------------ 底片
+    @property
+    def 场id(self) -> str:
+        """`YYYY-MM-DD-NN`（NN = 这一场的 `k`）—— 与 `流程框架 §3.1.1` 的 `场id` 约定一致。"""
+        ts = float(self.rec.get("ts_start") or time.time())
+        return "%s-%02d" % (time.strftime("%Y-%m-%d", time.localtime(ts)), int(self.k))
+
+    def _底片(self):
+        """这一场的底片（懒开；恢复在途那一场时 `film.py` 自己会把已有的接回来）。"""
+        if self._film is None:
+            from .film import 底片, 指纹
+            from .prompts import SYS1, SYS2
+            self._film = 底片(self.场id, 指纹(self.cfg, (SYS1, SYS2)), self.engine.cache_dir,
+                             系统前缀=[str(m.get("content") or "") for m in self.msgs[:2]])
+        return self._film
 
     # ------------------------------------------------------------------ 一轮
     def ask(self, user_text: str, progress=None) -> dict:
@@ -76,11 +98,30 @@ class Session:
         shown_hits = [h for h in res.hits if h.text not in masked]
         blocked = len(res.texts) - len(shown)
         turn = self.msgs + [{"role": "user", "content": user_text}]
-        # ★ **push 为空 ⇒ 不插那条注入消息**（否则上下文里留一个孤零零的标题）。
-        #   这就是"返回空"的下游规则：这一轮只靠会话前缀与上下文本身回话。
+        # ★★ **注入从"条目清单"改成"一段回忆"**（2026-10-17 作者口径：
+        #   「原来的条目变成一段」·「编写的时候，把原文和节点强度给编写模型」）。
+        #   取件（`shown`）不变 —— 变的是"给她看什么"：先 `[W] 编写` 成一段，再注入。
+        #   ⛔ 三条退路都要有：编写挂了 ⇒ 退回条目清单（别把信息丢掉）；模型说"没有" ⇒ 不注入；
+        #      开关关着 ⇒ 老样子（`session.render_recall = False`）。
+        件们 = [{"文本": h.text, "强度": float(getattr(h, "score", 0.0) or 0.0)} for h in shown_hits]
+        回忆: dict = {}
         if shown:
-            turn.append({"role": "system",
-                         "content": push_block(self.cfg.session.push_header, shown)})
+            from . import writing          # ★ 懒导入（见文件头那条注释）
+            if bool(getattr(self.cfg.session, "render_recall", True)):
+                回忆 = writing.编写(eng.llm, 件们, 场id=self.场id,
+                                    轮=turn_no, 线索=user_text)
+                writing.记说(eng.cache_dir, self.场id, turn_no, user_text, 件们, 回忆)
+                if 回忆.get("编写"):
+                    turn.append({"role": "system",
+                                 "content": self.cfg.session.push_header + "\n" + 回忆["编写"]})
+                elif not 回忆.get("ok"):
+                    # 编写失败（或正文被推理吃光）⇒ 退回条目清单：宁可给清单，也别白丢这一轮
+                    turn.append({"role": "system",
+                                 "content": push_block(self.cfg.session.push_header, shown)})
+                # 模型说"没有" ⇒ 这一轮不注入（由它自己判断"此刻想不起什么"）
+            else:
+                turn.append({"role": "system",
+                             "content": push_block(self.cfg.session.push_header, shown)})
         pulls, wake_calls = [], []
         used = 0
         # ★★ 这一轮的 **CoT**（2026-10-07 用户要求：「聊天的 COT 呢？最好也记下来吧？」）。
@@ -91,10 +132,17 @@ class Session:
         #   ⛔ 只记在**轮次记录**里，**绝不塞回 `msgs`**：DeepSeek 那边明确不要
         #     把 `reasoning_content` 传回去，塞了既费 token 又可能带偏下一轮。
         reason_parts: List[str] = []
+        # ★★ **全流程全记录**（2026-10-17 作者口径：「底片是存档…… 全流程全记录，可以多存，
+        #   不能少存」）：这一轮里的**每一次模型往返**都留一份 —— 请求（首次含完整上下文、
+        #   之后只记新追加的那几条）、输出（正文/推理/工具调用）、`logprobs`、用量、耗时。
+        调用记录: List[dict] = []
+        已记到哪 = len(turn)          # 上一次记完之后 `turn` 的长度（下一次只记新增的那几条）
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         while True:
             try:
-                msg = eng.llm.chat(turn, tools=eng.session_tools(), progress=progress)
+                起点 = 已记到哪
+                msg = eng.llm.chat(turn, tools=eng.session_tools(), progress=progress,
+                                   logprobs=True)
                 _acc_usage(usage, getattr(eng.llm, "last_usage", None))
             except Exception as e:  # noqa: BLE001
                 reply = "[ERR] %r" % e
@@ -102,6 +150,29 @@ class Session:
             _r = str(msg.get("reasoning_content") or "")
             if _r:
                 reason_parts.append(_r)
+            # ---- 全流程：把这一次调用记下来
+            try:
+                记录 = dict(msg.get("_call") or {})
+                记录["序"] = len(调用记录)
+                记录["请求条数"] = len(turn)
+                # ★★ **只存增量**（2026-10-17 作者口径：「去存增量」）：
+                #   首条 = 这一轮相对**上一轮结束时的上下文**新追加的那几条（`msgs_len_before` 起）；
+                #   之后 = 同一次调用之间新追加的（工具往返）。
+                #   ⛔ 每条都抄一份"完整上下文"是**平方级**的：上下文 1M token 时每轮多存 3.9 MB、
+                #     1000 轮 ⇒ 3.8 GB（实测推算）。拼回来完全等价：系统前缀 + 逐条增量。
+                起点 = msgs_len_before if 记录["序"] == 0 else 起点
+                记录["请求增量"] = list(turn[起点:])
+                记录["输出"] = {"content": msg.get("content") or "",
+                                "reasoning": _r,
+                                "tool_calls": [{"name": (c.get("function") or {}).get("name"),
+                                                "arguments": (c.get("function") or {}).get("arguments")}
+                                               for c in (msg.get("tool_calls") or [])]}
+                记录["logprobs"] = msg.get("logprobs") or {}
+                记录["usage"] = dict(getattr(eng.llm, "last_usage", None) or {})
+                调用记录.append(记录)
+                已记到哪 = len(turn)
+            except Exception:                            # noqa: BLE001  ⛔ 记账失败不打断对话
+                pass
             calls = msg.get("tool_calls")
             # ★ `max_pull` 管的是**模型往返次数**（那才是钱），不是"查了几次记忆"——
             #   唤醒工具占用的是同一个往返预算。想放宽就调这个，别去动各工具自己的上限。
@@ -161,6 +232,29 @@ class Session:
         # ★ 掩膜状态一起落盘：手机上进程随时可能被杀，恢复之后不该把刚说过的话再说一遍。
         self.rec["cd_mask"] = self.cd_mask
         eng.checkpoint(self.rec, msgs=self.msgs)
+
+        # ★★ **落底片**（2026-10-17 · 存档：全流程全记录）
+        #   存的不只是"说了什么"，还有这一轮每一次模型往返的请求/输出/`logprobs`/用量/耗时。
+        #   ⛔ 出任何错都不许打断对话（`加轮` / `落盘` 自己已经 try 住；这里再兜一层）。
+        try:
+            f = self._底片()
+            # ★ 编写那一次调用排在最前（它是这一轮流程的第一步）——「全流程全记录」
+            全流程 = ([dict(回忆["调用"], 序=0)] if 回忆.get("调用") else []) + 调用记录
+            全流程 = [dict(c, 序=i) for i, c in enumerate(全流程)]
+            f.加轮(turn_no, user_text, reply, 调用=全流程,
+                   取用=None,                       # 件层还没接进来 ⇒ 规范里的合法值 `null`
+                   旧池取用=shown,                   # 过渡字段：件层接上就删
+                   参数={"形状": "旧池（无件层）",
+                         "k": int(res.k), "k_raw": int(res.k_raw),
+                         "gate_tau": float(getattr(self.cfg.reader, "gate_tau", 0.0) or 0.0),
+                         "cd_blocked": int(blocked), "gate_blocked": int(res.gate_blocked),
+                         "注入": ("编写" if 回忆.get("编写") else ("清单" if shown else "空")),
+                         "编写耗时ms": int(回忆.get("耗时ms") or 0),
+                         "编写提示词哈希": str(回忆.get("提示词哈希") or "")},
+                   成本=dict(usage))
+            f.落盘()
+        except Exception:                                # noqa: BLE001
+            pass
 
         return {"reply": reply, "push": shown, "k": res.k, "k_raw": res.k_raw,
                 "cd_blocked": blocked,
@@ -240,6 +334,16 @@ class Session:
         # 同一次落盘：上下文与掩膜不一起写下去，恢复出来就是自相矛盾的一份状态。
         self.rec["cd_mask"] = self.cd_mask
         self.engine.checkpoint(self.rec, msgs=self.msgs)
+
+        # ⑤ ★★ **底片里留痕，但⛔不删原文**（2026-10-17 作者口径：底片是存档；
+        #    "撤回"本身也是**发生过的事**，它也要留下来）。⇒ 只给那一轮打标 + 记一笔。
+        try:
+            f = self._底片()
+            f.撤回(len(turns) + 1)
+            f.落盘()
+        except Exception:                                # noqa: BLE001
+            pass
+
         return {"ok": True, "user": str(last.get("user") or ""),
                 "ai": str(last.get("ai") or ""), "turns_left": len(turns)}
 
@@ -354,7 +458,10 @@ def _dispatch(eng, call: dict, now: float):
     if not isinstance(args, dict):
         args = {}
 
-    if name == "read_z":
+    # ★ 2026-10-17 改名：`read_z` → `recall`（新线的叫法就是 `[R] 回忆`）。
+    #   ⚠️ 旧名**留着当别名**：老 `pending.json` 的历史里有 `read_z` 的 tool 记录，
+    #   恢复在途那一场时不该因为改名而认不出来。
+    if name in ("recall", "read_z"):
         q = str(args.get("query") or "")
         got = eng.reader.retrieve_range(q, now, eng.long_pool, eng.temp_pool, eng.temp_V)
         # ★★ 2026-10-06：**空结果要有一句话**，而且这句话**不许有任何歧义**。
