@@ -128,6 +128,16 @@ def main():
          len(g.件) == 1 and abs(list(g.标记集.values())[0] - 0.9) < 1e-9,
          (len(g.件), g.标记集))
     断言("★ 版本 +1、图落盘了", g.版本 == 1 and os.path.exists(g._路径()), (g.版本, os.path.exists(g._路径())))
+    # ★★ `版本对`（`流程框架 §3.1.3`：存储 · 一场一次归档 · 必填）——
+    #   "变"和"记录错了"分不开，就是缺它。⛔ 也不许带时间戳（冻结、可比较）。
+    _vp = os.path.join(tmp, "版本对.jsonl")
+    _行 = [json.loads(x) for x in io.open(_vp, encoding="utf-8") if x.strip()] \
+        if os.path.exists(_vp) else []
+    断言("★★ 「完成」写出 `版本对`（场id + 图版本 + 读法版本 + 指纹，且不带时间戳）",
+         len(_行) == 1 and _行[0].get("场id") == "2026-10-17-01"
+         and _行[0].get("图版本") == 1 and isinstance(_行[0].get("读法版本"), int)
+         and isinstance(_行[0].get("指纹"), dict)
+         and not any(k in _行[0] for k in ("ts", "时间", "落盘时间")), _行)
     断言("★ `判/` 落盘了（模型生成过的东西必须留档）",
          os.path.isdir(os.path.join(tmp, "判"))
          and os.path.getsize(os.path.join(tmp, "判", "2026-10-17-01.jsonl")) > 0)
