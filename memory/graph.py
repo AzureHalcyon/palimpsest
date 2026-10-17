@@ -154,12 +154,22 @@ class 图:
         it = self.件.get(件id)
         if it is None:
             return
-        if cell_id not in it["成员"]:
+        _新成员 = cell_id not in it["成员"]
+        if _新成员:
             it["成员"].append(cell_id)
         if cell_id not in it["点亮"]:
             it["点亮"].append(cell_id)
-        if 表示 is not None and not it.get("表示"):
-            it["表示"] = [float(x) for x in 表示]
+        # ★★★ 2026-10-17（作者指出"为啥会有这种信息截断"）：件的向量原来是**首格的向量**，
+        #   而且归进时**从不更新** ⇒ 一个三格的件只用第一格的语义去检索（"碗我收了"那格
+        #   根本不参与匹配）。设计里写的是「组亮 ＝ **池化**(成员的传播后表示)」⇒ 改成
+        #   **增量平均**：`表示 = (表示 × n + 新向量) / (n + 1)`（n = 并进来之前的成员数）。
+        if 表示 is not None and len(表示):
+            _旧 = [float(x) for x in (it.get("表示") or [])]
+            if not _旧 or len(_旧) != len(表示):
+                it["表示"] = [float(x) for x in 表示]
+            elif _新成员:
+                _n = max(1, len(it["成员"]) - 1)
+                it["表示"] = [(a * _n + float(b)) / (_n + 1) for a, b in zip(_旧, 表示)]
         if str(来源 or "意外") == "手工":
             it["来源"] = "手工"
 

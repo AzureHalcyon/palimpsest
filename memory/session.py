@@ -493,6 +493,10 @@ class Session:
         草 = archive_step.草案(底片数据, g, self.engine.llm, f.场id,
                               嵌入=getattr(self.engine.embedder, "raw_embed", None),
                               其他底片=其他底片,
+                              # ★★★ 2026-10-17（作者定）：「直接就是对话完之后的状态，
+                              #   fork 一份接着问就可以」⇒ `⑤` **接着这一场的对话**问，
+                              #   ⛔ 由我们把整场重新渲染一遍塞进提示词。
+                              对话=list(self.msgs),
                               进度=progress)
         self.rec["archive_draft"] = {"land": "yes", "草": 草, "talk": [],
                                      "rounds": len(草.get("标记") or []), "repairs": 0}

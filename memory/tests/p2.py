@@ -144,7 +144,7 @@ def main():
     llm = ScriptedLLM([{"role": "assistant", "content": '{"记": []}'}],
                       fallback={"role": "assistant", "content": '{"归进": null, "新建": true, "说法": "第一批"}'})
     草1 = archive_step.草案(底, g, llm, "2026-10-17-01", 嵌入=嵌入)
-    _判调 = [c for c in llm.calls if "下面是这一场里的一处" in str(c.get("messages"))]
+    _判调 = [c for c in llm.calls if "判断这一处" in str(c.get("messages"))]
     断言("★★ 标记集为空 ⇒ ⑤ 一次都没调（⛔ 不白花钱）；只调了「问她要不要标」那一次",
          len(_判调) == 0 and len(llm.calls) == 1, (len(_判调), len(llm.calls)))
     断言("★ 她的自问自答进了草案（`自标`），且这一场她一处都没报",
@@ -205,7 +205,7 @@ def main():
         草2 = archive_step.草案(底2, g2, llm2, "2026-10-17-02", 嵌入=嵌入)
     finally:
         _K判["重复候选相似度"]["值"] = _旧阈
-    _判调2 = [c for c in llm2.calls if "下面是这一场里的一处" in str(c.get("messages"))]
+    _判调2 = [c for c in llm2.calls if "判断这一处" in str(c.get("messages"))]
     断言("★ 有候选时**真问了模型**一次", len(_判调2) == 1, (len(_判调2), len(llm2.calls)))
     断言("★ 候选里含那个已有的件",
          草2["候选"] and 件id in [c[0] for c in 草2["候选"][草2["标记"][0]["轮"]]],
@@ -430,6 +430,60 @@ def main():
          any("不吃辣" in t for t in _文们) and any("还行" in t for t in _文们), _文们)
     断言("★★ 顺序是**以前 → 后来**（按场、按轮排）",
          bool(_文们) and "不吃辣" in _文们[0], _文们)
+
+    print("\n[9d] ⑤ 接着整场对话问 · 候选给整组几段 · 同场改口落成件")
+    # ★★★ 作者原话：「直接就是对话完之后的状态，fork 一份接着问就可以」
+    _gt = 图(tempfile.mkdtemp(prefix="p2fork-"))
+    # ⚠️ 标记集**不能是空的**：空的时候 `⑤` 会直接跳过（"没有候选 ⇒ ⛔ 白花钱"），
+    #   那一行判是"没问模型的因"，不是真的判。这里先放一件进去。
+    _gt.加cell("2026-10-17-80", 1, 0, 3)
+    _g0 = _gt.新件(["cell-0001"], [1.0, 0.0], 代表="cell-0001")
+    _gt.标记集 = {_g0: 1.0}
+    _lt = ScriptedLLM([{"role": "assistant", "content": '{"记": []}'},
+                       {"role": "assistant", "content": '{"归进": null, "新建": true, "说法": "x"}'}],
+                      fallback={"role": "assistant",
+                                "content": '{"归进": null, "新建": true, "说法": "x"}'})
+    _d = 造底片([("嗯", "在。", 0.5)] * 6 + [("我搬了", "搬哪儿？", 4.0)])
+    _d["场id"] = "2026-10-17-81"
+    _对话 = [{"role": "system", "content": "你是她"}, {"role": "user", "content": "第一句"},
+             {"role": "assistant", "content": "第一回"}]
+    archive_step.草案(_d, _gt, _lt, "2026-10-17-81", 嵌入=嵌入, 对话=_对话)
+    _判消息 = next((c["messages"] for c in _lt.calls if "判断这一处" in str(c.get("messages"))), [])
+    断言("★★ `⑤` 的输入是**接着整场对话**（对话在前，归档指令在最后一条）",
+         len(_判消息) == len(_对话) + 1 and _判消息[:len(_对话)] == _对话
+         and "判断这一处" in str(_判消息[-1]), [_m.get("role") for _m in _判消息])
+
+    # 候选行：一件**两段**
+    _c3 = _gt.加cell("2026-10-17-82", 1, 0, 3)
+    _c4 = _gt.加cell("2026-10-17-82", 2, 3, 6)
+    _pid = _gt.新件([_c3["id"], _c4["id"]], [1.0, 0.0], 代表=_c3["id"])
+    _fd2 = tempfile.mkdtemp(prefix="p2cand-")
+    with _gz.open(os.path.join(_fd2, "2026-10-17-82.json.gz"), "wt", encoding="utf-8") as _fh:
+        _fh.write(json.dumps({"场id": "2026-10-17-82", "原文": "第一段第二段", "逐轮": [
+            {"轮": 1, "刺激": "第一段", "她说": "", "刺激区间": [0, 3], "她说区间": [3, 3]},
+            {"轮": 2, "刺激": "第二段", "她说": "", "刺激区间": [3, 6], "她说区间": [6, 6]}]}))
+    _行 = archive_step._候选行(_gt, [(_pid, 0.7)], archive_step.底片表(_fd2))
+    断言("★★ 候选**一件给几段**（⛔ 只给 `代表` 那一格），且标出是同一件的另一处",
+         "第一段" in _行 and "第二段" in _行 and "同件另一处" in _行, _行)
+
+    # 同场改口：改口填「轮」⇒ `完成()` 解析成件
+    _gm = 图(tempfile.mkdtemp(prefix="p2alt2-"))
+    _dm = {"场id": "2026-10-17-83",
+           "cell": [{"场id": "2026-10-17-83", "轮": 1, "起": 0, "止": 3},
+                    {"场id": "2026-10-17-83", "轮": 2, "起": 3, "止": 6}],
+           "标记": [{"轮": 1, "误差": 0.9, "阈值": 0.5, "来源": "意外"},
+                    {"轮": 2, "误差": 0.9, "阈值": 0.5, "来源": "意外"}],
+           "判": [{"轮": 1, "来源": "意外", "归进": None, "新建": True, "说法": "旧的",
+                   "连": [], "改口": None, "向量": [1.0, 0.0], "起": 0, "止": 3},
+                  {"轮": 2, "来源": "意外", "归进": None, "新建": True, "说法": "新的",
+                   "连": [], "改口": {"轮": 1, "说法": "以前说 A → 现在说 B"},
+                   "向量": [1.0, 0.0], "起": 3, "止": 6}],
+           "指纹": {}}
+    _rm = archive_step.完成(_gm, _dm)
+    _改行 = [x for x in (_rm.get("层1") or []) if x.get("动作") == "改口"]
+    断言("★★ 改口填「轮」⇒ 完成时**解析成件**并落 `修正`（同一场里更早那处还没成件）",
+         bool(_改行) and any((_gm.件.get(x.get("新件")) or {}).get("修正") for x in _改行),
+         (_改行, {k: v.get("修正") for k, v in _gm.件.items()}))
 
     print()
     if 坏:
