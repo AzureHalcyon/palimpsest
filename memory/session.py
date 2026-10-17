@@ -24,7 +24,9 @@ import time
 from typing import Dict, List, Optional, Sequence
 
 from .prompts import load_session_prompts
-from .transcript import push_block
+# ⚠️ 2026-10-17：`push_block` 不再 import —— 注入只剩"编写那一段"一条路，
+#    ⛔ 没有"退回条目清单"这回事了（原文不出读取层）。它在 `transcript.py` 里还在，
+#    但**没有人再往她的上下文里铺原文**。
 # ⚠️ [W] 编写 **不要**在模块级 import（2026-10-17 真机踩到）：
 #    rom . import writing 会在 memory/__init__.py 还在跑的时候反过来把
 #    memory.session 弄成"半初始化"⇒ 宿主 rom memory.session import Session 当场
@@ -102,23 +104,36 @@ class Session:
         回忆为什么 = ""
         from . import recall as _回忆          # ★ 懒导入（见文件头那条注释）
         from .graph import 图 as _图
-        g = _图.载入(eng.cache_dir)
-        r = _回忆.回忆(user_text, g, os.path.join(eng.cache_dir, "底片"),
-                      嵌入=getattr(eng.embedder, "raw_embed", None))
-        回忆为什么 = str(r.get("为什么") or "")
+        # ★★ 2026-10-17（作者：「对照组实验是可以做一下的」）：**自动推送**是一个开关。
+        #   关掉 ⇒ 这一轮不查也不编，全靠她自己调 `recall`（那才是 pull-only 那一臂）。
+        #   两臂要能跑在同一份图上，才谈得上对照。
+        自动推 = bool(getattr(self.cfg.session, "auto_push", True))
+        为什么自动推 = ""
+        if 自动推:
+            g = _图.载入(eng.cache_dir)
+            r = _回忆.回忆(user_text, g, os.path.join(eng.cache_dir, "底片"),
+                          嵌入=getattr(eng.embedder, "raw_embed", None))
+            回忆为什么 = str(r.get("为什么") or "")
+        else:
+            r = {"件": []}
+            为什么自动推 = "（自动推送关着：这一轮不查记忆，等她自己去 recall）"
         masked = self._cd_masked(turn_no)
         blocked = 0            # ★ 必须在循环之前（它被循环里的 continue 累加）
         件们 = []
         for one in (r.get("件") or []):
             原文们 = [t for t in (one.get("原文们") or []) if t not in masked]
+            强度们 = list(one.get("强度们") or [])
             if not 原文们:
                 # ★★ 2026-10-17（审查抓到）：`blocked` 初始化之后**从来没累加过** ⇒
                 #   `cd_blocked` 永远是 0，而它正是"开/关冷却那次对照"的读数
                 #   ⇒ 对照实验会得出"冷却没挡任何东西"的错误结论。
                 blocked += len(one.get("原文们") or [])
                 continue        # 这一件全在冷却期里 ⇒ 不注入（⛔ 不找替补，沿用旧规）
-            for 文本 in 原文们:
-                件们.append({"文本": 文本, "强度": float(one.get("分数") or 0.0)})
+            for n, 文本 in enumerate(原文们):
+                # ★ 每段带**自己的**强度（该格的起点，∈[0,1]），⛔ 一件里所有段同一个数
+                强 = (强度们[n] if n < len(强度们)
+                      else float(one.get("分数") or 0.0))
+                件们.append({"文本": 文本, "强度": float(强)})
             取用.append({"件id": one["件id"], "分数": float(one.get("分数") or 0.0),
                          "强度": float(one.get("强度") or 0.0)})
         shown = [x["文本"] for x in 件们]
@@ -126,13 +141,17 @@ class Session:
         # ★★ **注入从"条目清单"改成"一段回忆"**（2026-10-17 作者口径：
         #   「原来的条目变成一段」·「编写的时候，把原文和节点强度给编写模型」）。
         #   取件（`shown`）不变 —— 变的是"给她看什么"：先 `[W] 编写` 成一段，再注入。
-        #   ⛔ 三条退路都要有：编写挂了 ⇒ 退回条目清单（别把信息丢掉）；模型说"没有" ⇒ 不注入；
-        #      开关关着 ⇒ 老样子（`session.render_recall = False`）。
+        # ★★★ 2026-10-17（作者："反正不该直接透露原文，原文信息密度肯定还是没有编写的高"）：
+        #   **她永远不该看见原文**。所以原来那条"编写挂了 ⇒ 退回条目清单"的退路**删掉了** ——
+        #   那是把 `他：…/她：…` 的生料直接塞进她的上下文：既破人称，密度也不如编写。
+        #   ⇒ 编写失败就**这一轮不注入**，把原因写进 `注入` 与 `回忆.err`（大声留痕，⛔ 静默降级）。
+        #   ⚠️ 只留一个**调试用**的开关 `session.render_recall=False`（对照用，默认开）。
         回忆: dict = {}
-        # ★★★ 2026-10-17（作者指出）：「一条都没注入」有**四种**完全不同的原因，
+        # ★★★ 2026-10-17（作者指出）：「一条都没注入」有**几种**完全不同的原因，
         #   原来它们全都记成 `"空"` ⇒ 我上一份汇报就把「这一段两轮前给过、还在 `msgs` 里」
         #   误读成「编写没写成」。⛔ 混成一个值就会造出**假故障**（也会盖住真故障）。
-        注入方式 = ("空（没取到件）" if not blocked else "空（都在冷却期）")
+        注入方式 = ("空（关了自动推送）" if not 自动推
+                    else ("空（没取到件）" if not blocked else "空（都在冷却期）"))
         if shown:
             注入方式 = "空（编写说没有）"     # 只有走到「编写说没有」才留这个
             from . import writing          # ★ 懒导入（见文件头那条注释）
@@ -144,16 +163,14 @@ class Session:
                     注入方式 = "编写"
                     turn.append({"role": "system",
                                  "content": self.cfg.session.push_header + "\n" + 回忆["编写"]})
-                elif not 回忆.get("ok"):
-                    # 编写失败（或正文被推理吃光）⇒ 退回条目清单：宁可给清单，也别白丢这一轮
-                    注入方式 = "清单"
-                    turn.append({"role": "system",
-                                 "content": push_block(self.cfg.session.push_header, shown)})
+                else:
+                    注入方式 = "空（编写失败）"
                 # 模型说"没有" ⇒ 这一轮不注入（由它自己判断"此刻想不起什么"）
             else:
-                注入方式 = "清单"
-                turn.append({"role": "system",
-                             "content": push_block(self.cfg.session.push_header, shown)})
+                # ★★★ 2026-10-17（作者："反正不该直接透露原文"）：关掉编写 = **这一轮不注入**。
+                #   原来这条会退回**条目清单**（原文生料直接进她的上下文）—— 那是"原文出读取层"的
+                #   最后一条缝，堵掉。这个开关现在只剩"对照/排查"一个用途。
+                注入方式 = "空（关了注入）"
         pulls, wake_calls = [], []
         used = 0
         # ★★ 这一轮的 **CoT**（2026-10-07 用户要求：「聊天的 COT 呢？最好也记下来吧？」）。
@@ -245,7 +262,7 @@ class Session:
                 "cd_blocked": blocked,
                 # 这一轮花了多少 token（服务端给的），以及模型自己"再查一次"的痕迹。
                 # ★ 新路：这一轮**取用了哪些件**（旧路为空）+ 没取到的原因（一句话）
-                "取用": 取用, "回忆为什么": 回忆为什么,
+                "取用": 取用, "回忆为什么": (回忆为什么 + 为什么自动推),
                 # ★★★ 2026-10-17（作者口径）：**整个激活分布**（⛔ 只前 k）。
                 #   归档时按它强化已有件 —— 那才是「**提得多 ⇒ 记得牢**」（REM-SWS 的 repetition）。
                 #   ★ 而"取用"只记前 k，是给注入用的；**强化要看全场**。
@@ -254,6 +271,8 @@ class Session:
                 #   ⛔ 只给用户看；`msgs` 里只有那段文字本身（不进读取路径）。
                 "回忆": ({"编写": 回忆.get("编写") or "",
                           "没有": bool(回忆.get("没有")),
+                          # ★ 失败要**留痕**（现在编写失败不再退回原文清单，只剩下这一格能说明为什么）
+                          "err": str(回忆.get("err") or ""),
                           "用了": [{"文本": x.get("文本"), "强度": x.get("强度")} for x in 件们],
                           "版本": dict(回忆.get("版本") or {}),
                           "耗时ms": int(回忆.get("耗时ms") or 0)}
@@ -614,22 +633,50 @@ def waiting_for_review(rec) -> bool:
     return str(d.get("land") or "") == "yes" and bool(d.get("ar") or d.get("草"))
 
 
-def _回忆工具(eng, 线索: str) -> Dict:
-    """`recall` 工具走新线：`[R]` 取件 → 把**整组原文**当作"查到的内容"回给它。
+def _回忆工具(eng, 线索: str, sess=None) -> Dict:
+    """`recall` 工具走新线：`[R]` 取件 → **编写成一段** → 把那段回给它。
 
-    ★ 返回 `{"原文": [...], "件数": n}` —— 就是这次真正取到的东西。
-      ⛔ 别再套一个"和旧读取器同形"的替身：那些字段（`k_raw` / `eff_n` /
-      `gate_blocked`）底下已经没有对应的东西了，编出来的数只会骗人。
+    ★★★ 2026-10-17（作者："反正不该直接透露原文，原文信息密度肯定还是没有编写的高"）：
+      **这里原来把 `他：… / 她：…` 的原文整段回给它** —— 同一个功能、两种质地：
+      推送那条是编写过的，自查这条却是生料（破人称、密度也低）。
+      ⇒ 现在两条路**同一质地**：都只给她**编写过的那段**。⛔ 原文永远不出读取层。
+    ⚠️ 代价：每次自查多一次 fast 调用（实测她自己查 = 245 轮里 22 次，很便宜）。
+    ⚠️ 编写失败 / 它说"没有" ⇒ 回一句"这次没想起来"，⛔ 不回原文（宁可空手）。
     """
     from . import recall as _回忆
+    from . import writing
     from .graph import 图 as _图
     g = _图.载入(eng.cache_dir)
     r = _回忆.回忆(线索, g, os.path.join(eng.cache_dir, "底片"),
                   嵌入=getattr(eng.embedder, "raw_embed", None))
-    文本们: List[str] = []
+    件们: List[Dict] = []
     for one in (r.get("件") or []):
-        文本们.extend(one.get("原文们") or [])
-    return {"原文": 文本们, "件数": len(r.get("件") or [])}
+        原文们 = list(one.get("原文们") or [])
+        强度们 = list(one.get("强度们") or [])
+        for n, 文本 in enumerate(原文们):
+            件们.append({"文本": 文本,
+                         "强度": float(强度们[n] if n < len(强度们)
+                                       else (one.get("强度") or 0.0))})
+    if not 件们:
+        return {"回忆": "", "件数": 0, "为什么": "没取到件"}
+    记得 = writing.编写(eng.llm, 件们,
+                        场id=(getattr(sess, "场id", "") or ""),
+                        轮=len((getattr(sess, "rec", {}) or {}).get("turns") or []) + 1,
+                        线索=线索)
+    if 记得.get("编写"):
+        if sess is not None and getattr(sess, "engine", None) is not None:
+            try:                                      # ★ 编写过的东西一律留档
+                writing.记说(sess.engine.cache_dir,
+                             getattr(sess, "场id", "") or "",
+                             len((sess.rec or {}).get("turns") or []) + 1,
+                             线索, 件们, 记得)
+            except Exception:                        # noqa: BLE001
+                pass
+        return {"回忆": 记得["编写"], "件数": len(r.get("件") or []), "为什么": ""}
+    # ⛔ 不回原文（宁可空手）：失败与"它说没有"要分开说，否则工具会回一句不实的话
+    if 记得.get("ok") and 记得.get("没有"):
+        return {"回忆": "", "件数": 0, "为什么": "编写说没有"}
+    return {"回忆": "", "件数": len(r.get("件") or []), "为什么": "编写失败"}
 
 
 def _dispatch(eng, call: dict, now: float, sess=None):
@@ -689,7 +736,7 @@ def _dispatch_内(eng, call: dict, now: float, sess=None):
         q = str(args.get("query") or "")
         # ★ 2026-10-17：她"自己再查一次"也走 **`[R] 回忆`**（与自动注入**同一条路**）。
         #   ⛔ 旧读取器那条兜底已经删掉（池子不存在了）。
-        got = _回忆工具(eng, q)
+        got = _回忆工具(eng, q, sess)
         # ★★ 2026-10-06：**空结果要有一句话**，而且这句话**不许有任何歧义**。
         #   为什么不能是空字符串：那正是"问了一件池子里没有的事"的现场 —— 旧写法回 `""`，
         #   模型只看到"工具没给东西"，于是**当成查到了**、拿自己手里的规矩顶上（真机抓到过）。
@@ -706,7 +753,17 @@ def _dispatch_内(eng, call: dict, now: float, sess=None):
         #      ② "想不起来"       ⇒ 歧义（暗示"以前知道、只是取不出来"＝伪造过去）；
         #      ③ "没有返回任何条目" ⇒ **不实**（检索跑了，只是没有一条过线）——
         #         而且把"没有过线的"这条**本身有用的信息**丢掉了。
-        if not got["原文"]:
+        # ★★★ 2026-10-17（作者："不该直接透露原文"）：回给它的**只有编写过的那一段**，
+        #   ⛔ 不再是原文清单。所以下面判空看的是 `got["回忆"]`；而"编写失败"要单独说，
+        #   否则会回一句不实的话（"没有贴得上的"，其实取到了、只是没编出来）。
+        if str(got.get("为什么") or "") == "编写失败":
+            return ("（这条查过了：取到了几段，但**没整理出来**（编写那一步失败了）。\n"
+                    "· 别当成「查到了」：我手里没有可以照着说的东西；\n"
+                    "· 别当成「没有这回事」。\n"
+                    "真要用到这一块，就照底色的写法说：这个我还不知道。）",
+                    {"kind": "pull", "query": q, "got": [], "empty": True,
+                     "件数": int(got.get("件数") or 0), "err": "编写失败"})
+        if not got.get("回忆"):
             return ("（这条查过了：池子里没有哪一条够得上「贴得上」那条线，最靠前的也没够上"
                     " —— 也就是说，没有贴得上的东西。\n"
                     "· 别当成「查到了」：不许拿手里现有的条目当成他的意思；\n"
@@ -715,8 +772,8 @@ def _dispatch_内(eng, call: dict, now: float, sess=None):
                     "真要用到这一块，就照底色的写法说：这个我还不知道。）",
                     {"kind": "pull", "query": q, "got": [], "empty": True,
                      "件数": int(got.get("件数") or 0)})
-        return ("；".join(got["原文"][:4]),
-                {"kind": "pull", "query": q, "got": got["原文"][:4], "empty": False,
+        return (str(got["回忆"]),
+                {"kind": "pull", "query": q, "got": [str(got["回忆"])], "empty": False,
                  "件数": int(got.get("件数") or 0)})
 
     if name == "schedule_wakeup":

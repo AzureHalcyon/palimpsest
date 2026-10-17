@@ -932,14 +932,24 @@ def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
     #   "记住了什么"；可缺了它，**以后任何要引用那一场原文的东西都做不到**
     #   （件的成员是 cell；cell 不在，那段原文就永远锚不上）。
     #   ⇒ 机械归机械：① 在 `完成` 时无条件落图，②③⑤④ 才决定"记成什么"。
+    判s = list(草案.get("判") or [])
+    # ★★★ 2026-10-17：**每格的向量在这里落盘**。`⑤ 判` 手里本来就有（`p["向量"]`），
+    #   以前只拿去池化件的表示、⛔ 没写进 cell ⇒ 读取侧永远只能拿件级池化向量
+    #   （`α/γ` 空转、"一件只有一个点"，作者指出这不是设计原意）。
+    向量按轮 = {}
+    for p in 判s:
+        try:
+            向量按轮[int(p["轮"])] = [float(x) for x in (p.get("向量") or [])]
+        except (TypeError, ValueError, KeyError):
+            continue
     for c in (草案.get("cell") or []):
         图.加cell(str(c.get("场id") or 场id), int(c.get("轮") or 0),
-                 int(c.get("起") or 0), int(c.get("止") or 0))
+                 int(c.get("起") or 0), int(c.get("止") or 0),
+                 表示=向量按轮.get(int(c.get("轮") or 0)))
 
     # ★★ `[10]` 的两个输出分别落：**(a) 归进已有件** · **(b) 新建** —— 而 (b) 里**同组的合成一个件**。
     #   真机第 1 场实测：不做 (b) 的话 5 个标记各自新建 ⇒ 每件只有一个 cell
     #   ⇒ "一件 ≠ 一件事"，组内 α / 组间 β 全退化。
-    判s = list(草案.get("判") or [])
     组池: Dict[str, List[Dict]] = {}
     for p in 判s:
         if p.get("归进"):
