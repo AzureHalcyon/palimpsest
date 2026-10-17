@@ -283,7 +283,12 @@ class Config:
         """
         assert self.chat.max_tokens >= 1000, (
             "回复上限太小：这个模型是**推理模型**，取 2000 会被内部推理吃光、回空")
-        assert self.chat.temperature >= 0.0, "温度不许为负（`logprobs` 还要求它 > 0）"
+        # ★★ 2026-10-17（审查抓到）：原来只断言 `>= 0.0`，而 `session.ask` **无条件**要 logprobs。
+        #   用户把温度拖到 0（设置里允许）⇒ 分布被压成 one-hot、`logprob` 恒 0
+        #   ⇒ **② 的误差全是 0、一个标记都出不来**，而且**不报错**。
+        #   ⇒ 必须 > 0；归档那两处自己传 `temp=0.0` 且**不请求 logprobs**，不受这条约束。
+        assert self.chat.temperature > 0.0, (
+            "温度必须 > 0：对话那条路无条件要 logprobs，0 会把分布压成 one-hot、logprob 恒 0")
         assert self.embed.dim > 0, "嵌入维度必须 > 0"
         assert self.session.max_pull >= 0, "「再查几次」的上限不许为负"
         assert self.cooldown.turns >= 1, "冷却轮数必须 ≥ 1（0 会让冷却变成「本轮也挡」）"

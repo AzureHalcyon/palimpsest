@@ -65,6 +65,11 @@ class 底片:
         self.系统前缀: List[str] = list(系统前缀 or [])
         self.逐轮: List[Dict] = []
         self.撤回记录: List[Dict] = []
+        # ★★ 2026-10-17（作者定）：**手工标记** —— 第三个标记来源。
+        #   `[{"轮": n, "谁": "用户"|"她", "为什么": "..."}]`
+        #   ★ 为什么它比"相似度找重复"强：**明确的 ⛔ 猜的**。
+        #     用户说"这个记住"，或者她自己觉得重要 ⇒ **无条件进标记，⛔ 过阈值**。
+        self.手工标记: List[Dict] = []
         self._载入()
 
     # ------------------------------------------------------------------ 路径
@@ -93,22 +98,38 @@ class 底片:
         try:
             self.逐轮 = list(d.get("逐轮") or [])
             self.撤回记录 = list(d.get("撤回记录") or [])
+            self.手工标记 = list(d.get("手工标记") or [])
             if not self.系统前缀 and d.get("系统前缀"):
                 self.系统前缀 = list(d["系统前缀"])
             if not self.指纹 and d.get("指纹"):
                 self.指纹 = dict(d["指纹"])          # ★ 以先写下的那份为准
         except Exception:                            # noqa: BLE001
-            self.逐轮, self.撤回记录 = [], []
+            self.逐轮, self.撤回记录, self.手工标记 = [], [], []
 
     # ------------------------------------------------------------------ 写
     def 加轮(self, 轮: int, 刺激: str, 她说: str,
              调用: Optional[List[Dict]] = None,
              取用: Optional[List[Dict]] = None,
              旧池取用: Optional[List[str]] = None,
+             激活: Optional[Dict] = None,
              参数: Optional[Dict] = None, 成本: Optional[Dict] = None) -> Dict:
-        """加一轮。区间**只在这里算** ⇒ 永远与 `原文` 对得上。"""
+        """加一轮。区间**只在这里算** ⇒ 永远与 `原文` 对得上。
+
+        ★★★ 2026-10-17（第 3 次同一个病）：**这里以前没接 `激活`** ——
+          而 `session.ask` 明明把**整个激活分布**记进了 `self.rec["turns"]`，
+          于是底片里 `逐轮[*]["激活"]` 恒缺键 ⇒ `草案["激活们"]` 恒空
+          ⇒ **「重提强化」是死代码**（场 5 实测：16 个已有件 conf 全降、一件没涨）。
+        ⚠️ 已经犯过三次同一类错：漏 `其他底片`、漏 `手工标记`、漏 `激活` ——
+          **数据在 A 处有、B 处没接，而它不报错**。⇒ 往 `row` 里加字段时
+          **先确认下游有没有人读它**（`archive_step` / `recall` 都读 `逐轮`）。
+        """
         刺激 = str(刺激 or "")
         她说 = str(她说 or "")
+        # ★★★ 2026-10-17（审查抓到）：这里原来**含**着将被替换的那一行算 `已用`
+        #   ⇒ 撤回后重发同一轮时，新区间按"旧行还在"算 ⇒ 文本已经前移 ⇒
+        #   `切回原文` 切出来是空串或**别的轮的字**，归档的 cell 也锚错。**不报错。**
+        #   ⇒ 先把同轮旧行摘掉，再算。
+        self.逐轮 = [x for x in self.逐轮 if int(x.get("轮") or 0) != int(轮)]
         已用 = sum(len(t.get("刺激") or "") + len(t.get("她说") or "") for t in self.逐轮)
         s0, s1 = 已用, 已用 + len(刺激)
         a0, a1 = s1, s1 + len(她说)
@@ -118,6 +139,8 @@ class 底片:
             "刺激区间": [s0, s1], "她说区间": [a0, a1],
             "调用": list(调用 or []),
             "取用": 取用,                     # ⚠️ 件层没接进来之前就是 None（规范里的合法值）
+            # ★★ 整个激活分布（不是前 k）—— 归档时按它强化已有件（重提 / repetition）
+            "激活": dict(激活 or {}),
             "参数": dict(参数 or {}),
             "成本": dict(成本 or {}),
             "撤回": False,
@@ -151,13 +174,56 @@ class 底片:
         for t in self.逐轮:
             if int(t.get("轮") or 0) == n:
                 t["撤回"] = True
-        self.撤回记录.append({"轮": n})
+        # ★★ 2026-10-17（审查抓到）：撤回**没管手工标记** ⇒ 用户说"这轮不算"之后，
+        #   那句"记住这个"还会照常进标记集（手工标记是 ⛔ 过阈值的无条件进），
+        #   ⇒ **撤回了的东西还在记忆里**，而且不报错。
+        #   ⇒ 这里把它摘掉，但**留痕**（撤回记录里写明摘了哪几条）——
+        #     底片是存档，"当时确实标过、后来撤回了"这件事本身要留着。
+        _掉的 = [x for x in self.手工标记 if int(x.get("轮") or 0) == n]
+        if _掉的:
+            self.手工标记 = [x for x in self.手工标记 if int(x.get("轮") or 0) != n]
+            self.撤回记录.append({"轮": n, "手工标记已撤": _掉的})
+        else:
+            self.撤回记录.append({"轮": n})
         try:
             with io.open(self._记录路径(), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"场id": self.场id, "轮": n, "撤回": True},
+                fh.write(json.dumps({"场id": self.场id, "轮": n, "撤回": True,
+                                     **({"手工标记已撤": _掉的} if _掉的 else {})},
                                     ensure_ascii=False) + "\n")
         except Exception:                            # noqa: BLE001
             pass
+
+    def 手工记(self, 轮: int, 谁: str = "用户", 为什么: str = "") -> None:
+        """★ 手工标记一条：**无条件**进标记（⛔ 过阈值）。幂等：同一轮同名只留一条。
+
+        ★★ 这是**第三个标记来源**（`REM-SWS §9` 的 reward）——
+          也是**唯一靠得住的那个**：它⛔ 猜，它是明说的。
+          （实测过用 embedding 相似度找"重复"，不成立：语义近、字面远。）
+        """
+        n = int(轮)
+        if not any(int(x.get("轮") or 0) == n and str(x.get("谁")) == str(谁)
+                   for x in self.手工标记):
+            self.手工标记.append({"轮": n, "谁": str(谁), "为什么": str(为什么 or "")})
+        try:
+            with io.open(self._记录路径(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"场id": self.场id, "轮": n, "手工记": True,
+                                     "谁": str(谁)}, ensure_ascii=False) + "\n")
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def 导出(self) -> Dict:
+        """给归档用的**完整**快照。
+
+        ★★★ 2026-10-17 真对话抓到**两次**同一个病 —— `session.archive_draft` **手工拼 dict**：
+          第一次漏了 `其他底片` ⇒ 候选件渲染成 `「」` ⇒ 模型看到空条目 ⇒
+          **「归进」这条路从来就没通过**（三场 19 处标记，0 次归进）；
+          第二次漏了 `手工标记` ⇒ **「明确说要记住」这条链在常规归档里是断的**
+          （底片里有、图里没有、而且不报错）。
+        ⇒ ⇒ **用这个方法，⛔ 手工拼 dict**。少写一格**不会报错**，它只会静默地不工作。
+        """
+        return {"场id": self.场id, "系统前缀": self.系统前缀, "原文": self.原文(),
+                "逐轮": self.逐轮, "撤回记录": self.撤回记录,
+                "手工标记": self.手工标记, "指纹": self.指纹}
 
     def 原文(self) -> str:
         """整场逐字：所有轮的 `刺激 + 她说` 直接拼起来（⛔ 不加任何分隔符）。"""
@@ -173,10 +239,17 @@ class 底片:
         try:
             os.makedirs(os.path.dirname(self._底片路径()), exist_ok=True)
             d = {"场id": self.场id, "系统前缀": self.系统前缀, "原文": self.原文(),
-                 "逐轮": self.逐轮, "撤回记录": self.撤回记录, "指纹": self.指纹}
+                 "逐轮": self.逐轮, "撤回记录": self.撤回记录,
+                 "手工标记": self.手工标记, "指纹": self.指纹}
             raw = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            with gzip.GzipFile(self._底片路径(), "wb", compresslevel=6, mtime=0) as fh:
+            # ★★★ 2026-10-17（审查抓到）：原来直接写目标文件（**先截断再写**）⇒
+            #   中途断电/被杀就得到**半截 gz**；而 `读底片` 把解码失败当"没有"（返回 None）
+            #   ⇒ 下次同场继续聊时，`落盘` 用"只有新几轮"的内容**把不可再生成的存档覆盖掉**。
+            #   ⇒ 改成 `.tmp` + `os.replace`（`pending.save` 一直是这么做的，照它抄）。
+            _tmp = self._底片路径() + ".tmp"
+            with gzip.GzipFile(_tmp, "wb", compresslevel=6, mtime=0) as fh:
                 fh.write(raw)
+            os.replace(_tmp, self._底片路径())
             # ★ 旧的**未压缩**文件（P1 早期写过的那几份）删掉：不留两份"真源"。
             try:
                 if os.path.exists(self._旧路径()):

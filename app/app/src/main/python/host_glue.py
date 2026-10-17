@@ -826,8 +826,18 @@ def chat_withdraw(data_dir: str, sid: str) -> str:
 
 
 def _finish_json(rec: dict) -> str:
-    """收场/落地之后给界面的那份 JSON（`chat_finish` 与 `chat_archive_commit` 共用一份）。"""
+    """收场/落地之后给界面的那份 JSON（`chat_finish` 与 `chat_archive_commit` 共用一份）。
+
+    ★★★ 2026-10-17（审查抓到）：这里原来**写死 `"ok": True`**。而 `archive_commit`
+      在图**没写成**时返回 `{"ok": False, "err": ...}`（草案留着、等人再按一次）——
+      这条被无视 ⇒ **界面显示"归档完成"，而记忆一个字都没写**。
+      ⇒ 有 `err` 就照实报失败（⛔ 让界面替他判断"应该没事吧"）。
+    """
     import json
+    if isinstance(rec, dict) and rec.get("err"):
+        return json.dumps({"ok": False, "err": str(rec.get("err")),
+                           "提示": str(rec.get("提示") or ""),
+                           "land": rec.get("land")}, ensure_ascii=False)
     return json.dumps({
         "ok": True,
         # 归档失败**不是异常**：它按空归档落地、把失败写进转写、场次照样 +1
@@ -997,7 +1007,7 @@ def chat_archive_commit(data_dir: str, sid: str, sink=None) -> str:
 
 # --------------------------------------------------------------------------- 设置
 def ledger_lines(data_dir: str = "") -> List[str]:
-    """**新线的参数账**（`memory/knobs.py` 那 19 项），拼成人读的行 —— **只读**。
+    """**新线的参数账**（`memory/knobs.py` 里的每项，项数**现算**、⛔ 写死），拼成人读的行 —— **只读**。
 
     ★ 为什么只读：这些数按 `docs/参数账.md` 的规矩各带依据等级（【实测】【推导】【假设】），
       改一个要「改前 → 改后 → 为什么」留一行记录。⛔ 不是滑块 ——
@@ -1012,7 +1022,12 @@ def ledger_lines(data_dir: str = "") -> List[str]:
     for name, one in rows.items():
         依据 = str(one.get("依据") or "")
         说明 = str(one.get("说明") or "")
-        out.append("%s = %s  %s" % (name, one.get("值"), 依据))
+        # ★★ 2026-10-17（审查抓到）：账上有几个数**没人读**（拧了什么都不变）——
+        #   界面上必须看得出来，否则"我调了它，怎么没反应"又变成一次无解的排查。
+        out.append("%s = %s  %s%s" % (name, one.get("值"), 依据,
+                                      "  【无读者】" if one.get("无读者") else ""))
+        if one.get("无读者"):
+            out.append("    ⚠️ 没有代码读它：" + str(one["无读者"]))
         if 说明:
             # 说明可能很长：按 40 字折行，前端只负责显示
             line = ""

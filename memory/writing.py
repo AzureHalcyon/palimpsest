@@ -32,8 +32,10 @@ import os
 import time
 from typing import Dict, List, Optional
 
+from .knobs import 编写 as K写
+
 # ⛔ 这几句是**逐字定过的**，改动要么有实测依据，要么先问作者（见上面的对照表）
-编写提示词 = """下面是你记忆里被取用的 {件数} 件事（都是你自己说过的话）。
+编写提示词 = """下面是你记忆里被取用的 {件数} 件事（是你记得的那几轮对话（`他：` 是他说的，`她：` 是你说的））。
 每行前面的小数是它此刻在你心里的分量（0 到 1）：只用来决定哪件先说、说得多一点，不要把它写出来。
 
 {条目}
@@ -83,8 +85,10 @@ def 编写(llm, 件们: List[Dict], 场id: str = "", 轮: int = 0, 线索: str =
     try:
         消息 = [{"role": "user", "content": 提示}]
         # ★ 要 logprobs：编写也是**模型生成过的东西**，它的 token 概率一样不可再生成。
-        msg = llm.chat(消息, temp=(0.7 if 温度 is None else 温度), logprobs=True,
-                    fast=True)   # ★ 关思考：编写只要一段话，不需要那 900 个推理 token
+        # ★ 2026-10-17（审查抓到）：0.7 原来是**硬编码裸值** ⇒ 提到 `knobs.编写["温度"]`
+        温度 = float(K写["温度"]["值"] if 温度 is None else 温度)
+        msg = llm.chat(消息, temp=温度, logprobs=True,
+                       fast=True)   # ★ 关思考：编写只要一段话，不需要那 900 个推理 token
         文本 = str(msg.get("content") or "").strip()
         # ★ 「全流程全记录」：这一次编写调用也要能落进那一轮的 调用[]
         调用 = dict(msg.get("_call") or {})

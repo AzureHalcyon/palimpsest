@@ -10,6 +10,7 @@
   ② **标记为空就不问模型** —— 第一批归档必然没候选，⛔ 不该白花一次调用；
   ③ **按完成才写** —— ④ 层1/层2 + 版本 +1 只发生在 `完成()`。
 """
+import contextlib
 import io
 import json
 import os
@@ -163,7 +164,15 @@ def main():
     llm2 = ScriptedLLM([dict(_归进回)], fallback=dict(_归进回))
     底2 = 造底片([("嗯", "在。", 0.5)] * 6 + [("又搬了", "又搬？", 4.0)])
     底2["场id"] = "2026-10-17-02"
-    草2 = archive_step.草案(底2, g2, llm2, "2026-10-17-02", 嵌入=嵌入)
+    # ★ 这一段测的是 ⑤ 的 (a)「归进」路径。★ 2026-10-17 加了**第二个入口**
+    #   （很像但不意外的格子也送去判）⇒ 这里把它关掉，否则会多判一次、把 scripted 的回复吃掉。
+    from memory.knobs import 判 as _K判
+    _旧阈 = _K判["重复候选相似度"]["值"]
+    _K判["重复候选相似度"]["值"] = 1.01          # 余弦 ≤ 1 ⇒ 永不触发
+    try:
+        草2 = archive_step.草案(底2, g2, llm2, "2026-10-17-02", 嵌入=嵌入)
+    finally:
+        _K判["重复候选相似度"]["值"] = _旧阈
     断言("★ 有候选时**真问了模型**一次", len(llm2.calls) == 1, len(llm2.calls))
     断言("★ 候选里含那个已有的件",
          草2["候选"] and 件id in [c[0] for c in 草2["候选"][草2["标记"][0]["轮"]]],
@@ -174,12 +183,12 @@ def main():
     r2 = archive_step.完成(g2, 草2)
     断言("★★ 归进之后**没有新建**、成员多了那个 cell",
          len(g2.件) == n0 and len(g2.件[件id]["成员"]) >= 2, (len(g2.件), g2.件[件id]["成员"]))
-    # ⚠️ 它上一场结束已经是 0.9（新建 1.0 被层2衰减过一次）
-    #   ⇒ 每归进一次 +0.05（上限 1.0）⇒ 再衰减 −0.1。
-    #   ★ 别写死：排名口径下一场可能归进 2 处（0.9 → 0.95 → 1.0 → 0.9）。
-    # 归进 1 次：0.9 → 0.95 → 衰减 −0.1 = 0.85
-    断言("★ 强化 +0.05 之后再被层2衰减：上一场 0.9 → 0.95 → 0.85",
-         abs(g2.标记集[件id] - 0.85) < 1e-9, (更前, g2.标记集))
+    # ★★ 2026-10-17（作者口径）改了：**归进⛔ 再 +0.05** ——
+    #   归档只管**结构**（这格并进哪件），**强度归激活管**（重提强化那一段），
+    #   否则同一件会被强化两次。⇒ 这里只剩层2的衰减：0.9 → 0.8。
+    #   ⚠️ "重提强化"要 `草案["激活们"]` 有东西才生效 —— 这个材料的激活是空的。
+    断言("★ 归进⛔再+0.05（强度归激活）：上一场 0.9 ⇒ 只过层2衰减 ⇒ 0.8",
+         abs(g2.标记集[件id] - 0.8) < 1e-9, (更前, g2.标记集))
 
     print("[5] ④ 层2 的剪出（掉到门槛以下 ⇒ 进待观察池，⛔ 不删件）")
     集 = {件id: float(K件["遍历门槛"]["值"])}     # 刚好在门槛上
@@ -249,9 +258,40 @@ def main():
     断言("★ 图版本 +1（新线真的写了图）", 图.载入(tmp3).版本 == 1, 图.载入(tmp3).版本)
     断言("★ 幂等账记下了这一场（`applied_sids`，守「转写永远只写一行」）",
          int(s3.k) in eng3.applied_sids, (s3.k, eng3.applied_sids))
+    # ★★ 2026-10-17（审查抓到）：`_settle(transcript=None)` 会**不留转写行**地收尾，
+    #   而 `applied_sids` 记上了 ⇒ 以后带转写再来也补不上。⇒ 必须能被看见。
+    断言("★★ 没给转写 ⇒ 记进 `缺转写`（⛔ 悄悄漏掉那一行）",
+         int(s3.k) in eng3.缺转写, (s3.k, eng3.缺转写))
+    断言("★ `缺转写` 落进 state.json（重启后还看得见）",
+         int(s3.k) in [int(x) for x in (json.loads(io.open(
+             os.path.join(tmp3, "state.json"), encoding="utf-8").read()).get("缺转写") or [])],
+         json.loads(io.open(os.path.join(tmp3, "state.json"), encoding="utf-8").read()).get("缺转写"))
     断言("★ 引擎自己不装记忆：state.json 里**没有** `temp` 那一格",
          "temp" not in json.loads(io.open(os.path.join(tmp3, "state.json"),
                                          encoding="utf-8").read()))
+
+    # ---------------------------------------------------------------- [8] 坏图
+    # ★ 2026-10-17（审查抓到）：坏图**当空图且不报** ⇒ 她"什么都不记得了"，而用户找不到原因。
+    #   现在：stderr 报 + 坏档改名留档 + 回到空图（⛔ 半份图）。
+    print("\n[8] 坏图：要报、要留档、⛔ 半份图")
+    tmp8 = tempfile.mkdtemp(prefix="p2g")
+    g8 = 图载入(tmp8)
+    g8.新件(["cell-0001"], [0.1], "代表")
+    g8.落盘()
+    p8 = g8._路径()
+    with io.open(p8, "wb") as fh:
+        fh.write(b"not gzip at all")
+    _err = io.StringIO()
+    with contextlib.redirect_stderr(_err):
+        g9 = 图.载入(tmp8)
+    断言("★★ 坏档 ⇒ 空图 + 记下原因（⛔ 不静默）",
+         bool(g9.载入错误) and not g9.件 and not g9.标记集 and not g9.边,
+         (g9.载入错误, g9.件, g9.标记集, g9.边))
+    断言("★ 坏档改名留档（⛔ 覆盖原文 ⇒ 也⛔ 每次都坏）",
+         any(".坏-" in f for f in os.listdir(tmp8)) and not os.path.exists(p8),
+         os.listdir(tmp8))
+    断言("★ 报的那句话里带上了路径与原因", p8 in _err.getvalue() and "坏档" in _err.getvalue(),
+         _err.getvalue())
 
     print()
     if 坏:

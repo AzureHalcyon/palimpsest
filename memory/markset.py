@@ -73,19 +73,29 @@ def 强化(标记集: Dict[str, float], 归进的件: Optional[str] = None,
 
 def 衰减(标记集: Dict[str, float], 窗口数: int = 1,
          衰减率: Optional[float] = None, 底: Optional[float] = None,
-         门槛: Optional[float] = None) -> Tuple[Dict[str, float], List[str]]:
+         门槛: Optional[float] = None,
+         来源: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, float], List[str]]:
     """`④ 层2` 的长期维护：每过一个窗口 −衰减率；到地板不再掉。
 
     ★ **⛔ 删件** —— 掉下去的只是"剪出标记集"，件还在图里。
       返回 `(新标记集, 被剪出去的件id)`；调用方把剪出去的那些放进「待观察池」。
+
+    ★★ `来源`（2026-10-17 · 作者口径「记牢一些」）：`{件id: "意外"|"手工"}`。
+      手工档衰减更慢（−0.02）、地板更高（0.5 > 门槛 0.2）⇒ **永不剪出**。
+      不给 ⇒ 全部按普通档（旧调用的行为不变）。
     """
     衰减率 = _值("每窗口衰减") if 衰减率 is None else 衰减率
     底 = _值("地板") if 底 is None else 底
     门槛 = _值("遍历门槛") if 门槛 is None else 门槛
+    手工率 = _值("手工衰减率") if 衰减率 == _值("每窗口衰减") else 衰减率
+    手工底 = _值("手工地板") if 底 == _值("地板") else 底
     新: Dict[str, float] = {}
     剪出: List[str] = []
     for i, c in 标记集.items():
-        c2 = max(float(底), float(c) - float(衰减率) * int(窗口数))
+        是手工 = str((来源 or {}).get(i) or "") == "手工"
+        r = 手工率 if 是手工 else 衰减率
+        b = 手工底 if 是手工 else 底
+        c2 = max(float(b), float(c) - float(r) * int(窗口数))
         新[i] = c2
         if c2 < float(门槛):
             剪出.append(i)

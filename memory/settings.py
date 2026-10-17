@@ -154,6 +154,15 @@ class SettingsStore:
             print("[settings] %s 读不出来（%s），按「没改过」处理"
                   % (p, type(exc).__name__), file=sys.stderr)
             return {}
+        # ★★ 2026-10-17（审查抓到）：**顶层不是 dict** 时（手改成列表/字符串很常见），
+        #   下面 `raw.get("overrides")` 会抛 AttributeError —— 而 `load()` 不捕获、
+        #   `load_config()` 只捕获 AssertionError ⇒ **整个 App 起不来**。
+        #   这与本函数承诺的"读不出来 / 坏了都当没改过"直接相反。
+        if not isinstance(raw, dict):
+            import sys
+            print("[settings] %s 的顶层不是映射（是 %s），按「没改过」处理"
+                  % (p, type(raw).__name__), file=sys.stderr)
+            return {}
         got = raw.get("overrides") or {}
         if not isinstance(got, dict):
             return {}

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from typing import Dict, List, Optional
 
@@ -93,6 +94,10 @@ class Engine:
         self.reading: Optional[ReadingBuilder] = None
         # 已收尾场次的账本（幂等键）。**只增不删**——补做时靠它认出"其实已经收过了"。
         self.applied_sids: List[int] = []
+        # ★★ 2026-10-17（审查抓到）：`_settle(transcript=None)` 会**不留转写行**地收尾。
+        #   生产路径三处都传转写，可默认值是 None ⇒ 这个洞必须能看见：
+        #   把"哪几场没写进转写"记下来（只增不删），并写 stderr。
+        self.缺转写: List[int] = []
         # ★ 上一次归档**动了什么**（每层增/减、临时池增/减/升迁）。
         #   界面拿它显示「上次 +2 −1」这类"这一场带来了什么变化" —— 那是**事件**，
         #   事后无法重建。新线里真正记账的是图（`archive_step.完成`），这一格留给
@@ -159,7 +164,18 @@ class Engine:
             "description": ("看看你现在能查哪些渠道、各自最近有没有变化。"
                             "★ 想查什么之前先看这个 —— 它很便宜；具体的读数要用下面那些工具。"),
             "parameters": {"type": "object", "properties": {}}}})
+        # ★★★ 2026-10-17（审查抓到）：渠道工具名是插件 `toolName` **原样**进来的，
+        #   没有任何校验。插件写一个中文名 ⇒ **整个 `tools` 数组被端点拒**
+        #   ⇒ 任何一轮都跑不了 —— 和工具名 `记住` 撞的是同一条 400
+        #   （`^[a-zA-Z0-9_-]+$`）。桌面端没有插件宿主、自检用替身 ⇒ 只有真机才抓得到。
+        #   ⇒ 按 ASCII 过滤，并去掉与静态工具重名的（重名会让 `_dispatch` 永远命中静态那条）。
+        import re as _re
+        _已有名 = {str(x.get("function", {}).get("name") or "") for x in tools}
         for t in self.channels.tools():
+            _n = str(t.get("name") or "")
+            if not _re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", _n) or _n in _已有名:
+                continue
+            _已有名.add(_n)
             desc = str(t.get("useWhen") or t.get("desc") or "")
             tools.append({"type": "function", "function": {
                 "name": str(t["name"]),
@@ -188,6 +204,7 @@ class Engine:
         eng.last_tail = meta.get("last_tail")
         eng.scene = meta.get("scene")
         eng.applied_sids = [int(x) for x in (meta.get("applied_sids") or [])]
+        eng.缺转写 = [int(x) for x in (meta.get("缺转写") or [])]
         eng.last_delta = meta.get("last_delta") or {}
         return eng
 
@@ -230,6 +247,12 @@ class Engine:
         rec = self.pending.load()
         if not rec:
             return None
+        # ★★★ 2026-10-17（审查抓到）：这里原来把"**聊到一半被划掉**"的那一场也当"补做收尾"
+        #   ⇒ 写转写、场次 +1、清 pending，而**从没跑过 `完成()`** ⇒ 这一场的记忆整段丢掉，
+        #   且不能再恢复（`applied_sids` 已记）。界面还说"这一场已记账"。
+        #   ⇒ 只有**已经结束**（有 `ts_end`）的才谈得上补做收尾；没有的交给 `Session.restore` 继续聊。
+        if not rec.get("ts_end") and not isinstance(rec.get("archive_draft"), dict):
+            return None                      # ⛔ 收尾；这是"在途"，应当继续聊
         if (rec.get("archive_draft") or {}).get("land") == "yes":
             return rec
         return self.archive_land(rec, transcript=transcript)
@@ -262,6 +285,17 @@ class Engine:
             return rec
         if transcript is not None:
             transcript.session(rec)
+        elif sid:
+            # ★★ 2026-10-17（审查抓到）：`transcript=None` 时**照常收尾** —— 场次 +1、
+            #   `applied_sids` 记上、pending 清掉，**唯独转写那一行没写**。
+            #   而 `applied_sids` 是幂等键 ⇒ 以后带转写再来一次会命中幂等分支、
+            #   **那一行就永远补不上了**，且不报错（违反 `transcript.py` 头那句
+            #   「一场一行，永远只追加」）。
+            #   ⇒ 生产路径（`host_glue` 三处）**都传转写**；这里只是不许它悄悄漏。
+            #     记下缺哪一场（落 `state.json`，可事后补），并写 stderr。
+            self.缺转写.append(sid)
+            sys.stderr.write("[收尾] 场 %s 没给转写对象 ⇒ **这一场在转写里没有行**"
+                             "（已记进 state.json 的 `缺转写`）\n" % sid)
         self.sessions_done += 1
         if sid:
             self.applied_sids.append(sid)
@@ -282,6 +316,7 @@ class Engine:
                 "encoder": {"model": self.embedder.fingerprint[0],
                             "dim": self.embedder.fingerprint[1]},
                 "applied_sids": self.applied_sids,
+                "缺转写": self.缺转写,
                 "last_delta": self.last_delta}
         tmp = os.path.join(self.cache_dir, "state.json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:

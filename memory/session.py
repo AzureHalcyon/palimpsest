@@ -69,8 +69,14 @@ class Session:
         if self._film is None:
             from .film import 底片, 指纹
             from .prompts import SYS1, SYS2
-            self._film = 底片(self.场id, 指纹(self.cfg, (SYS1, SYS2)), self.engine.cache_dir,
-                             系统前缀=[str(m.get("content") or "") for m in self.msgs[:2]])
+            # ★★ 2026-10-17（审查抓到）：这里没传 `读法版本` ⇒ 永远落默认 0，
+            #   而 `版本对` 写的是 `knobs.版本["读法版本"]`（1）⇒ **同一份归档两处说法不一致**。
+            from .knobs import 版本 as _K版本
+            self._film = 底片(self.场id,
+                              指纹(self.cfg, (SYS1, SYS2),
+                                  读法版本=int(_K版本["读法版本"]["值"])),
+                              self.engine.cache_dir,
+                              系统前缀=[str(m.get("content") or "") for m in self.msgs[:2]])
         return self._film
 
     # ------------------------------------------------------------------ 一轮
@@ -101,17 +107,21 @@ class Session:
                       嵌入=getattr(eng.embedder, "raw_embed", None))
         回忆为什么 = str(r.get("为什么") or "")
         masked = self._cd_masked(turn_no)
+        blocked = 0            # ★ 必须在循环之前（它被循环里的 continue 累加）
         件们 = []
         for one in (r.get("件") or []):
             原文们 = [t for t in (one.get("原文们") or []) if t not in masked]
             if not 原文们:
+                # ★★ 2026-10-17（审查抓到）：`blocked` 初始化之后**从来没累加过** ⇒
+                #   `cd_blocked` 永远是 0，而它正是"开/关冷却那次对照"的读数
+                #   ⇒ 对照实验会得出"冷却没挡任何东西"的错误结论。
+                blocked += len(one.get("原文们") or [])
                 continue        # 这一件全在冷却期里 ⇒ 不注入（⛔ 不找替补，沿用旧规）
             for 文本 in 原文们:
                 件们.append({"文本": 文本, "强度": float(one.get("分数") or 0.0)})
             取用.append({"件id": one["件id"], "分数": float(one.get("分数") or 0.0),
                          "强度": float(one.get("强度") or 0.0)})
         shown = [x["文本"] for x in 件们]
-        blocked = 0
         turn = self.msgs + [{"role": "user", "content": user_text}]
         # ★★ **注入从"条目清单"改成"一段回忆"**（2026-10-17 作者口径：
         #   「原来的条目变成一段」·「编写的时候，把原文和节点强度给编写模型」）。
@@ -194,7 +204,7 @@ class Session:
                 turn = turn + [{"role": "assistant", "content": msg.get("content") or "",
                                 "tool_calls": calls}]
                 for c in calls:
-                    text, rec_one = _dispatch(eng, c, now)
+                    text, rec_one = _dispatch(eng, c, now, self)
                     if rec_one and rec_one.get("kind") == "pull":
                         pulls.append(rec_one)
                     elif rec_one:
@@ -228,6 +238,10 @@ class Session:
                 # 这一轮花了多少 token（服务端给的），以及模型自己"再查一次"的痕迹。
                 # ★ 新路：这一轮**取用了哪些件**（旧路为空）+ 没取到的原因（一句话）
                 "取用": 取用, "回忆为什么": 回忆为什么,
+                # ★★★ 2026-10-17（作者口径）：**整个激活分布**（⛔ 只前 k）。
+                #   归档时按它强化已有件 —— 那才是「**提得多 ⇒ 记得牢**」（REM-SWS 的 repetition）。
+                #   ★ 而"取用"只记前 k，是给注入用的；**强化要看全场**。
+                "激活": dict(r.get("激活") or {}),  # ★ r（recall），⛔ 回忆（编写）
                 # ★★ 界面要的两样：**编写出的那一段** + 「怎么编的」（用了哪几条 / 版本 / 耗时）。
                 #   ⛔ 只给用户看；`msgs` 里只有那段文字本身（不进读取路径）。
                 "回忆": ({"编写": 回忆.get("编写") or "",
@@ -267,11 +281,15 @@ class Session:
             #   `旧池取用`），而这一版取件走 `[R] 回忆`（件 / 标记集）⇒ 再那么写就是记假账。
             f.加轮(turn_no, user_text, reply, 调用=全流程,
                    取用=(取用 or None),             # 件id + 分数（这一轮真正取到的件）
+                   # ★★★ 整个激活分布（⛔ 只前 k）—— 归档时按它强化已有件（重提 / repetition）。
+                   #   ⚠️ 这一格 2026-10-17 漏过：rec["turns"] 里有，但 加轮() 没收 ⇒
+                   #   底片里恒缺键 ⇒「重提强化」是死代码（场 5 实测：16 个件 conf 全降）。
+                   激活=dict(r.get("激活") or {}),  # ★★ 从 **r**（recall 的结果）读，⛔ 从 回忆（**编写**的结果）
                    参数={"形状": "件层",
                          "件数": len(取用),
                          "原文条数": len(shown),
                          # 回忆那一份参数账（k / α / β / γ / T）原样抄进来 ⇒ 事后能重建
-                         "回忆参数": dict(回忆.get("参数") or {}),
+                         "回忆参数": dict(r.get("参数") or {}),  # ★ 同上：r 才是 recall
                          "cd_blocked": int(blocked),
                          "注入": ("编写" if 回忆.get("编写") else ("清单" if shown else "空")),
                          "编写耗时ms": int(回忆.get("耗时ms") or 0),
@@ -439,11 +457,39 @@ class Session:
         from .graph import 图
         f = self._底片()
         f.落盘()
-        底片数据 = {"场id": f.场id, "系统前缀": f.系统前缀, "原文": f.原文(),
-                    "逐轮": f.逐轮, "撤回记录": f.撤回记录, "指纹": f.指纹}
+        # ★★★ **⛔ 手工拼这个 dict** —— 走 `f.导出()`。
+        #   2026-10-17 真对话抓到两次同一个病：这里手工拼，漏过 `其他底片`（⇒ 候选全空、
+        #   「归进」整条死路）、漏过 `手工标记`（⇒ 用户说"记住"在常规归档里不生效）。
+        #   少写一格**不会报错**，它只会静默地不工作。
+        底片数据 = f.导出()
         g = 图.载入(self.engine.cache_dir)
+        # ★★★ 2026-10-17 真对话第 3 场抓到的真 bug：这里原来**没传 `其他底片`**。
+        #   而 `_候选行()` 要靠 `底片们.get(c["场id"])` 取候选件的**代表原文** ——
+        #   别的场次的底片不在手里 ⇒ 文本渲染成空 ⇒ 候选行成了 `件-0001（像 0.7x）：「」`
+        #   ⇒ 模型看到的是"**空标题的件**" ⇒ 只能新建 ⇒ **"归进"这条路从来就没通过**
+        #   （三场 19 处标记，一次"归进"都没有）。
+        #   ⇒ 归档前把 `<cache>/底片/` 下的底片都读进来（图是缓存，底片才是存档）。
+        #   ⚠️ 这一版是"全读"：场次多了会慢，将来可只读候选涉及的那几场。
+        其他底片: Dict[str, Dict] = {}
+        try:
+            import os as _os
+            from .film import 读底片 as _读底片
+            _目录 = _os.path.join(self.engine.cache_dir, "底片")
+            if _os.path.isdir(_目录):
+                for _名 in _os.listdir(_目录):
+                    # ★ 2026-10-17（审查抓到）：只认 `.json.gz` ⇒ **旧底片（`.json`）读不到**
+                    #   ⇒ 那些场次又变回"候选行是空的"（正是上面刚修的那个病）。
+                    #   `读底片` 本来就两种都认（`film.读底片` 的说明写着），这里别自己判格式。
+                    if not (_名.endswith(".json.gz") or _名.endswith(".json")):
+                        continue
+                    _d = _读底片(_os.path.join(_目录, _名))
+                    if _d and str(_d.get("场id") or ""):
+                        其他底片[str(_d["场id"])] = _d
+        except Exception:                      # noqa: BLE001
+            其他底片 = {}                      # 读不到就退化成"只有本场"（会退回新建，但⛔ 崩）
         草 = archive_step.草案(底片数据, g, self.engine.llm, f.场id,
                               嵌入=getattr(self.engine.embedder, "raw_embed", None),
+                              其他底片=其他底片,
                               进度=progress)
         self.rec["archive_draft"] = {"land": "yes", "草": 草, "talk": [],
                                      "rounds": len(草.get("标记") or []), "repairs": 0}
@@ -501,6 +547,15 @@ class Session:
         有效.setdefault("场id", self.场id)      # ★ 旧版本存下的草案可能没有这一格
         有效["判"] = [p for p in (草.get("判") or []) if not p.get("跳过")]
         res = archive_step.完成(g, 有效)
+        # ★★★ 2026-10-17（审查抓到）：`完成()` 的 `err` **原来没人看** —— 它没写图，
+        #   这里照样收尾（场次 +1 / pending 清 / 转写写一行）⇒ **这一场就再也不会被归档**，
+        #   而界面上是"归档完成"。⇒ 有 `err` 就**停在审阅态**：草案留着、pending 不动，
+        #   让人再按一次（`完成` 自己有幂等凭据，重复按不会重复建件）。
+        if res.get("err"):
+            self.rec["archive_draft"] = d               # 原样留着，⛔ 不动
+            return {"ok": False, "land": "no", "err": str(res.get("err")),
+                    "新线": {"件": [x.get("件") for x in (res.get("层1") or [])]},
+                    "提示": "这一场没归档（图没写成）。草案还在，可以再按一次「完成」。"}
         self.rec["archive_draft"] = {"land": "no"}      # ★ 借"池子不动，只收尾"那条路
         self.rec["新线"] = {"件": [x.get("件") for x in (res.get("层1") or [])],
                           "版本": res.get("版本"),
@@ -554,7 +609,25 @@ def _回忆工具(eng, 线索: str) -> Dict:
     return {"原文": 文本们, "件数": len(r.get("件") or [])}
 
 
-def _dispatch(eng, call: dict, now: float):
+def _dispatch(eng, call: dict, now: float, sess=None):
+    """兜底包装：**任何一条分支炸了，都不许把这一轮对话炸掉**。
+
+    ★★ 2026-10-17（审查抓到）：`_dispatch` 的说明写着"不许抛异常"，可它是**约定**、
+      不是机制 —— 分支里任何一处没接住（`eng.wakeups` 为 None、参数类型不对、
+      `markset` 抛）都会直接冒到 `ask`，**用户那一轮整个失败**。
+      而这里恰恰是"她要靠结果改主意"的地方：失败必须变成**一句她能读懂的话**。
+    ⇒ 真异常一律转成文本 + `None`（⛔ 假装做成：明确说"没跑成，别当已经做了"）。
+      每一条分支自己该给的**具体理由**（"太近了，最短 15 分钟"）仍在 `_dispatch_内` 里给。
+    """
+    try:
+        return _dispatch_内(eng, call, now, sess)
+    except Exception as e:                           # noqa: BLE001
+        name = str(((call or {}).get("function") or {}).get("name") or "?")
+        return ("`%s` 这次没跑成（%s: %s）。⛔ 别当它已经做了 —— "
+                "要做的话换个说法再试一次。" % (name, type(e).__name__, e), None)
+
+
+def _dispatch_内(eng, call: dict, now: float, sess=None):
     """**按工具名分派**。返回 `(回给模型的文本, 记账字典或 None)`。
 
     ★ 为什么要按名字分派：原来这里写死了"每次调用都是 `read_z`"（`_query_of` 只取 `query`）。
@@ -571,6 +644,20 @@ def _dispatch(eng, call: dict, now: float):
         args = {}
     if not isinstance(args, dict):
         args = {}
+
+    # ★★ 2026-10-17（作者定）：**她的「记住」** —— 第三个标记来源。
+    #   写进这一场底片的 `手工标记` ⇒ 归档时**无条件**进标记（⛔ 看误差大小）。
+    #   `轮` = 已经记下的轮数 + 1（这一轮在 `ask` 里还没 append）。
+    if name in ("记住", "remember"):
+        为什么 = str(args.get("why") or args.get("为什么") or "").strip()
+        if sess is None:
+            return "这一轮标不上（没拿到会话），归档时按「意外」那条走。", None
+        try:
+            轮 = int(len(getattr(sess, "rec", {}).get("turns") or [])) + 1
+            sess._底片().手工记(轮, 谁="她", 为什么=为什么)
+        except Exception as e:                       # noqa: BLE001
+            return "没记上（%s）。" % type(e).__name__, None
+        return "记下了。归档时这一轮**无条件**进记忆，不看它意不意外。", None
 
     # ★ 2026-10-17 改名：`read_z` → `recall`（新线的叫法就是 `[R] 回忆`）。
     #   ⚠️ 旧名**留着当别名**：老 `pending.json` 的历史里有 `read_z` 的 tool 记录，
@@ -629,8 +716,13 @@ def _dispatch(eng, call: dict, now: float):
         if not items:
             txt = "现在没有挂着的唤醒。"
         else:
+            # ★★ 2026-10-17（审查抓到）：`list()` 明明带 `id`，这里**却没写进回复文本** ——
+            #   而 `cancel_wakeup` 的说明写着"id 从 list_wakeups 拿" ⇒ 这对工具是**断的**：
+            #   模型只能瞎猜 id，撤销大概率回"没有这条"。**而且不报错。**
             txt = "挂着 %d 条：" % len(items) + "；".join(
-                "%.0f 分钟后（%s）" % (it.get("in_minutes") or 0, it.get("why") or "没说为什么")
+                "%s → %.0f 分钟后（%s）" % (
+                    it.get("id") or "?", it.get("in_minutes") or 0,
+                    it.get("why") or "没说为什么")
                 for it in items)
         return txt, {"kind": "wakeup", "tool": name, "result": items, "ok": True}
 
