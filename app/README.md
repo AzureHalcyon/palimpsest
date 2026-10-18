@@ -6,7 +6,9 @@
 
 > **来历**：本工程从旧仓 `companion-ai/companion-android` **整体搬来**（2026-10-17）：
 > 包名 `com.azurehalcyon.companion` → `com.azurehalcyon.palimpsest`，Python 包
-> `companion` → `memory`。搬过来时**行为与旧版一致**（归档仍是旧池子那套）。
+> `companion` → `memory`。
+> ★★ **2026-10-18 起 `memory/` 已是新链路**（归档五步 · 件与组 · 势），宿主的**界面**还留着旧池子那几页
+> （未改）⇒ **别拿 App 的界面判断记忆层的状态**，状态看 [`../memory/README.md`](../memory/README.md)。
 > 旧仓已冻结只读、当对照基线；搬来之前的全部细节与真机证据留在
 > [`README-从旧仓搬来-历史.md`](README-从旧仓搬来-历史.md)。
 
