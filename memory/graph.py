@@ -25,6 +25,11 @@ from typing import Dict, List, Optional, Sequence
 
 
 class 图:
+    """关系图。
+
+    ★ 命名收口（2026-10-18）：**节点**（cell）→ **组**（代码里叫 `件`，一批节点属于一起）
+      → **边**（带类型/方向的关系，元数不限）。⛔「块」不是概念名：它是**无类型的超边**。
+    """
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
         self.版本 = 0
@@ -38,7 +43,11 @@ class 图:
         #     名字漂（同一组件两个名字）· 块数抖 · 要不要去重 ——
         #     而"合并也行不合并也行"恰好说明**它本来就不是存储该有的东西**。
         #   ★★ 而这也正是作者最初那句：「一个节点-组可以归在**不同的边**里」。
-        self.边: List[Dict] = []            # [{a, b, 关系, 说法}]
+        self.边: List[Dict] = []            # [{a, b, 关系, 说法, 场们}]
+        # ★★ 2026-10-18（作者：依赖簇才该是大头）：**组 = 依赖簇**（算出来的缓存）。
+        #   [{id, 场id, 轮起, 轮止, 成员[cellid], 来源}]。手工簇（件）只在依赖簇没做到时补，
+        #   重叠的以组为准；件上记 并入组，便于追。
+        self.组: List[Dict] = []
         self._下一个件 = 1
         self.落盘错误 = ""   # 上一次落盘失败的原因（空 = 成功）
         self.载入错误 = ""   # 上一次载入坏档的原因（空 = 正常）
@@ -53,7 +62,7 @@ class 图:
             os.makedirs(self.cache_dir, exist_ok=True)
             d = {"版本": self.版本, "cell": self.cell, "件": self.件,
                  "标记集": self.标记集, "待观察池": self.待观察池,
-                 "边": self.边, "_下一个件": self._下一个件}
+                 "边": self.边, "组": self.组, "_下一个件": self._下一个件}
             raw = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             with gzip.GzipFile(self._路径(), "wb", compresslevel=6, mtime=0) as fh:
                 fh.write(raw)
@@ -81,6 +90,7 @@ class 图:
             g.标记集 = {k: float(v) for k, v in (d.get("标记集") or {}).items()}
             g.待观察池 = list(d.get("待观察池") or [])
             g.边 = list(d.get("边") or [])
+            g.组 = list(d.get("组") or [])
             # ★ 兼容旧图（那里存的是"块"）：把块的成员两两转成边，⛔ 丢东西
             for _bid, _it in (d.get("块") or {}).items():
                 _员 = [str(x) for x in (_it.get("成员") or [])]
@@ -232,8 +242,13 @@ class 图:
     #   边 = {a, b, 关系, 说法} —— pairwise，原子。块是**派生视图**（同关系名下的连通块）。
     #   ★ 于是"同一对件起了两个名字"不是冲突，是**两条不同关系的边**。
 
-    def 加边(self, a: str, b: str, 关系: str, 说法: str = "") -> bool:
-        """a—b 之间挂一条「关系」的边。同 (a, b, 关系) 只留一条。返回是否新加。"""
+    def 加边(self, a: str, b: str, 关系: str, 说法: str = "", 场: str = "") -> bool:
+        """a—b 之间挂一条「关系」的边。同 (a, b, 关系) 只留一条。返回是否新加。
+
+        ★ 2026-10-18（SWS）：带上**是哪一场提出的**。SWS 的判据是
+          「这个块被多少个不同场提到过」——没有这一格就数不出来。
+          同一个 (a,b,关系) 再出现时**累积场**（⛔ 覆盖），那正是"支持"。
+        """
         a, b = str(a), str(b)
         if not a or not b or a == b:
             return False
@@ -242,8 +257,11 @@ class 图:
             if {e.get("a"), e.get("b")} == {a, b} and str(e.get("关系")) == 关系:
                 if 说法 and not e.get("说法"):
                     e["说法"] = str(说法)
+                if 场 and 场 not in (e.get("场们") or []):
+                    e["场们"] = sorted(set(list(e.get("场们") or []) + [str(场)]))
                 return False
-        self.边.append({"a": a, "b": b, "关系": 关系, "说法": str(说法 or "")})
+        self.边.append({"a": a, "b": b, "关系": 关系, "说法": str(说法 or ""),
+                       "场们": sorted({str(场)}) if 场 else []})
         return True
 
     def 件的边(self, 件id: str, 关系=None):
@@ -286,9 +304,16 @@ class 图:
             for n, (根, 员) in enumerate(sorted(组.items()), 1):
                 if len(员) < 2:
                     continue
+                # ★ SWS 的判据：这个块被**多少个不同场**提出过（边的 `场们` 并起来）
+                场们 = set()
+                for e in self.边:
+                    if str(e.get("关系")) != 关系:
+                        continue
+                    if 找(str(e.get("a"))) == 根:
+                        场们.update(str(x) for x in (e.get("场们") or []) if x)
                 出["块-%s-%02d" % (关系[:6], n)] = {
                     "id": "块-%s-%02d" % (关系[:6], n), "关系": 关系,
-                    "成员": sorted(员)}
+                    "成员": sorted(员), "场们": sorted(场们)}
         return 出
 
     # ------------------------------------------------------------------ 标记集
