@@ -42,7 +42,8 @@ class Session:
         # ★ 会话前缀走 `load_session_prompts()`：默认就是 `prompts.py` 里那两条**冻结**常量；
         #   用户在界面上改过，就用他改的那一份（整条替换，见 prompts.py 的说明）。
         # ★★ 2026-10-17（作者："没有推的时候，就应该鼓励查一下才对吧？"）：
-        #   `auto_push=False` ⇒ SYS1 后面追加 `SYS1_不推`（"开口前先自己查一遍"）。
+        #   2026-10-18：不推了 —— 「在对用户回答之前，先调用 recall」已经写进 `SYS1` 本身，
+        #   不再按开关追加任何段（`auto_push` 只影响代码是否自动推）。
         #   实现放在 `load_session_prompts` 里（连用户的覆盖一起处理），这里只传开关。
         _自动推 = bool(getattr(getattr(engine.cfg, "session", None), "auto_push", True))
         s1, s2 = load_session_prompts(auto_push=_自动推)
@@ -119,8 +120,7 @@ class Session:
         为什么自动推 = ""
         if 自动推:
             g = _图.载入(eng.cache_dir)
-            r = _回忆.回忆(user_text, g, os.path.join(eng.cache_dir, "底片"),
-                          嵌入=getattr(eng.embedder, "raw_embed", None))
+            r = _取回忆并记势(eng, user_text, 种子=turn_no, g=g)
             回忆为什么 = str(r.get("为什么") or "")
         else:
             r = {"件": []}
@@ -129,19 +129,25 @@ class Session:
         blocked = 0            # ★ 必须在循环之前（它被循环里的 continue 累加）
         件们 = []
         for one in (r.get("件") or []):
-            原文们 = [t for t in (one.get("原文们") or []) if t not in masked]
+            原文们 = list(one.get("原文们") or [])
             强度们 = list(one.get("强度们") or [])
-            if not 原文们:
+            场们 = list(one.get("场们") or [])
+            if not [t for t in 原文们 if t not in masked]:
                 # ★★ 2026-10-17（审查抓到）：`blocked` 初始化之后**从来没累加过** ⇒
                 #   `cd_blocked` 永远是 0，而它正是"开/关冷却那次对照"的读数
                 #   ⇒ 对照实验会得出"冷却没挡任何东西"的错误结论。
-                blocked += len(one.get("原文们") or [])
+                blocked += len(原文们)
                 continue        # 这一件全在冷却期里 ⇒ 不注入（⛔ 不找替补，沿用旧规）
             for n, 文本 in enumerate(原文们):
+                if 文本 in masked:
+                    continue
                 # ★ 每段带**自己的**强度（该格的起点，∈[0,1]），⛔ 一件里所有段同一个数
                 强 = (强度们[n] if n < len(强度们)
                       else float(one.get("分数") or 0.0))
-                件们.append({"文本": 文本, "强度": float(强)})
+                # ★★ 2026-10-18：每段也带**自己的场**（旧代码按"过滤后第 n 段"取强度，
+                #   一旦中间有段被冷却挡掉，强度/场就整体错位）⇒ 三列都按**原始下标**取。
+                件们.append({"文本": 文本, "强度": float(强),
+                            "场": (场们[n] if n < len(场们) else "")})
             取用.append({"件id": one["件id"], "分数": float(one.get("分数") or 0.0),
                          "强度": float(one.get("强度") or 0.0)})
         shown = [x["文本"] for x in 件们]
@@ -588,7 +594,17 @@ class Session:
         有效 = dict(草)
         有效.setdefault("场id", self.场id)      # ★ 旧版本存下的草案可能没有这一格
         有效["判"] = [p for p in (草.get("判") or []) if not p.get("跳过")]
-        res = archive_step.完成(g, 有效)
+        # ★ 2026-10-18：把嵌入器交给 `完成()` —— 它要给本场**所有**格补向量
+        #   （不只 `⑤ 判` 过的那些；否则没标记的场次整场不可回忆）。
+        #   另外把 llm / 底片 / 对话也交过去：它要对**没进组的格**送 `⑤ 判`（散格能否归进）。
+        _嵌入 = getattr(getattr(self, "engine", None), "embedder", None)
+        from .film import 读底片
+        _底 = 读底片(os.path.join(self.engine.cache_dir, "底片",
+                                   str(self.场id) + ".json.gz"))
+        res = archive_step.完成(
+            g, 有效,
+            嵌入=(getattr(_嵌入, "raw_embed", None) if _嵌入 is not None else None),
+            llm=self.engine.llm, 底片数据=_底, 对话=list(self.msgs))
         # ★★★ 2026-10-17（审查抓到）：`完成()` 的 `err` **原来没人看** —— 它没写图，
         #   这里照样收尾（场次 +1 / pending 清 / 转写写一行）⇒ **这一场就再也不会被归档**，
         #   而界面上是"归档完成"。⇒ 有 `err` 就**停在审阅态**：草案留着、pending 不动，
@@ -641,6 +657,29 @@ def waiting_for_review(rec) -> bool:
     return str(d.get("land") or "") == "yes" and bool(d.get("ar") or d.get("草"))
 
 
+def _取回忆并记势(eng, 线索: str, 种子: int = 0, g=None) -> dict:
+    """**一次完整的 `[R] 回忆`**，并把本次「够亮」的格叠进**势**（读取路径的引导）。
+
+    ★★ 2026-10-18（作者：「这个势应该起到引导的作用」）：
+      · `recall.回忆` 只读（不写图、不写势）⇒ 叠层与落盘都在这里；
+      · 势与图分开存 (`<cache>/势.json`)，可删、可重算；
+      · `种子` 传给传播的噪声（一般传轮次）⇒ 同一轮重算结果相同。
+    """
+    from . import recall as _回忆
+    from . import 势 as _势
+    from .knobs import 回忆 as _K
+    from .graph import 图 as _图
+    g = g if g is not None else _图.载入(eng.cache_dir)
+    路径 = os.path.join(eng.cache_dir, "势.json")
+    表 = _势.载入(路径)
+    r = _回忆.回忆(线索, g, os.path.join(eng.cache_dir, "底片"),
+                  嵌入=getattr(eng.embedder, "raw_embed", None),
+                  势表=表, 种子=int(种子 or 0))
+    _势.更新(表, r.get("亮格") or [], float(_K["势α"]["值"]))
+    _势.落盘(路径, 表)
+    return r
+
+
 def _回忆工具(eng, 线索: str, sess=None) -> Dict:
     """`recall` 工具走新线：`[R]` 取件 → **编写成一段** → 把那段回给它。
 
@@ -655,22 +694,44 @@ def _回忆工具(eng, 线索: str, sess=None) -> Dict:
     from . import writing
     from .graph import 图 as _图
     g = _图.载入(eng.cache_dir)
-    r = _回忆.回忆(线索, g, os.path.join(eng.cache_dir, "底片"),
-                  嵌入=getattr(eng.embedder, "raw_embed", None))
+    r = _取回忆并记势(
+        eng, 线索,
+        种子=len((getattr(sess, "rec", {}) or {}).get("turns") or []) + 1, g=g)
+    # ★★ 2026-10-18（作者：「写每一轮都查。冷却掩膜可以避免太密集」）：
+    #   每轮都查之后，**刚说过的段别再原地重复** —— 走 `_cd_masked`（和自动推同一套冷却）。
+    #   而被冷却挡掉时，回给它的理由**必须和"没查到"分开**，否则她会把"刚说过"当成"没有"。
+    masked = set()
+    if sess is not None:
+        try:
+            masked = sess._cd_masked(len((sess.rec or {}).get("turns") or []) + 1)
+        except Exception:                            # noqa: BLE001
+            masked = set()
     件们: List[Dict] = []
+    被挡 = 0
     for one in (r.get("件") or []):
         原文们 = list(one.get("原文们") or [])
         强度们 = list(one.get("强度们") or [])
         for n, 文本 in enumerate(原文们):
+            if 文本 in masked:
+                被挡 += 1
+                continue
             件们.append({"文本": 文本,
                          "强度": float(强度们[n] if n < len(强度们)
                                        else (one.get("强度") or 0.0))})
     if not 件们:
+        if 被挡:
+            return {"回忆": "", "件数": 0, "为什么": "冷却", "被挡": 被挡}
         return {"回忆": "", "件数": 0, "为什么": "没取到件"}
+    # ★★★ 2026-10-18（第 20 场实测）：**判定只用于自动推送那条路**。
+    #   工具这条的 `线索` 是**她自己的查询**（「陈师傅 是谁 厂里的同事」），
+    #   本来就表示"我要找这个"；再拿判定那句「他这句话指回旧记录了吗」去判，
+    #   必然误杀 —— 实测第 3 轮查陈师傅被判定挡成「没有贴得上的」，
+    #   而同一批旧事第 8 轮换个 query 就整段捞回来了。
     记得 = writing.编写(eng.llm, 件们,
-                        场id=(getattr(sess, "场id", "") or ""),
-                        轮=len((getattr(sess, "rec", {}) or {}).get("turns") or []) + 1,
-                        线索=线索)
+                            场id=(getattr(sess, "场id", "") or ""),
+                            轮=len((getattr(sess, "rec", {}) or {}).get("turns") or []) + 1,
+                            线索=线索,
+                            判定结果={"有": True})
     if 记得.get("编写"):
         if sess is not None and getattr(sess, "engine", None) is not None:
             try:                                      # ★ 编写过的东西一律留档
@@ -764,6 +825,16 @@ def _dispatch_内(eng, call: dict, now: float, sess=None):
         # ★★★ 2026-10-17（作者："不该直接透露原文"）：回给它的**只有编写过的那一段**，
         #   ⛔ 不再是原文清单。所以下面判空看的是 `got["回忆"]`；而"编写失败"要单独说，
         #   否则会回一句不实的话（"没有贴得上的"，其实取到了、只是没编出来）。
+        if str(got.get("为什么") or "") == "冷却":
+            # ★★ 2026-10-18（作者：「冷却掩膜导致的查不到得给一个另外的理由」）：
+            #   这是**第四种空**：不是没查到、不是没编出来、更不是没有这回事 —— 是刚说过。
+            #   ⛔ 不这么说，她会把"刚讲过"读成"没有"，然后凭空给一个确定判断。
+            return ("（查到了 %d 段，但**这几段刚说过**，还在冷却里 —— 这一轮先不重复给你。\n"
+                    "· 这不是「没有」：是「刚讲过、别原地打转」；\n"
+                    "· 也不是「查不到」：等两轮它会自动回来；\n"
+                    "· 要换个角度，就把想查的说得更具体一点再查。）" % int(got.get("被挡") or 0),
+                    {"kind": "pull", "query": q, "got": [], "empty": True,
+                     "件数": int(got.get("件数") or 0), "err": "冷却"})
         if str(got.get("为什么") or "") == "编写失败":
             return ("（这条查过了：取到了几段，但**没整理出来**（编写那一步失败了）。\n"
                     "· 别当成「查到了」：我手里没有可以照着说的东西；\n"

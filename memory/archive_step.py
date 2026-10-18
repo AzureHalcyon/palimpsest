@@ -954,8 +954,106 @@ def 算依赖簇(图, 场id: str, 误差们, 种子数=None, 邻=None):
     return 出
 
 
-def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
-    """**这一下才写**：`④ 层1`（强化/新建/冷成员）＋ `④ 层2`（衰减/剪出）＋ 版本 +1 + 落盘。"""
+def 相似聚类(图, 新格们, 分位=None, 邻居=None, 最小=None, 组上限=None) -> List[Dict]:
+    """**依赖簇的第二种形态**：按表示聚类（可跨场）—— 散格将来靠它聚起来。
+
+    ★★ 2026-10-18（作者：「散格可以散，但是得能期望未来什么时候可以聚起来」
+      「这些也是依赖簇该做的吧」「东西少聚一起，多了再分裂」）：
+
+    · **阈值交给数据**：取散格两两 cos 的 `相似聚类分位`（0.9）——
+      早期格少 ⇒ 分布窄 ⇒ 线低 ⇒ 聚得粗；格多 ⇒ 线抬高 ⇒ 自然分裂；
+    · **每格只连最近的 k 个**（`相似聚类邻居数`=2）：⛔ 连"所有够近的对"，
+      同质语料下那样会**链式串联**（实测 p95 阈下 870 条边 ⇒ 大半散格串成一个巨组）；
+    · **只从本场新格出发**（旧散格之间不主动连）⇒ 每次归档不会把旧散格重聚一遍；
+    · 组过小（< 最小格）不出；组过大（> 组上限）也先不出（分裂还没做）。
+    """
+    import numpy as np
+    from .knobs import 件 as K件
+    分 = float(K件["相似聚类分位"]["值"] if 分位 is None else 分位)
+    邻 = max(1, int(K件["相似聚类邻居数"]["值"] if 邻居 is None else 邻居))
+    最 = int(K件["相似聚类最小格"]["值"] if 最小 is None else 最小)
+    上 = int(K件["相似聚类组上限"]["值"] if 组上限 is None else 组上限)
+    在组 = set()
+    for z in (图.组 or []):
+        在组.update(str(x) for x in (z.get("成员") or []))
+    新 = [c for c in (新格们 or []) if c.get("表示") and str(c["id"]) not in 在组]
+    if not 新:
+        return []
+    新id = {str(c["id"]) for c in 新}
+    散 = [c for c in 图.cell
+          if c.get("表示") and str(c["id"]) not in 在组 and str(c["id"]) not in 新id]
+    if not 散:
+        return []
+    全部 = 新 + 散
+    ids = [str(c["id"]) for c in 全部]
+    位置 = {k: i for i, k in enumerate(ids)}
+    M = np.asarray([[float(x) for x in c["表示"]] for c in 全部], dtype=float)
+    N = np.linalg.norm(M, axis=1, keepdims=True)
+    M = M / np.where(N > 0, N, 1.0)
+    S = M @ M.T
+    np.fill_diagonal(S, -1.0)
+    散i = [位置[str(c["id"])] for c in 散]
+    if len(散i) >= 2:
+        sub = S[np.ix_(散i, 散i)]
+        iu = np.triu_indices(len(散i), 1)
+        阈 = float(np.percentile(sub[iu], 分 * 100.0))
+    else:
+        阈 = 0.0
+    父 = {k: k for k in ids}
+
+    def 找(x):
+        while 父[x] != x:
+            父[x] = 父[父[x]]
+            x = 父[x]
+        return x
+
+    def 并(a, b):
+        父[找(a)] = 找(b)
+
+    for i, k in enumerate(ids):
+        if k not in 新id:
+            continue                    # ★ 只从新格出发
+        for j in np.argsort(-S[i])[:邻]:
+            j = int(j)
+            if S[i, j] >= 阈:
+                并(k, ids[j])
+    簇: Dict[str, List[str]] = {}
+    for k in ids:
+        簇.setdefault(找(k), []).append(k)
+    出: List[Dict] = []
+    for 根, 员们 in sorted(簇.items()):
+        if len(员们) < 最 or len(员们) > 上 or not (set(员们) & 新id):
+            continue
+        场们 = sorted({str(next(c for c in 全部 if str(c["id"]) == m)["场id"]) for m in 员们})
+        出.append({"id": "组-相似-%s" % sorted(员们)[0], "来源": "相似",
+                   "怎么来的": "相似聚类", "成员": sorted(员们), "场们": 场们})
+    return 出
+
+
+def _落层1(目录: str, 场id: str, 层1: List[Dict]) -> None:
+    """把 `层1`（这一场到底做了什么：归进/新建/补向量/相似聚类/散格判）追加落盘。
+
+    ★★ 2026-10-18（作者：「补上，然后重跑这一轮」）：原来 `层1` **只进返回值、不落盘** ——
+      "散格判跑没跑、判了什么"事后完全查不到（和第 18 场"该查却没查"同一类观测缺口）。
+      每次归档追加一行，带场id，可事后逐场查。
+    """
+    try:
+        os.makedirs(目录, exist_ok=True)
+        with io.open(os.path.join(目录, "归档-层1.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"场id": str(场id), "层1": list(层1)}, ensure_ascii=False) + "\n")
+    except Exception:                                # noqa: BLE001
+        pass          # ⛔ 记数据失败不打断归档
+
+
+def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None,
+         嵌入=None, llm=None, 底片数据: Optional[Dict] = None,
+         对话: Optional[List[dict]] = None) -> Dict:
+    """**这一下才写**：`④ 层1`（强化/新建/冷成员）＋ `④ 层2`（衰减/剪出）＋ 版本 +1 + 落盘。
+
+    ★ 2026-10-18：`嵌入` 给了 ⇒ 对本场**所有还缺向量的格**补算；
+      `llm` + `底片数据` 给了 ⇒ 对本场**没进组的格**送 `⑤ 判`（散格能不能归进已有件）。
+      都不给就不做（离线/自检路径行为不变）。
+    """
     场id = str(草案.get("场id") or "")
     if not 场id:
         # ⛔ 没有场id 就没法锚 cell（cell 的身份是原文区间 + 场）。宁可如实报，不建孤儿。
@@ -1009,10 +1107,33 @@ def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
             向量按轮[int(p["轮"])] = [float(x) for x in (p.get("向量") or [])]
         except (TypeError, ValueError, KeyError):
             continue
+    本场格: List[Dict] = []
     for c in (草案.get("cell") or []):
-        图.加cell(str(c.get("场id") or 场id), int(c.get("轮") or 0),
-                 int(c.get("起") or 0), int(c.get("止") or 0),
-                 表示=向量按轮.get(int(c.get("轮") or 0)))
+        本场格.append(图.加cell(str(c.get("场id") or 场id), int(c.get("轮") or 0),
+                          int(c.get("起") or 0), int(c.get("止") or 0),
+                          表示=向量按轮.get(int(c.get("轮") or 0))))
+
+    # ★★★ 2026-10-18（作者：「算」）：**每格都要有向量**，不只标记轮。
+    #   病：向量原来只在 `⑤ 判` 跑过（有标记）的轮里存 ⇒ 没标记的场次**整场不可回忆**
+    #   （第 13/15/16 场共 30 格全空；第 17 场她 9 次自查 8 次空，就是这些格不在起点里）。
+    #   ⇒ 归档时对**本场所有还缺向量的格**补算一次（嵌入走批量，IPv4 下零点几秒）。
+    #   ⚠️ `嵌入` 没传就不补（自检/离线路径行为不变）；补算失败**大声记进层1**，⛔ 静默。
+    缺 = [c for c in 本场格 if not (c.get("表示") or [])]
+    if 缺 and 嵌入 is not None:
+        try:
+            from .film import 读底片
+            _底 = 读底片(os.path.join(图.cache_dir, "底片", 场id + ".json.gz"))
+            文本们 = []
+            for c in 缺:
+                他 = 切回原文(_底 or {}, c["轮"], "刺激")
+                她 = 切回原文(_底 or {}, c["轮"], "她说")
+                文本们.append((("他：" + 他 + "\n") if 他 else "") + (("她：" + 她) if 她 else ""))
+            补 = 取向量(嵌入, 文本们)
+            for c, v in zip(缺, 补):
+                if len(v):
+                    c["表示"] = [float(x) for x in v]
+        except Exception as e:                        # noqa: BLE001
+            层1.append({"格向量": "补算失败", "err": "%s: %s" % (type(e).__name__, e)})
 
     # ★★ `[10]` 的两个输出分别落：**(a) 归进已有件** · **(b) 新建** —— 而 (b) 里**同组的合成一个件**。
     #   真机第 1 场实测：不做 (b) 的话 5 个标记各自新建 ⇒ 每件只有一个 cell
@@ -1171,11 +1292,74 @@ def 完成(图: 图, 草案: Dict, 记判目录: Optional[str] = None) -> Dict:
         # ⛔ 组算不出来不许把归档弄断 —— 但那要让 `层1` 里看得见
         层1.append({"组": "算依赖簇失败", "err": "%s: %s" % (type(e).__name__, e)})
 
+    # ★★ 2026-10-18（作者：「这些也是依赖簇该做的吧」「可以试试」）：
+    #   **依赖簇的第二种形态 —— 相似聚类**：本场新格与图里**散格** cos 够近就连成组（可跨场）。
+    #   ⛔ 碰不动已进组的格；⛔ 只出含本场新格的簇（否则每次归档都把旧散格重聚一遍）。
+    try:
+        相似组 = 相似聚类(图, 本场格)
+        if 相似组:
+            图.组 += 相似组
+            层1.append({"相似聚类": len(相似组)})
+    except Exception as e:                       # noqa: BLE001
+        层1.append({"相似聚类": "失败", "err": "%s: %s" % (type(e).__name__, e)})
+
+    # ★★ 2026-10-18（作者：「散格也该送 ⑤，看能不能归进」「先把功能做出来，之后再谈成本」）：
+    #   本场**没进任何组**的格，挑「和已有件最像」的最多 `散格上限` 个送 ⑤；
+    #   归进的走 `图.归进`；说「新建」的**先不建件**（避免一次糊出一堆弱件），只记进层1。
+    if llm is not None and 底片数据 is not None and 图.标记集:
+        try:
+            from .film import 读底片
+            _底 = 底片数据 if 底片数据 else 读底片(
+                os.path.join(图.cache_dir, "底片", 场id + ".json.gz"))
+            底片们 = {场id: _底}
+            组员 = set()
+            for z in (图.组 or []):
+                组员.update(str(x) for x in (z.get("成员") or []))
+            向量表 = 图.件向量表()
+            待判 = []
+            for c in 本场格:
+                if str(c["id"]) in 组员 or not (c.get("表示") or []):
+                    continue
+                文本 = _这一处的原文(_底 or {}, int(c["轮"]))
+                if not 文本.strip():
+                    continue
+                候选 = markset.提候选件([float(x) for x in c["表示"]], 向量表,
+                                     图.标记集, k=int(K判["候选件数"]["值"]))
+                if 候选:
+                    待判.append((max((w for _i, w in 候选), default=0.0), c, 文本, 候选))
+            待判.sort(key=lambda t: -t[0])
+            for _最高, c, 文本, 候选 in 待判[:int(K判["散格上限"]["值"])]:
+                _提示 = 判提示词.format(
+                    轮=int(c["轮"]),
+                    怎么来的="这一场里的一句（没被标成「意外」）—— 想知道它算不算已有的某件具体的事。",
+                    块=_块行(图),
+                    这一处="「%s」" % 文本,
+                    候选=_候选行(图, 候选, 底片们),
+                    找件次数=0)
+                _消息 = list(对话 or [])
+                _消息.append({"role": "user", "content": _提示})
+                _msg = llm.chat(_消息, fast=True, temp=0.0)
+                try:
+                    _d = json.loads(str(_msg.get("content") or ""))
+                except Exception:                     # noqa: BLE001
+                    _d = {}
+                _归 = _d.get("归进") if isinstance(_d, dict) else None
+                if _归 and str(_归) in 图.件:
+                    图.归进(str(_归), str(c["id"]), [float(x) for x in c["表示"]],
+                             来源="散格")
+                    层1.append({"轮": int(c["轮"]), "动作": "散格归进", "件": str(_归)})
+                else:
+                    层1.append({"轮": int(c["轮"]), "动作": "散格未归进"})
+        except Exception as e:                       # noqa: BLE001
+            层1.append({"散格判": "失败", "err": "%s: %s" % (type(e).__name__, e)})
+
     # ★ `判/` **总是**落盘（不是可选项）：温度 >0 ⇒ 重跑拿不到同一份
     _记判(记判目录 or os.path.join(图.cache_dir, "判"), 草案)
 
     图.版本 += 1
     图.落盘()
+    # ★★ 2026-10-18：`层1` 落盘（这一场到底做了什么，事后可查）。
+    _落层1(记判目录 or os.path.join(图.cache_dir, "判"), 场id, 层1)
     # ★★★ 2026-10-17（审查抓到）：落盘失败**没人看** —— `图.落盘` 记了 `落盘错误`、
     #   也写了 stderr，可 `完成()` 照常往下走**并且照样写 `版本对`** ⇒
     #   于是"这一场已归档"的凭据存在、图里一个字都没有；下次再按「完成」还会

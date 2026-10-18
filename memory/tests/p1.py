@@ -30,7 +30,7 @@ from memory.engine import Engine                               # noqa: E402
 from memory.film import 切回原文, 底片, 指纹, 读底片            # noqa: E402
 from memory.llm import ScriptedLLM, 收_logprobs                # noqa: E402
 from memory.graph import 图                                    # noqa: E402
-from memory.prompts import (SYS1, SYS2, SYS1_不推, TOOLS_MEMORY, FROZEN_CHANGELOG,  # noqa: E402
+from memory.prompts import (SYS1, SYS2, TOOLS_MEMORY, FROZEN_CHANGELOG,  # noqa: E402
                             load_session_prompts)
 from memory.session import Session                             # noqa: E402
 
@@ -153,30 +153,48 @@ def t_writing():
     断言("★ 输入是「强度 · 原文」一行一件（强度要给编写模型看）",
          提示 == "0.83 · 我半夜最清醒。\n0.41 · 他习惯晚上干活。", 提示)
 
-    llm = ScriptedLLM([{"role": "assistant", "content": "我记得我半夜最清醒，也记得他习惯晚上干活。"}])
+    llm = ScriptedLLM([{"role": "assistant", "content": "判断：有"},
+                       {"role": "assistant", "content": "我记得我半夜最清醒，也记得他习惯晚上干活。"}])
     r = writing.编写(llm, 件们, 场id="t", 轮=1, 线索="他说他晚上才干活")
     断言("★ 能编出一段（第一人称、把两件都说到）",
          r["ok"] and "半夜最清醒" in r["编写"] and "晚上干活" in r["编写"], r)
     断言("★★ 编写走 ast=True（关思考）—— 实测 ffort 压不下来：low 仍要 956 个推理 token",
          llm.calls[0].get("fast") is True, llm.calls[0])
-    断言("★ 编写提示词里**没有**他那句话（不给情境 —— 给了它会抄线索）",
-         "他说他晚上才干活" not in llm.calls[0]["messages"][0]["content"])
+    断言("★ 每段素材带**它是哪天的**（第 14 场实测：旧场的事被写成了「今天」）",
+         writing.条目文本([{"文本": "碗还搁在阳台上", "强度": 0.5,
+                            "场": "2026-10-17-09"}])
+         == "10月17日 第9场 ｜ 0.50 · 碗还搁在阳台上")
+    断言("★★ 判定看得到「他现在说了什么」，编写**看不到**（旧规：给了它会抄线索）",
+         "他说他晚上才干活" in llm.calls[0]["messages"][0]["content"]
+         and "他说他晚上才干活" not in llm.calls[1]["messages"][0]["content"])
+    断言("★ 判定只认「指回」，拿不准要判「无」（作者：「并入这个操作，得很肯定再做」）",
+         "指回来了吗" in llm.calls[0]["messages"][0]["content"]
+         and "不确定 ⇒ 算「无」" in llm.calls[0]["messages"][0]["content"])
+    断言("★ 判定与编写是**两次调用**（合在一起会替「写」找理由：第 1 轮没指回也写了）",
+         len(llm.calls) == 2)
 
-    llm2 = ScriptedLLM([{"role": "assistant", "content": "没有。"}])
+    llm2 = ScriptedLLM([{"role": "assistant", "content": "判断：无"}])
     r2 = writing.编写(llm2, 件们)
-    断言("★ 模型说「没有」⇒ 不注入（`没有=True`、`编写` 为空）",
-         r2["ok"] and r2["没有"] and r2["编写"] == "", r2)
+    断言("★ 判定说「不并」⇒ 不注入，而且**不再花编写那次调用**",
+         r2["ok"] and r2["没有"] and r2["编写"] == "" and len(llm2.calls) == 1, r2)
 
-    llm3 = ScriptedLLM([{"role": "assistant", "content": ""}])
+    llm3 = ScriptedLLM([{"role": "assistant", "content": "判断：有"},
+                        {"role": "assistant", "content": ""}])
     r3 = writing.编写(llm3, 件们)
-    断言("⛔ 正文是空的（被推理吃光那种）⇒ **报失败**，不许当成「没有要回忆的」",
+    断言("⛔ 判定过了但正文是空的（被推理吃光那种）⇒ **报失败**，不许当成「没有要回忆的」",
          r3["ok"] is False and r3["没有"] is False, r3)
 
     llm4 = ScriptedLLM(fallback={"role": "assistant", "content": "嗯"})
     llm4.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("网络断了"))
-    r4 = writing.编写(llm4, 件们)
+    r4 = writing.编写(llm4, 件们, 判定结果={"有": True})
     断言("⛔ 编写挂了 ⇒ 不抛异常，如实报失败（调用方好退回条目清单）",
          r4["ok"] is False and "网络断了" in str(r4.get("err")), r4)
+
+    llm5 = ScriptedLLM(fallback={"role": "assistant", "content": "判断：无"})
+    llm5.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("判定网络断"))
+    r5 = writing.编写(llm5, 件们)
+    断言("⛔ 判定挂了 ⇒ 当作「不并」（很肯定才并；判不出来就不是肯定）",
+         r5["ok"] and r5["没有"] and r5["编写"] == "", r5)
 
 
 # --------------------------------------------------------------------- ⑧ 改名 + 端到端
@@ -184,9 +202,12 @@ def t_session_and_rename():
     print("[3] 端到端（离线）：一轮对话 → 底片 + 一段回忆 + 说/")
     tmp = tempfile.mkdtemp(prefix="palm-p1-")
     cfg = Config()
+    # ★ 2026-10-18：`auto_push` 默认已关（改成她自己查）⇒ 这一段测的是**推送链路**，显式开着。
+    cfg.session.auto_push = True
     emb = HashingEmbedder(dim=64)
-    # 注意顺序：`render_recall=True` ⇒ 先调一次编写，再调主回答
+    # 注意顺序：`render_recall=True` ⇒ 先调**判定**、再调一次编写，最后主回答
     llm = ScriptedLLM([
+        {"role": "assistant", "content": "判断：有"},
         {"role": "assistant", "content": "我想起他养了只猫。"},
         {"role": "assistant", "content": "记得，你养了只猫。",
          "reasoning_content": "他问猫，我手里有那条。"},
@@ -239,24 +260,18 @@ def t_session_and_rename():
          d["系统前缀"] == [str(m.get("content") or "") for m in sess.msgs[:2]]
          and 拼回 == sess.msgs[2:-1], (len(拼回), len(sess.msgs[2:-1])))
 
-    # ★★ 2026-10-17（作者："没有推的时候，就应该鼓励查一下才对吧？"）
-    from memory.prompts import SYS1, SYS1_不推
+    # ★★ 2026-10-18（作者逐字给的 SYS1）：不推了，改成「回答之前先查一遍」写进基础设定
+    from memory.prompts import SYS1 as _SYS1
     开, _ = load_session_prompts(auto_push=True)
     关, _ = load_session_prompts(auto_push=False)
-    断言("★★ 自动推送关着 ⇒ SYS1 后面**追加**「开口前先自己查一遍」",
-         SYS1 in 关 and SYS1_不推 in 关 and SYS1_不推 not in 开)
-    断言("★ 那一段写清了「不用查他刚发来的这一句」（否则每轮空查、白花钱）",
-         "刚发来的这一句" in SYS1_不推)
-    _旧 = bool(eng.cfg.session.auto_push)
-    eng.cfg.session.auto_push = False
-    _s_off = Session(eng, 9)
-    断言("★★ 真接上了：关掉推送那场的前缀里就有它（⛔ 只加在变量里）",
-         SYS1_不推 in str(_s_off.msgs[0].get("content") or ""),
-         str(_s_off.msgs[0].get("content") or "")[-80:])
-    断言("★★ 底片指纹按**实际前缀**算（⛔ 还是默认那两条的哈希）",
-         _s_off._底片().指纹 != sess._底片().指纹,
-         (_s_off._底片().指纹, sess._底片().指纹))
-    eng.cfg.session.auto_push = _旧
+    断言("★★ `auto_push` 只影响代码是否自动推，**不再改提示词**（两臂同一份 SYS1）",
+         开 == 关 == _SYS1)
+    断言("★ SYS1 写清「每一轮回答之前先调 recall」「不许自己编造」「返回「无」是什么意思」",
+         "每一轮" in _SYS1 and "先调用 recall" in _SYS1
+         and "都不该自己编造" in _SYS1 and "返回「无」" in _SYS1)
+    断言("★ SYS1 里不许出现系统元信息（模型不知道有「自动推送」这回事）",
+         "每轮会把你" not in _SYS1 and "自动把回忆" not in _SYS1
+         and "上下文里不会有" not in _SYS1)
     断言("★ 参数里记了「这一轮是编写还是清单」",
          bool(d and (d["逐轮"][0].get("参数") or {}).get("注入")),
          d and d["逐轮"][0].get("参数"))
@@ -274,11 +289,12 @@ def t_session_and_rename():
     print("[4] 工具改名")
     名 = TOOLS_MEMORY[0]["function"]["name"]
     断言("★ 工具叫 `recall`（不是 `read_z`）", 名 == "recall", 名)
-    断言("★ SYS1 里也写 `recall`、不再出现 `read_z`", "recall" in SYS1 and "read_z" not in SYS1)
+    断言("★ 工具名统一：`SYS1` 里写 `recall`，全文不再出现旧名 `read_z`",
+         "recall" in SYS1 and "read_z" not in SYS1)
     断言("★ 冻结台账**追加在末尾**（首条仍是 `schedule_wakeup` 那条）",
          len(FROZEN_CHANGELOG) >= 2
          and "schedule_wakeup" in FROZEN_CHANGELOG[0]["what"]
-         and FROZEN_CHANGELOG[-1]["date"] == "2026-10-17", FROZEN_CHANGELOG[-1])
+         and FROZEN_CHANGELOG[-1]["date"] >= FROZEN_CHANGELOG[-2]["date"], FROZEN_CHANGELOG[-1])
     src = io.open(os.path.join(os.path.dirname(HERE), "session.py"), encoding="utf-8").read()
     断言("★ `_dispatch` 保留旧名当别名（老 pending 里还有 `read_z` 的历史）",
          'name in ("recall", "read_z")' in src)
