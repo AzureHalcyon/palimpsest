@@ -14,7 +14,8 @@ EVENT_TOOL: Dict = {
     "type": "function",
     "function": {
         "name": "event",
-        "description": "记录这一轮在说哪件事。每轮回复前先调它；返回现在在哪一层、和哪些事件相连。",
+        "description": ("记录这一轮在说哪件事。每轮正文前最后调它：先 recall/remember，"
+                        "event 之后直接写正文，不要再调工具；返回现在在哪一层、和哪些事件相连。"),
         "parameters": {
             "type": "object",
             "properties": {

@@ -116,8 +116,8 @@ else:
 
 store = SessionStore(data, "s3")
 client = FakeClient([
-    call("event", json.dumps({"name": "新的事"})),
     call("recall", json.dumps({"keywords": ["新"]})),
+    call("event", json.dumps({"name": "新的事"})),
     {"role": "assistant", "content": "好。"},
 ])
 chat = EventChat(client, store, Graph.open(data), data, "s3",
@@ -135,8 +135,8 @@ _, frozen_recall = chat._handle_recall(json.dumps({"keywords": ["新的事"]}))
 assert "新的事" not in [item["name"] for item in frozen_recall["candidates"]]
 
 client = FakeClient([
-    call("event", json.dumps({"name": "空调的事"})),
     call("recall", json.dumps({"keywords": ["空调"]})),
+    call("event", json.dumps({"name": "空调的事"})),
     {"role": "assistant", "content": "查到了。"},
 ])
 chat = EventChat(client, SessionStore(data, "s4"), Graph.open(data), data, "s4",
@@ -146,10 +146,10 @@ saved = SessionStore(data, "s4").turns()
 assert saved[-1]["recall"] and saved[-1]["recall"][0]["candidates"], saved[-1]
 
 client = FakeClient([
-    call("event", json.dumps({"name": "空调的事"})),
     call("recall", json.dumps({"keywords": ["空调"]})),
     call("remember", json.dumps({"event": second})),
     {"role": "assistant", "content": "我记得空调那件事。"},
+    call("event", json.dumps({"name": "空调的事"})),
     {"role": "assistant", "content": "嗯，我记得。"},
 ])
 chat = EventChat(client, SessionStore(data, "s5"), Graph.open(data), data, "s5",
@@ -157,7 +157,7 @@ chat = EventChat(client, SessionStore(data, "s5"), Graph.open(data), data, "s5",
 chat.send("你还记得空调吗")
 saved = SessionStore(data, "s5").turns()
 assert saved[-1]["remember"] and saved[-1]["remember"][0]["id"] == second, saved[-1]
-writer_input = client.calls[3][1]["content"]
+writer_input = client.calls[2][1]["content"]
 assert "·" in writer_input, writer_input
 assert Graph.open(data).events[second]["access"] > 0, Graph.open(data).events[second]
 current = saved[-1]["event_id"]
@@ -166,10 +166,10 @@ assert current and any({edge["a"], edge["b"]} == {current, second}
 assert os.path.exists(os.path.join(data, "说法", second + ".jsonl"))
 
 client = FakeClient([
+    call("recall", json.dumps({"keywords": ["装修"]})),
     call("event", json.dumps({"mode": "换事", "name": "装修"})),
     call("event", json.dumps({"mode": "子事", "name": "预算"})),
     call("event", json.dumps({"mode": "继续"})),
-    call("recall", json.dumps({"keywords": ["装修"]})),
     {"role": "assistant", "content": "好。"},
 ])
 chat = EventChat(client, SessionStore(data, "s6"), Graph.open(data), data, "s6",
@@ -183,21 +183,21 @@ assert any(edge["a"] == child and edge["b"] == parent and edge["relation"] == "�
            for edge in after.edges.values()), after.edges
 assert SessionStore(data, "s6").turns()[-1]["stack"] == [parent, child]
 client.script.extend([
-    call("event", json.dumps({"mode": "回"})),
     call("recall", json.dumps({"keywords": ["装修"]})),
+    call("event", json.dumps({"mode": "回"})),
     {"role": "assistant", "content": "好。"},
 ])
 chat.send("回到装修")
 assert chat.stack == [parent], chat.stack
 
 client = FakeClient([
+    call("recall", json.dumps({"keywords": ["装修"]})),
     call("event", json.dumps({"mode": "换事", "name": "装修"})),
     call("event", json.dumps({"mode": "换事", "name": "工作"})),
     call("event", json.dumps({"mode": "接旧", "event": "装修", "because": "同一套房"})),
     call("event", json.dumps({"mode": "子事", "name": "预算", "parents": ["工作"]})),
     call("event", json.dumps({"mode": "关联", "event": "工作", "because": "同一周"})),
     call("event", json.dumps({"mode": "继续"})),
-    call("recall", json.dumps({"keywords": ["装修"]})),
     {"role": "assistant", "content": "好。"},
 ])
 chat = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7",
@@ -223,8 +223,8 @@ assert chat.stack == [decoration, budget], chat.stack
 view = chat._state_view()
 assert "属于：" in view and "相关：" in view, view
 client.script.extend([
-    call("event", json.dumps({"mode": "回"})),
     call("recall", json.dumps({"keywords": ["装修"]})),
+    call("event", json.dumps({"mode": "回"})),
     {"role": "assistant", "content": "好。"},
 ])
 chat.send("回装修")
@@ -251,15 +251,46 @@ cli.main(["detach", "--data", data, "--event", current, "--last"])
 assert not Graph.open(data).events[current].get("segments"), Graph.open(data).events[current]
 
 client = FakeClient([
-    call("event", json.dumps({"mode": "换事", "name": "催查"})),
     {"role": "assistant", "content": "先答"},
     call("recall", json.dumps({"keywords": ["催查"]})),
     {"role": "assistant", "content": "补查后答"},
+    call("event", json.dumps({"mode": "换事", "name": "催查"})),
+    {"role": "assistant", "content": "最终答复"},
 ])
 chat = EventChat(client, SessionStore(data, "s9"), Graph.open(data), data, "s9",
                  [{"role": "system", "content": "x"}])
 reply = chat.send("测试催查")
-assert reply == "补查后答", reply
+assert reply == "最终答复", reply
+
+client = FakeClient([
+    call("recall", json.dumps({"keywords": ["顺序"]})),
+    call("event", json.dumps({"mode": "换事", "name": "顺序"})),
+    call("recall", json.dumps({"keywords": ["顺序"]})),
+    {"role": "assistant", "content": "先答"},
+    call("event", json.dumps({"mode": "继续"})),
+    {"role": "assistant", "content": "最终答复"},
+])
+chat = EventChat(client, SessionStore(data, "s9b"), Graph.open(data), data, "s9b",
+                 [{"role": "system", "content": "x"}])
+reply = chat.send("测试事件顺序")
+assert reply == "最终答复", reply
+saved = SessionStore(data, "s9b").turns()
+assert saved[-1]["tool_order"][-1] == "event", saved[-1]["tool_order"]
+
+client = FakeClient([
+    {"role": "assistant", "content": "先答"},
+    {"role": "assistant", "content": "再答"},
+    {"role": "assistant", "content": "还不标"},
+])
+chat = EventChat(client, SessionStore(data, "s9c"), Graph.open(data), data, "s9c",
+                 [{"role": "system", "content": "x"}])
+try:
+    chat.send("测试拒绝记录")
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("a turn without a final event must not be recorded")
+assert not SessionStore(data, "s9c").turns()
 
 data2 = tempfile.mkdtemp()
 os.makedirs(os.path.join(data2, "状态"), exist_ok=True)
@@ -278,11 +309,11 @@ for event_id, segments in snapshot.items():
 shutil.rmtree(data2, ignore_errors=True)
 
 client = FakeClient([
+    call("recall", json.dumps({"keywords": ["嵌套"]})),
     call("event", json.dumps({"mode": "换事", "name": "嵌套根"})),
     call("event", json.dumps({"mode": "子事", "name": "嵌套中"})),
     call("event", json.dumps({"mode": "子事", "name": "嵌套末"})),
     call("event", json.dumps({"mode": "继续"})),
-    call("recall", json.dumps({"keywords": ["嵌套"]})),
     {"role": "assistant", "content": "好。"},
 ])
 chat = EventChat(client, SessionStore(data, "s10"), Graph.open(data), data, "s10",
@@ -305,8 +336,8 @@ assert graph.events[second_same]["seq"] > graph.events[first_same]["seq"]
 assert second_same.startswith("e-") and len(second_same) == 14, second_same
 
 client = FakeClient([
-    call("event", json.dumps({"mode": "继续"})),
     call("recall", json.dumps({"keywords": ["装修"]})),
+    call("event", json.dumps({"mode": "继续"})),
     {"role": "assistant", "content": "接着聊。"},
 ])
 resumed = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7", [])

@@ -7,6 +7,7 @@ import time
 from typing import Callable, Dict, List, Optional
 
 from ..core.config import ChatConfig
+from ..core.embed import cosine
 from ..core.text import idf, match_score, terms
 from ..read.activate import activate
 from ..read.search import event_segments
@@ -44,7 +45,6 @@ class EventChat:
         self.activation: Dict[str, float] = {}
         self._cue_terms = set()
         self._cue_keywords: List[str] = []
-        self._nudged = False
         self._remembered = 0
         self._pending_event: Optional[str] = None
         self._turn_created: set = set()
@@ -89,7 +89,6 @@ class EventChat:
         if self.store.is_archived():
             raise SessionSealed("这一场已归档（封口），只读：%s" % self.store.path)
         self.turn += 1
-        self._nudged = False
         self._remembered = 0
         self._pending_event = None
         self._turn_created = set()
@@ -103,6 +102,8 @@ class EventChat:
         tool_order: List[str] = []
         reply = ""
         rounds = 0
+        nudges = 0
+        last_event_ok = False
 
         while True:
             message = self.client.chat(self.messages, tools=tools.TOOLS)
@@ -110,18 +111,29 @@ class EventChat:
             content = str(message.get("content") or "")
 
             if not tool_calls:
-                missing = []
+                problems = []
                 if not calls:
-                    missing.append("event")
+                    problems.append("还差 event")
+                elif not last_event_ok:
+                    if tool_order and tool_order[-1] == "event":
+                        problems.append("event 没有成功")
+                    else:
+                        problems.append("event 不是最后一个工具调用")
                 if not recalled:
-                    missing.append("recall")
-                if missing and not self._nudged:
-                    self._nudged = True
+                    problems.append("还差 recall")
+                if problems and nudges < 2:
+                    nudges += 1
                     self.messages.append({
                         "role": "system",
-                        "content": "这一轮还差：%s。先调完再回复。" % "、".join(missing),
+                        "content": ("这一轮的要求没满足：%s。顺序固定为 recall →"
+                                    "（必要时 remember）→ event → 正文；"
+                                    "event 之后不要再调工具。"
+                                    % "；".join(problems)),
                     })
                     continue
+                if problems:
+                    raise RuntimeError("这一轮未记录：%s；event 必须是正文前最后一个"
+                                       "成功的工具调用。" % "；".join(problems))
                 reply = content
                 self.messages.append({"role": "assistant", "content": reply})
                 break
@@ -145,6 +157,10 @@ class EventChat:
                         recalled.append(record)
                     elif name == "remember":
                         remembered.append(record)
+                if name == "event":
+                    last_event_ok = record is not None
+                else:
+                    last_event_ok = False
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": call.get("id"),
@@ -153,12 +169,21 @@ class EventChat:
 
             rounds += 1
             if rounds > self.max_tool_rounds:
-                reply = content
-                self.messages.append({"role": "assistant", "content": reply})
-                break
+                raise RuntimeError("工具调用轮数超过上限，本轮未记录")
 
         if self._pending_event:
             self.graph.attach(self._pending_event, self.session_id, self.turn)
+        current = self._current()
+        linked = False
+        for item in remembered:
+            event_id = str(item.get("id") or "")
+            if current and event_id and event_id != current:
+                edge = self.graph.add_edge(current, event_id, "相关")
+                edge["strength"] = min(1.0, float(edge.get("strength", 0)) + 0.03)
+                edge["support"] = int(edge.get("support", 0)) + 1
+                linked = True
+        if linked:
+            self.graph.save()
         keep = set(self.stack)
         if self._pending_event:
             keep.add(self._pending_event)
@@ -322,6 +347,42 @@ class EventChat:
             seen.add(parent)
         return list(reversed(chain))
 
+    def _similar_old(self, name: str, limit: int = 3) -> str:
+        """Return similar frozen events as a hint; never auto-merge."""
+        if (not self.embedder or not self.embedder.available
+                or not self.frozen_vectors.items):
+            return ""
+        user_text = ""
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                user_text = str(message.get("content") or "")
+                break
+        text = (name + " " + user_text).strip()
+        try:
+            query = self.embedder.embed([text])[0]
+        except Exception:
+            return ""
+        scored = []
+        for event_id, item in self.frozen_vectors.items.items():
+            vector = item.get("vector") or []
+            if not vector or len(vector) != len(query):
+                continue
+            event = self.frozen_graph.events.get(event_id) or {}
+            try:
+                score = cosine(query, vector)
+            except ValueError:
+                continue
+            scored.append((score, str(event.get("name") or ""), event_id))
+        scored.sort(reverse=True)
+        scored = [item for item in scored if item[0] >= 0.35][:limit]
+        if not scored:
+            return ""
+        lines = ["相似旧事件："]
+        for score, event_name, event_id in scored:
+            lines.append("%s %s %.2f" % (event_id, event_name, score))
+        lines.append("如果同一件，用 event 接旧 <id>；不是同一件再换事。")
+        return "\n".join(lines)
+
     def _handle_event(self, arguments: str):
         try:
             parsed = tools.parse_event_call(arguments)
@@ -446,6 +507,10 @@ class EventChat:
                     if other != event_id and item.get("name") == parsed.name]
             if same:
                 lines.append("已有同名：%s；同一件用接旧，不同件换名字。" % "、".join(sorted(same)))
+        if mode == "换事" and parsed.name:
+            hint = self._similar_old(parsed.name)
+            if hint:
+                lines.append(hint)
         if (mode == "接旧" and event_id not in self._last_candidates
                 and event_id not in self._remembered_ids):
             lines.append("这件不在这一轮的候选里。")
@@ -529,11 +594,6 @@ class EventChat:
         event = self.graph.events[event_id]
         event["access"] = min(1.0, float(event.get("access", 0)) + 0.1)
         event["access_ts"] = time.time()
-        current = self._current()
-        if current and current != event_id:
-            edge = self.graph.add_edge(current, event_id, "相关")
-            edge["strength"] = min(1.0, float(edge.get("strength", 0)) + 0.03)
-            edge["support"] = int(edge.get("support", 0)) + 1
         self.graph.save()
         self.echo("[回忆] %s" % memory)
         return memory + "\n\n" + self._state_view(), {"id": event_id}
