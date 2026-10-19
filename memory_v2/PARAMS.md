@@ -1,0 +1,32 @@
+# 参数（暂定）
+
+新链路现在真的在用、但还没标定的数。等级一律是**假设**，没有实测；
+以后要调，先改这里，再改对应代码，并补一条依据。
+
+| 参数 | 现在 | 在哪 | 为什么 |
+|---|---|---|---|
+| 名字权重 | 4 倍 | `read/activate.py` | 落点先认名字，别让长文本靠词频赢 |
+| 向量归一 | (余弦 − 0.3) ÷ 0.5 | `read/activate.py` | 0.3 以下算 0，0.8 以上算 1 |
+| 词 / 向量权重 | 0.2 / 0.8 | `read/activate.py` | 同义词靠向量，字面只做校正 |
+| 种子门槛 | 0.15 | `read/activate.py` | 太低会撒开，太高同义词进不来 |
+| 扩散跳数 | 2 | `read/activate.py` | 一跳只到邻居，两跳够到隔壁的事 |
+| 边权 | 属于 0.9、相关 0.6 | `read/activate.py` | 包含关系更近 |
+| 内容重合权重 | 0.5 | `read/activate.py` | 感应弱于明确边 |
+| 大小归一 | 根号（词数 ÷ 50） | `read/activate.py` | 防长事件靠篇幅赢 |
+| 相似抑制 | 1 − 0.5 × 相似度 | `read/activate.py` | 相似的一半让位 |
+| 网络赢家 | ≥2 个种子汇聚，且余弦 ≥ 0.5 | `read/activate.py` | 网络能决定答案，但不是谁都能赢 |
+| 重放加强 | +0.02 × 不同起点数（≥2 起点） | `consolidate/replay.py` | 主干每轮镀一层 |
+| 全局衰减 | ×0.87 | `consolidate/replay.py` | 主干也削，靠镀活下来 |
+| 剪边 | <0.12；属于保底 0.15 | `consolidate/replay.py` | 结构不剪，关联可剪 |
+| 候选对门槛 | 6 | `consolidate/replay.py` | 新边不越铺越密 |
+| 内容感应 | 每点 top-1 | `consolidate/replay.py` | 旧事件被带亮 |
+| 编写片段 | 线索重叠选 8 段，2000 字，含最近一段 | `chat/loop.py` | 原文再长，输入不膨胀 |
+| 巩固 / 可及 | 1 + 0.2×巩固，1 + 0.1×可及 | `read/activate.py` | 只做微调，别让老件压过直接命中 |
+| 近期加权 | 1 + 0.1 × e^(−天 ÷ 30) | `read/activate.py` | 时间码的近似 |
+| 时间过滤 | 模型给具体日期 | `chat/tools.py` | 相对时间由模型换成 after / before |
+| 可及 | 取回 +0.1，按天 × 0.9 | `read/activate.py`、`chat/loop.py` | 用则强，衰减快 |
+| 一轮取回上限 | 2 | `chat/loop.py` | 设计定的 |
+| 重放旧抽样 | 5 件 | `consolidate/replay.py` | 防旧主干饿死 |
+| 成边门槛 | 支撑 ≥ 3 | `consolidate/replay.py` | 一次重放不算数 |
+| 边衰减 | 每次 × 0.95 | `consolidate/replay.py` | 全局下调 |
+| 取回成边 | 强度 +0.03 | `chat/loop.py` | 提取也巩固（共同激活） |
