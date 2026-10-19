@@ -13,6 +13,10 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+class GraphError(RuntimeError):
+    """graph.json cannot be read; the caller must stop instead of continuing empty."""
+
+
 def edge_key(first: str, second: str, relation: str) -> str:
     left, right = sorted((first, second))
     return "%s|%s|%s" % (left, right, relation)
@@ -36,18 +40,50 @@ class Graph:
         return cls(os.path.join(data_dir, "graph.json"))
 
     def load(self) -> None:
-        if not os.path.exists(self.path):
-            return
         try:
             with open(self.path, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return
-        self.events = dict(data.get("events") or {})
-        self.edges = dict(data.get("edges") or {})
-        for edge in self.edges.values():
-            edge.setdefault("source", "model")
-        self.pairs = dict(data.get("pairs") or {})
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            self._quarantine_corrupt(exc)
+        if not isinstance(data, dict):
+            self._quarantine_corrupt(ValueError("root is not an object"))
+        try:
+            events = data.get("events") or {}
+            edges = data.get("edges") or {}
+            pairs = data.get("pairs") or {}
+            if not (isinstance(events, dict) and isinstance(edges, dict)
+                    and isinstance(pairs, dict)):
+                raise ValueError("events/edges/pairs are not objects")
+            self.events = dict(events)
+            self.edges = dict(edges)
+            for edge in self.edges.values():
+                edge.setdefault("source", "model")
+            self.pairs = dict(pairs)
+        except (TypeError, AttributeError, ValueError) as exc:
+            self._quarantine_corrupt(exc)
+
+    def _quarantine_corrupt(self, error: Exception) -> None:
+        base = self.path + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S")
+        target = base
+        suffix = 1
+        while os.path.exists(target):
+            target = "%s-%d" % (base, suffix)
+            suffix += 1
+        try:
+            os.replace(self.path, target)
+        except OSError as move_error:
+            raise GraphError("graph.json 读不了（%s），隔离到 %s 也失败：%s"
+                             % (error, target, move_error)) from error
+        raise GraphError("graph.json 读不了（%s），已隔离到 %s；请检查后再重建或修复。"
+                         % (error, target)) from error
+
+    def reset(self) -> None:
+        """Drop the in-memory graph before a full rebuild from state records."""
+        self.events.clear()
+        self.edges.clear()
+        self.pairs.clear()
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -77,8 +113,13 @@ class Graph:
         seq = int(event.get("seq", 0) or 0) or event_number(event_id)
         return (str(event.get("created") or ""), seq)
 
-    def add_event(self, name: str) -> str:
-        event_id = self.new_event_id()
+    def add_event(self, name: str, event_id: Optional[str] = None) -> str:
+        if event_id:
+            event_id = str(event_id)
+            if event_id in self.events:
+                return event_id
+        else:
+            event_id = self.new_event_id()
         self.events[event_id] = {
             "name": name,
             "seq": self.next_seq(),
@@ -106,11 +147,23 @@ class Graph:
     def attach(self, event_id: str, session: str, turn: int) -> None:
         event = self.events[event_id]
         segments = event.setdefault("segments", [])
-        if (segments and segments[-1].get("session") == session
-                and int(segments[-1].get("end", 0)) + 1 == int(turn)):
-            segments[-1]["end"] = int(turn)
-        else:
-            segments.append({"session": session, "start": int(turn), "end": int(turn)})
+        turn = int(turn)
+        for segment in segments:
+            if segment.get("session") != session:
+                continue
+            start = int(segment.get("start", 0))
+            end = int(segment.get("end", 0))
+            if start <= turn <= end:
+                return
+            if end + 1 == turn:
+                segment["end"] = turn
+                event["updated"] = _now()
+                return
+            if turn + 1 == start:
+                segment["start"] = turn
+                event["updated"] = _now()
+                return
+        segments.append({"session": session, "start": turn, "end": turn})
         event["updated"] = _now()
 
     def add_edge(self, first: str, second: str, relation: str, strength: float = 0.2,

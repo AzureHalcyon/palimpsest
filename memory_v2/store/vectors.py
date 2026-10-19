@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Dict, Optional
+
+
+_WARNED_BAD_CACHE = set()
 
 
 class VectorStore:
@@ -18,12 +22,16 @@ class VectorStore:
         return cls(os.path.join(data_dir, "vectors.json"))
 
     def load(self) -> None:
-        if not os.path.exists(self.path):
-            return
         try:
             with open(self.path, encoding="utf-8") as handle:
                 self.items = dict(json.load(handle))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError) as exc:
+            if self.path not in _WARNED_BAD_CACHE:
+                _WARNED_BAD_CACHE.add(self.path)
+                print("警告：向量缓存读不了，已重建：%s（%s）"
+                      % (self.path, exc), file=sys.stderr)
             self.items = {}
 
     def save(self) -> None:

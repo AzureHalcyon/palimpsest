@@ -19,8 +19,8 @@ from .core.config import ChatConfig, Credentials, CredentialsError
 from .core.embed import Embedder
 from .core.llm import ChatClient
 from .core.prompts import system_messages
-from .store.graph import Graph
-from .store.session import SessionStore, next_session_id
+from .store.graph import Graph, GraphError
+from .store.session import SessionStore, SessionSealed, next_session_id
 
 
 class ChatService:
@@ -107,6 +107,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._json(200, self.service.send(text))
+            except SessionSealed as exc:
+                self._json(409, {"error": str(exc)})
             except Exception as exc:
                 print("[serve] send failed: %s" % exc, file=sys.stderr, flush=True)
                 self._json(500, {"error": str(exc)})
@@ -133,7 +135,11 @@ def run(argv=None) -> int:
 
     data_dir = os.path.abspath(args.data)
     session = args.session or next_session_id(data_dir)
-    service = ChatService(data_dir, session, args.credentials)
+    try:
+        service = ChatService(data_dir, session, args.credentials)
+    except (GraphError, SessionSealed) as exc:
+        print("错误：%s" % exc, file=sys.stderr)
+        return 1
     Handler.service = service
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("listening http://127.0.0.1:%d  session=%s" % (args.port, session), flush=True)

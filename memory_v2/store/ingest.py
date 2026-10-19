@@ -3,15 +3,33 @@
 from __future__ import annotations
 
 import os
+import time
 
 from .graph import Graph
 from .session import SessionStore
 
 
-def ingest(graph: Graph, data_dir: str) -> dict:
+def _backup_path(path: str) -> str:
+    base = path + ".rebuilt-" + time.strftime("%Y%m%d-%H%M%S")
+    target = base
+    suffix = 1
+    while os.path.exists(target):
+        target = "%s-%d" % (base, suffix)
+        suffix += 1
+    return target
+
+
+def ingest(graph: Graph, data_dir: str, rebuild: bool = False) -> dict:
     directory = os.path.join(data_dir, "状态")
     if not os.path.isdir(directory):
-        return {"sessions": 0, "events": 0}
+        return {"sessions": 0, "events": 0, "backup": ""}
+
+    backup = ""
+    if rebuild:
+        if os.path.exists(graph.path):
+            backup = _backup_path(graph.path)
+            os.replace(graph.path, backup)
+        graph.reset()
 
     before = len(graph.events)
     filenames = sorted(name for name in os.listdir(directory) if name.endswith(".jsonl"))
@@ -26,7 +44,7 @@ def ingest(graph: Graph, data_dir: str) -> dict:
         old = str(turn.get("event_id") or "")
         name = turn.get("event")
         if old and name and old not in id_map:
-            id_map[old] = graph.add_event(str(name))
+            id_map[old] = graph.add_event(str(name), event_id=old)
 
     for session, turn in records:
         old = str(turn.get("event_id") or "")
@@ -49,6 +67,12 @@ def ingest(graph: Graph, data_dir: str) -> dict:
                 target = id_map.get(reference) or graph.resolve(reference)
                 if target:
                     graph.add_edge(event_id, target, "相关")
+        for item in turn.get("remember") or []:
+            reference = str(item.get("id") or "")
+            target = id_map.get(reference) or graph.resolve(reference)
+            if target and target != event_id:
+                graph.add_edge(event_id, target, "相关")
 
     graph.save()
-    return {"sessions": len(filenames), "events": len(graph.events) - before}
+    return {"sessions": len(filenames), "events": len(graph.events) - before,
+            "backup": backup}

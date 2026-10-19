@@ -11,9 +11,9 @@ from memory_v2.chat.loop import EventChat
 from memory_v2.consolidate.replay import consolidate
 from memory_v2.read.activate import activate
 from memory_v2.read.search import expand
-from memory_v2.store.graph import Graph
+from memory_v2.store.graph import Graph, GraphError
 from memory_v2.store.ingest import ingest
-from memory_v2.store.session import SessionStore
+from memory_v2.store.session import SessionStore, SessionSealed
 
 
 class FakeClient:
@@ -84,6 +84,13 @@ for _ in range(3):
 graph = Graph.open(data)
 assert any(edge.get("relation") == "相关" for edge in graph.edges.values()), graph.edges
 assert any(float(edge.get("strength", 0)) > 0.1 for edge in graph.edges.values()), graph.edges
+assert SessionStore(data, "s1").is_archived()
+try:
+    EventChat(FakeClient([]), SessionStore(data, "s1"), Graph.open(data), data, "s1", [])
+except SessionSealed:
+    pass
+else:
+    raise AssertionError("archived session must refuse chat")
 
 store = SessionStore(data, "s3")
 client = FakeClient([
@@ -232,6 +239,12 @@ graph2 = Graph.open(data2)
 stats = ingest(graph2, data2)
 assert stats["sessions"] == 1 and stats["events"] >= 2, stats
 assert any(edge["relation"] == "属于" for edge in graph2.edges.values()), graph2.edges
+snapshot = {event_id: [dict(segment) for segment in event.get("segments") or []]
+            for event_id, event in graph2.events.items()}
+again = ingest(graph2, data2)
+assert again["events"] == 0 and len(graph2.events) == len(snapshot), again
+for event_id, segments in snapshot.items():
+    assert graph2.events[event_id]["segments"] == segments, (event_id, graph2.events[event_id])
 shutil.rmtree(data2, ignore_errors=True)
 
 client = FakeClient([
@@ -260,6 +273,63 @@ second_same = graph.add_event("同名序")
 assert graph.resolve("同名序") == second_same, (first_same, second_same)
 assert graph.events[second_same]["seq"] > graph.events[first_same]["seq"]
 assert second_same.startswith("e-") and len(second_same) == 14, second_same
+
+client = FakeClient([
+    call("event", json.dumps({"mode": "继续"})),
+    call("recall", json.dumps({"keywords": ["装修"]})),
+    {"role": "assistant", "content": "接着聊。"},
+])
+resumed = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7", [])
+assert resumed.turn == 2, resumed.turn
+assert resumed.stack == [decoration], resumed.stack
+assert resumed.send("接着聊") == "接着聊。"
+assert resumed.turn == 3, resumed.turn
+assert SessionStore(data, "s7").turns()[-1]["turn"] == 3
+assert Graph.open(data).events[decoration]["segments"] == [
+    {"session": "s7", "start": 2, "end": 3}], Graph.open(data).events[decoration]
+
+consolidate(Graph.open(data), data, "s7")
+try:
+    resumed.send("再聊一句")
+except SessionSealed:
+    pass
+else:
+    raise AssertionError("archived session must refuse further turns")
+
+bad = tempfile.mkdtemp()
+with open(os.path.join(bad, "graph.json"), "w", encoding="utf-8") as handle:
+    handle.write("{not json")
+try:
+    Graph.open(bad)
+except GraphError:
+    pass
+else:
+    raise AssertionError("corrupt graph must raise")
+names = os.listdir(bad)
+assert any(name.startswith("graph.json.corrupt-") for name in names), names
+assert not os.path.exists(os.path.join(bad, "graph.json")), names
+shutil.rmtree(bad, ignore_errors=True)
+
+target_turn = turn(1, "说件旧事", "好", "2026-10-13")
+target_turn["event"] = "目标事"
+target_turn["event_id"] = "e-444444444444"
+remember_turn = turn(2, "再提旧事", "记得", "2026-10-13")
+remember_turn["event"] = "再提旧事"
+remember_turn["event_id"] = "e-333333333333"
+remember_turn["remember"] = [{"id": "e-444444444444"}]
+write_session(data, "s12", [target_turn, remember_turn])
+
+graph = Graph.open(data)
+graph.add_event("只在图里")
+graph.save()
+stats = ingest(Graph.open(data), data, rebuild=True)
+assert stats["backup"] and os.path.exists(stats["backup"]), stats
+rebuilt = Graph.open(data)
+assert "只在图里" not in [event.get("name") for event in rebuilt.events.values()]
+assert len(rebuilt.events) == stats["events"], (len(rebuilt.events), stats)
+assert any(edge.get("relation") == "属于" for edge in rebuilt.edges.values()), rebuilt.edges
+assert any({edge.get("a"), edge.get("b")} == {"e-333333333333", "e-444444444444"}
+           for edge in rebuilt.edges.values()), rebuilt.edges
 
 shutil.rmtree(data, ignore_errors=True)
 print("OK")

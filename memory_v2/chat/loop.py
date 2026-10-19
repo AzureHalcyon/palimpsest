@@ -9,7 +9,7 @@ from ..core.text import idf, match_score, terms
 from ..read.activate import activate
 from ..read.search import event_segments
 from ..read.write import write_memory
-from ..store.session import SessionStore
+from ..store.session import SessionStore, SessionSealed
 from ..store.writings import WriterArchive
 from . import tools
 
@@ -25,6 +25,8 @@ class EventChat:
                  echo: Optional[Callable[[str], None]] = None):
         self.client = client
         self.store = store
+        if store.is_archived():
+            raise SessionSealed("这一场已归档（封口），只读：%s" % store.path)
         self.graph = graph
         self.data_dir = data_dir
         self.session_id = session_id
@@ -45,7 +47,21 @@ class EventChat:
         self._last_candidates: set = set()
         self._remembered_ids: set = set()
 
+        # 同一场还没归档时，进程重启后要接着编号、接着当前事件说；
+        # 旧内容仍由 recall / remember 从图里取，不把 transcript 塞回上下文。
+        turns = store.turns()
+        if turns:
+            self.turn = max(int(turn.get("turn") or 0) for turn in turns)
+            last = turns[-1]
+            stack = [event_id for event_id in (last.get("stack") or [])
+                     if event_id in graph.events]
+            if not stack and last.get("event_id") in graph.events:
+                stack = [str(last["event_id"])]
+            self.stack = stack
+
     def send(self, text: str) -> str:
+        if self.store.is_archived():
+            raise SessionSealed("这一场已归档（封口），只读：%s" % self.store.path)
         self.turn += 1
         self._nudged = False
         self._remembered = 0

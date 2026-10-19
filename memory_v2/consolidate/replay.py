@@ -146,5 +146,6 @@ def consolidate(graph, data_dir: str, session: str, sample: int = 5,
         event["consolidation"] = min(1.0, float(event.get("consolidation", 0)) + 0.1 * count)
 
     graph.save()
+    SessionStore(data_dir, session).archive()
     return {"seeds": len(seeds), "lit": len(counts), "edges": formed,
             "reinforced": reinforced, "pruned": pruned, "content": content_total}

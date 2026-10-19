@@ -24,9 +24,9 @@ from .core.embed import Embedder
 from .core.llm import ChatClient
 from .core.prompts import system_messages
 from .read.activate import activate
-from .store.graph import Graph
+from .store.graph import Graph, GraphError
 from .store.ingest import ingest
-from .store.session import SessionStore, next_session_id
+from .store.session import SessionStore, SessionSealed, next_session_id
 
 
 DEFAULT_DATA_DIR = os.path.join(".local", "memory_v2")
@@ -182,8 +182,13 @@ def _cmd_mark(args) -> int:
 def _cmd_ingest(args) -> int:
     data_dir = os.path.abspath(args.data)
     graph = Graph.open(data_dir)
-    stats = ingest(graph, data_dir)
-    print("读了 %d 场，新增 %d 件" % (stats["sessions"], stats["events"]))
+    stats = ingest(graph, data_dir, rebuild=bool(args.rebuild))
+    if args.rebuild:
+        print("读了 %d 场，重建 %d 件" % (stats["sessions"], stats["events"]))
+        if stats["backup"]:
+            print("旧图备份：%s" % stats["backup"])
+    else:
+        print("读了 %d 场，新增 %d 件" % (stats["sessions"], stats["events"]))
     return 0
 
 
@@ -305,8 +310,10 @@ def main(argv=None) -> int:
     unlink_parser.add_argument("--relation", default="")
     unlink_parser.set_defaults(func=_cmd_unlink)
 
-    ingest_parser = sub.add_parser("ingest", help="从状态记录重建事件图")
+    ingest_parser = sub.add_parser("ingest", help="从状态记录补齐或整体重建事件图")
     ingest_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
+    ingest_parser.add_argument("--rebuild", action="store_true",
+                               help="清空当前图后整体重建；旧图先备份")
     ingest_parser.set_defaults(func=_cmd_ingest)
 
     events_parser = sub.add_parser("events", help="列出事件")
@@ -319,7 +326,11 @@ def main(argv=None) -> int:
     edges_parser.set_defaults(func=_cmd_edges)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (GraphError, SessionSealed) as exc:
+        print("错误：%s" % exc, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
