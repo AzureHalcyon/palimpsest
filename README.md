@@ -21,8 +21,8 @@
 归档不再让模型判，只剩每轮落盘 ＋ 一场结束跑一次重放（REM-SWS：不均匀激活、加强、全局衰减、剪枝）。
 **只有编写出来的那段进上下文**，原文和候选都不进。
 
-这一代在 [`memory_v2/`](memory_v2/README.md)；上一代（格 / 件 / 组 / 势）在 [`memory/`](memory/README.md)，
-保留作对照。**这一步要验证的是：她记得住，也想得起来。**
+这一代在 [`memory_v2/`](memory_v2/README.md)；上一代（格 / 件 / 组 / 势）整体归档在
+[`archive/v1/memory/`](archive/v1/memory/README.md)，保留可运行。**这一步要验证的是：她记得住，也想得起来。**
 
 读法（怎么找、怎么写）**暂时冻结**：不训练，只把材料攒着。
 
@@ -58,11 +58,11 @@
 |---|---|
 | 归档（①–⑤） | 切格 → 误差 → 候选 → 判 → 层1 强化 / 层2 衰减 |
 | 格 / 件 / 组 / 势 | 件是跨场的落点；组是依赖簇；势是读取路径的 EMA |
-| Android 宿主 | Chaquopy 把 `memory/` 嵌进 APK（构建见 [`app/README.md`](app/README.md)） |
+| Android 宿主 | Chaquopy 把 `archive/v1/memory/` 嵌进 APK（构建见 [`archive/v1/app/README.md`](archive/v1/app/README.md)） |
 
 **还没做**：
 
-- **App 接入 `memory_v2`**：Android 宿主还接在 `memory/` 上；
+- **App 接入 `memory_v2`**：Android 宿主还接在 `archive/v1/memory/` 上；
 - **跨多天的长期验证**：现在两场是同一天跑的，纵向的遗忘与再认还没验；
 - **读取标定 / 消融**：网络赢家门槛、扩散权重还是探针上定的；
 - **规模**：事件上千后的读取与重放耗时；
@@ -77,11 +77,11 @@ python memory_v2/tests/check.py       # 当前链路
 python tools/文档/check_docs.py       # 文档自查：编号顺序、重复、冲突标记、相对链接
 ```
 
-旧链路的测试（`memory/tests/`）仍在，只用来对照：
+旧链路的测试在 `archive/v1/memory/tests/`，能直接跑：
 
 ```powershell
-python memory/tests/smoke.py
-python memory/tests/p1.py ; python memory/tests/p2.py ; python memory/tests/p3.py
+python archive/v1/memory/tests/smoke.py
+python archive/v1/memory/tests/p1.py ; python archive/v1/memory/tests/p2.py ; python archive/v1/memory/tests/p3.py
 ```
 
 ## 文档
@@ -102,8 +102,8 @@ python memory/tests/p1.py ; python memory/tests/p2.py ; python memory/tests/p3.p
 | 目录 | 是什么 |
 |---|---|
 | [`memory_v2/`](memory_v2/README.md) | ★ 当前记忆层：事件网络、读取、重放、实时入口 |
-| [`memory/`](memory/README.md) | 上一代记忆层（格 / 件 / 组 / 势），保留作对照 |
-| [`app/`](app/README.md) | Android 宿主：目前仍接 `memory/`，尚未接 `memory_v2` |
+| [`archive/v1/`](archive/v1/README.md) | 上一代整体：`memory/` ＋ `app/`，冻结但可运行 |
+| [`archive/v1/app/`](archive/v1/app/README.md) | Android 宿主：仍接 `archive/v1/memory/`，尚未接 `memory_v2` |
 | [`tools/`](tools/README.md) | 离线工具：取数 / 取材 / 语料转换 / 文档自查 |
 | `docs/` | 设计与记录 |
 

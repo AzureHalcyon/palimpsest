@@ -1,6 +1,6 @@
 # 贡献指南
 
-**这个项目是研究原型**：文档是主体，代码有 `memory/` 记忆层、`app/`（Android 宿主，构建见 [`app/README.md`](app/README.md)）与 `tools/` 离线工具。⇒ **文档与讨论仍然是最有用的贡献**，代码类改动也欢迎。
+**这个项目是研究原型**：当前链路在 `memory_v2/`；上一代（`memory/` ＋ `app/`）归档在 `archive/v1/`（构建见 [`archive/v1/app/README.md`](archive/v1/app/README.md)），`tools/` 是离线工具。⇒ **文档与讨论仍然是最有用的贡献**，代码类改动也欢迎。
 
 ## 提问题 / 提想法
 

@@ -1,12 +1,12 @@
 # app —— 手机上那个壳（Android 宿主）
 
-> **宿主目前接的还是 `memory/`（v1）；`memory_v2/` 尚未接入。**
+> **已归档（v1）：宿主接的是 `archive/v1/memory/`；`memory_v2/` 尚未接入。**
 > v2 的实时入口先用 `memory_v2/serve.py`，App 接入是后面的事。
 
 > **来历**：本工程从旧仓整体搬来（2026-10-17）；更早的细节不在本仓，下面的说明只讲现在。
 
-**一句话**：`memory/`（Python 记忆层）的 Android 宿主。**业务逻辑一行都不重写** ——
-构建时由 [Chaquopy](https://chaquo.com/chaquopy/) 把 `memory/` 原样嵌进 APK，
+**一句话**：`archive/v1/memory/`（上一代 Python 记忆层）的 Android 宿主。**业务逻辑一行都不重写** ——
+构建时由 [Chaquopy](https://chaquo.com/chaquopy/) 把它原样嵌进 APK，
 所以手机上跑的就是桌面上能跑的那份。Kotlin 只管界面、权限、前台服务，以及把 Python 的回调接到 Compose 上。
 
 ## 构建
@@ -29,10 +29,10 @@ pwsh -File build.ps1 -Toolchain 'X:\Android' :app:assembleDebug
 ## ★ Python 源码只有一份（目录 junction）
 
 ```
-app/app/src/main/python/memory  ──junction──▶  <仓库根>/memory/
+app/app/src/main/python/memory  ──junction──▶  archive/v1/memory/
 ```
 
-磁盘上**只有一份** Python 源码，改 `memory/` 立刻反映到手机上。
+磁盘上**只有一份** Python 源码，改 `archive/v1/memory/` 立刻反映到手机上。
 `.gitignore` 排掉了 junction 本身（否则 git 会跟进去、把源码复制第二份进仓 —— 正是要避免的"两份实现"）。
 ⚠️ junction 是 **Windows 专有**（`mklink /J`）；换平台要改成符号链接或拷贝。
 
@@ -50,7 +50,7 @@ app/app/src/main/python/memory  ──junction──▶  <仓库根>/memory/
 ```
 app/app/src/main/python/host_glue.py                 ← 宿主胶水（Kotlin ↔ Python 的唯一通道）
 app/app/src/main/java/com/azurehalcyon/palimpsest/   ← Kotlin（UI / 服务 / 通知）
-app/app/src/main/python/memory  →  <仓库根>/memory/   ← junction（不进 git）
+app/app/src/main/python/memory  →  archive/v1/memory/ ← junction（不进 git）
 app/uikit/                                           ← 设计系统（vendored 自 MIT 的 niki914/zafiro）
 app/channelplugin/ · plugin-api/ · pluginhost/        ← 渠道插件（独立 APK）与它的契约
 ```

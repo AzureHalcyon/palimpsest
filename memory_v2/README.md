@@ -1,6 +1,6 @@
 # memory_v2 —— 事件网络这一代
 
-> 当前链路。上一代在 [`../memory/`](../memory/README.md)（格 / 件 / 组 / 势），保留作对照。
+> 当前链路。上一代在 [`../archive/v1/memory/`](../archive/v1/memory/README.md)（格 / 件 / 组 / 势），冻结但可运行。
 > 设计与理由见 [`../docs/事件状态与读取.md`](../docs/事件状态与读取.md)；
 > 参数见 [`PARAMS.md`](PARAMS.md)；代码规矩见 [`CODE_STYLE.md`](CODE_STYLE.md)。
 
