@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 from ..core.embed import cosine
-from ..core.text import idf, match_score, terms
+from ..core.text import idf, terms
 from ..store.vectors import VectorStore
 from .search import event_date, event_last_ts, event_text
 
@@ -60,48 +60,57 @@ def _access(event: dict, now: float) -> float:
 
 
 def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
-             state_name: str = "", exclude: str = "", after: str = "",
-             before: str = "", limit: int = 3) -> dict:
+             session: str = "", exclude=(), after: str = "", before: str = "",
+             limit: int = 3) -> dict:
+    excluded = {exclude} if isinstance(exclude, str) else set(exclude or ())
+    excluded.discard("")
+    allowed = set()
+    for event_id, event in graph.events.items():
+        if event_id in excluded:
+            continue
+        segments = event.get("segments") or []
+        if session and not any(str(segment.get("session") or "") != session
+                               for segment in segments):
+            continue
+        allowed.add(event_id)
+
     texts = {event_id: event_text(graph, data_dir, event_id) for event_id in graph.events}
     sets = {event_id: terms(text) | terms(str(graph.events[event_id].get("name") or ""))
             for event_id, text in texts.items()}
     weights = idf(list(sets.values()))
     vectors = event_vectors(graph, data_dir, texts, embedder)
 
-    query_terms = terms(state_name)
+    query_terms = set()
     for keyword in keywords:
         query_terms |= terms(str(keyword))
-    query_text = (" ".join(str(keyword) for keyword in keywords) + " " + str(state_name)).strip()
+    query_text = " ".join(str(keyword) for keyword in keywords).strip()
     query_vector = (embedder.embed([query_text])[0]
                     if embedder and embedder.available and query_text else [])
 
     dates = {event_id: event_date(graph, data_dir, event_id) for event_id in graph.events}
 
-    term_scores = {}
-    for event_id in graph.events:
-        if event_id == exclude:
-            continue
+    query_idf = sum(weights.get(term, 1.0) for term in query_terms)
+    term_norms = {}
+    for event_id in allowed:
         name_terms = terms(str(graph.events[event_id].get("name") or ""))
-        direct = (match_score(query_terms, sets[event_id], weights)
-                  + 4.0 * match_score(query_terms, name_terms, weights))
-        if direct > 0:
-            term_scores[event_id] = direct
-    term_ceiling = max(term_scores.values()) if term_scores else 0.0
+        text_idf = sum(weights.get(term, 1.0) for term in query_terms & sets[event_id])
+        name_idf = sum(weights.get(term, 1.0) for term in query_terms & name_terms)
+        if query_idf:
+            term_norms[event_id] = min(
+                1.0, (text_idf + 4.0 * name_idf) / (query_idf * 5.0))
 
     sims = {event_id: (cosine(query_vector, vectors.get(event_id) or [])
                        if query_vector else 0.0)
             for event_id in graph.events}
 
     seeds = {}
-    for event_id in graph.events:
-        if event_id == exclude:
-            continue
+    for event_id in allowed:
         stamp = dates[event_id]
         if after and stamp and stamp < after:
             continue
         if before and stamp and stamp > before:
             continue
-        term_norm = term_scores.get(event_id, 0.0) / term_ceiling if term_ceiling else 0.0
+        term_norm = term_norms.get(event_id, 0.0)
         if query_vector:
             vec_norm = max(0.0, min(1.0, (sims[event_id] - 0.3) / 0.5))
             score = 0.8 * vec_norm + 0.2 * term_norm
@@ -123,12 +132,14 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
             nxt = {}
             for node, score in frontier.items():
                 for other, edge in graph.neighbors(node):
+                    if other not in allowed:
+                        continue
                     weight = 0.9 if edge.get("relation") == "属于" else 0.6
                     gain = score * float(edge.get("strength", 0.2)) * weight
                     if gain > 0.05:
                         nxt[other] = max(nxt.get(other, 0.0), gain)
                 for other in graph.events:
-                    if other == node or other == exclude:
+                    if other == node or other not in allowed:
                         continue
                     similarity = _similarity(node, other, sets, vectors)
                     if similarity <= 0:
@@ -146,33 +157,31 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
 
     if prior:
         for event_id, score in prior.items():
-            if event_id in graph.events and event_id != exclude:
+            if event_id in allowed:
                 lit[event_id] = lit.get(event_id, 0.0) + 0.5 * float(score)
 
     now = time.time()
     seed_ids = set(seeds)
     eligible = set()
     for event_id in lit:
-        if event_id == exclude:
+        if event_id not in allowed:
             continue
         if event_id in seed_ids:
             eligible.add(event_id)
         elif len(contributions.get(event_id, ())) >= 2:
-            similar = (sims[event_id] >= 0.5) if query_vector else (term_scores.get(event_id, 0.0) > 0)
+            similar = (sims[event_id] >= 0.5) if query_vector else (term_norms.get(event_id, 0.0) > 0)
             if similar:
                 eligible.add(event_id)
 
     ranked = []
     for event_id, score in lit.items():
-        if event_id == exclude:
+        if event_id not in allowed:
             continue
         direct = seeds.get(event_id, 0.0)
         if event_id in seed_ids:
             value = direct + 0.2 * max(0.0, score - direct)
         else:
             value = 0.4 * max(0.0, score)
-        size = max(1.0, len(sets[event_id]) / 50.0)
-        value = value / math.sqrt(size)
         event = graph.events[event_id]
         value *= 1.0 + 0.2 * min(1.0, float(event.get("consolidation", 0.0)))
         value *= 1.0 + 0.1 * _access(event, now)
@@ -205,8 +214,8 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
     near = []
     if not seeds and query_vector:
         scored = []
-        for event_id in graph.events:
-            if event_id == exclude or not vectors.get(event_id):
+        for event_id in allowed:
+            if not vectors.get(event_id):
                 continue
             stamp = dates[event_id]
             if after and stamp and stamp < after:

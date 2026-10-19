@@ -1,4 +1,10 @@
-"""Rebuild the graph from recorded turns."""
+"""Rebuild source events, segments and model-declared edges from recorded turns.
+
+This is recovery and consistency checking, not a snapshot. It does not carry
+replay-derived edges/strength/support, consolidation/access, vectors, or
+说法/ writings. For a full copy of a data directory use store.snapshot
+(.psnap single file, restored with snapshot.restore).
+"""
 
 from __future__ import annotations
 

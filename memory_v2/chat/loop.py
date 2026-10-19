@@ -74,6 +74,7 @@ class EventChat:
         calls: List[Dict] = []
         recalled: List[Dict] = []
         remembered: List[Dict] = []
+        tool_order: List[str] = []
         reply = ""
         rounds = 0
 
@@ -109,6 +110,7 @@ class EventChat:
                 function = call.get("function") or {}
                 name = str(function.get("name") or "")
                 arguments = str(function.get("arguments") or "")
+                tool_order.append(name)
                 result, record = self._dispatch(name, arguments)
                 if record is not None:
                     if name == "event":
@@ -163,6 +165,7 @@ class EventChat:
             "event_id": self._pending_event,
             "mode": last["mode"] if last else None,
             "stack": list(self.stack),
+            "tool_order": tool_order,
             "calls": calls,
             "recall": recalled,
             "remember": remembered,
@@ -436,19 +439,20 @@ class EventChat:
             return "not searched: %s" % exc, None
 
         keywords = parsed["keywords"]
-        state_name = ""
-        current = self._current()
-        if current and current in self.graph.events:
-            state_name = str(self.graph.events[current].get("name") or "")
+        excluded = set()
+        for reference in parsed.get("exclude") or []:
+            target = self.graph.resolve(reference)
+            if target:
+                excluded.add(target)
         result = activate(self.graph, self.data_dir, keywords, embedder=self.embedder,
-                          prior=self.activation, state_name=state_name,
-                          exclude=current or "",
+                          session=self.session_id, exclude=excluded,
                           after=parsed["after"], before=parsed["before"])
         self.activation = dict(result["activation"])
         self._cue_terms = set(result.get("query_terms") or set())
         self._cue_keywords = list(keywords)
         self._last_candidates = {item["id"] for item in result["candidates"]}
         record = {"keywords": keywords, "after": parsed["after"], "before": parsed["before"],
+                  "exclude": sorted(excluded), "session": self.session_id,
                   "winner": result["winner"], "candidates": result["candidates"],
                   "has_seed": result["has_seed"]}
 

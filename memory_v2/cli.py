@@ -24,6 +24,7 @@ from .core.embed import Embedder
 from .core.llm import ChatClient
 from .core.prompts import system_messages
 from .read.activate import activate
+from .store import snapshot as snapshot_store
 from .store.graph import Graph, GraphError
 from .store.ingest import ingest
 from .store.session import SessionStore, SessionSealed, next_session_id
@@ -192,6 +193,18 @@ def _cmd_ingest(args) -> int:
     return 0
 
 
+def _cmd_snapshot(args) -> int:
+    path = snapshot_store.create(args.data, args.out)
+    print("快照：%s" % os.path.abspath(path))
+    return 0
+
+
+def _cmd_restore(args) -> int:
+    path = snapshot_store.restore(args.snapshot, args.to)
+    print("已解到：%s" % path)
+    return 0
+
+
 def _cmd_events(args) -> int:
     graph = Graph.open(os.path.abspath(args.data))
     for event_id, event in sorted(graph.events.items()):
@@ -277,10 +290,10 @@ def main(argv=None) -> int:
 
     recall_parser = sub.add_parser("recall", help="按关键词找候选")
     recall_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
-    recall_parser.add_argument("--keywords", required=True)
-    recall_parser.add_argument("--limit", default="5")
-    recall_parser.add_argument("--after", default="")
-    recall_parser.add_argument("--before", default="")
+    recall_parser.add_argument("--keywords", required=True, help="逗号分隔的关键词")
+    recall_parser.add_argument("--limit", default="5", help="返回几件候选")
+    recall_parser.add_argument("--after", default="", help="只要这天之后（含）的，YYYY-MM-DD")
+    recall_parser.add_argument("--before", default="", help="只要这天之前（含）的，YYYY-MM-DD")
     recall_parser.add_argument("--credentials", default="")
     recall_parser.set_defaults(func=_cmd_recall)
 
@@ -315,6 +328,16 @@ def main(argv=None) -> int:
     ingest_parser.add_argument("--rebuild", action="store_true",
                                help="清空当前图后整体重建；旧图先备份")
     ingest_parser.set_defaults(func=_cmd_ingest)
+
+    snapshot_parser = sub.add_parser("snapshot", help="把一个数据目录打成单文件 .psnap")
+    snapshot_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
+    snapshot_parser.add_argument("--out", required=True)
+    snapshot_parser.set_defaults(func=_cmd_snapshot)
+
+    restore_parser = sub.add_parser("restore", help="把 .psnap 解回目录")
+    restore_parser.add_argument("--snapshot", required=True)
+    restore_parser.add_argument("--to", required=True)
+    restore_parser.set_defaults(func=_cmd_restore)
 
     events_parser = sub.add_parser("events", help="列出事件")
     events_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
