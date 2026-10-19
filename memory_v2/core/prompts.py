@@ -23,9 +23,7 @@ def system_messages() -> List[Dict[str, str]]:
         {"role": "system", "content": _read("event-system.txt")},
         {"role": "system", "content": _read("sys2.txt")},
         {"role": "system",
-         "content": "今天是 %s。要按时间查时，把“上次”“去年”这类时间换成具体日期，"
-                    "写在 recall 的 after / before；回答时材料里只有相对时间的，"
-                    "保留相对时间，不要补成某一天。" % today},
+         "content": _read("date.txt").replace("$today", today)},
     ]
 
 

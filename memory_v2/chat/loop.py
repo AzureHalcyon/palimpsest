@@ -85,7 +85,7 @@ class EventChat:
         self.frozen_graph, self.frozen_vectors = self.frozen.load(
             self.config.embed_model, self.config.embed_dim)
 
-    def send(self, text: str) -> str:
+    def send(self, text: str, on_delta=None) -> str:
         if self.store.is_archived():
             raise SessionSealed("这一场已归档（封口），只读：%s" % self.store.path)
         self.turn += 1
@@ -94,6 +94,10 @@ class EventChat:
         self._turn_created = set()
         self._last_candidates = set()
         self._remembered_ids = set()
+        # ★ 这一轮的推理（CoT）与 token 用量。工具往返之间模型可能各给一段
+        #   reasoning_content，全部按出现顺序拼起来；界面只显示，不写进消息。
+        self._reasoning = ""
+        self._usage = {}
         self.messages.append({"role": "user", "content": text})
 
         calls: List[Dict] = []
@@ -106,9 +110,17 @@ class EventChat:
         last_event_ok = False
 
         while True:
-            message = self.client.chat(self.messages, tools=tools.TOOLS)
+            message = self.client.chat(self.messages, tools=tools.TOOLS,
+                                       on_delta=on_delta)
             tool_calls = message.get("tool_calls") or []
             content = str(message.get("content") or "")
+            piece = str(message.get("reasoning_content")
+                        or message.get("reasoning") or "")
+            if piece:
+                self._reasoning += piece
+            usage = getattr(self.client, "last_usage", None) or message.get("usage") or {}
+            if isinstance(usage, dict) and usage:
+                self._usage = usage
 
             if not tool_calls:
                 problems = []
@@ -220,6 +232,8 @@ class EventChat:
             "calls": calls,
             "recall": recalled,
             "remember": remembered,
+            "reasoning": self._reasoning,
+            "usage": self._usage,
         })
         self.store.save_messages(self.messages)
         return reply

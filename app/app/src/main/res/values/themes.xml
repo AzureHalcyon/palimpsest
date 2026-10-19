@@ -1,0 +1,4 @@
+<resources>
+    <!-- Compose 负责真正的观感；这里只需要一个不带 ActionBar 的壳主题 -->
+    <style name="Theme.Companion" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

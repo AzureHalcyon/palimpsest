@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  传感器插件（独立 APK）。三件事：
+    1. ★ **对外暴露那一个接口** —— 传输是 **ContentProvider**（系统按需拉起，能绕开
+       "跨 App 绑 Service 被拒"那条实测限制），见 SensorPluginProvider；
+    2. bound Service 作为**规范参照**保留（CompanionPlugin.aidl），但不作设计依赖；
+    3. 保留原来那个**探针 Activity**（诊断用，随时能看每个传感器的注册/数据情况）。
+
+  ★ provider 上的 `android:readPermission` 就是那道墙：
+    签名级权限 ⇒ 只有同签名（我们自己装的）App 访问得到。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ★★ 计步（type 19）与 **显著运动**（type 17）在 API 29+ 都需要这条**运行时**权限。
+         不声明的话 `requestTriggerSensor` 直接回 false ⇒ `since_motion_minutes` 永远"还没有触发过"
+         （这是"空渠道"那条病的第二个成因，第一个是没重新武装、第三个是记的名字与查的名字不一致）。
+         ⚠️ 声明 ≠ 授予：诊断 Activity 起来时会申请一次；命令行也可以
+            `adb shell pm grant com.azurehalcyon.palimpsest.probe android.permission.ACTIVITY_RECOGNITION`。 -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+    <!-- ★★ 日历（第二个数据域，2026-10-06 加）：只读。
+         ⛔ 不申请 WRITE_CALENDAR —— 我们**只看他的安排，不改他的安排**。
+         ★ 为什么权限在插件里要（而不是宿主）：设计稿 §2.7「权限按插件分开」——
+           不想要这个数据域，卸载插件就干净了；宿主一行权限都不用加。 -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+
+    <!-- ★★ 屏幕使用（第四个数据域，2026-10-06）：`PACKAGE_USAGE_STATS` **不是运行时权限**，
+         而是一条 **appop** —— 只能在系统里手动开（设置 → 应用 → 特殊应用权限 → **使用情况访问**），
+         `pm grant` 对它无效。所以代码里先 `checkOpNoThrow`，拿不到就**不进工具表**。
+         ⚠️ `tools:ignore`：它属于"受保护权限"，普通应用声明会被 lint 警告，
+            但要走"使用情况访问"这条路，**声明是必须的**。 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:label="渠道插件"
+        android:theme="@android:style/Theme.DeviceDefault.Light">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ★★ 设计上的传输：ContentProvider -->
+        <provider
+            android:name=".SensorPluginProvider"
+            android:authorities="com.azurehalcyon.palimpsest.probe.companion.plugin"
+            android:exported="true"
+            android:readPermission="com.azurehalcyon.palimpsest.permission.PLUGIN" />
+
+        <!-- 规范参照（AIDL）；实测在本机绑不上，故不作设计依赖 -->
+        <service
+            android:name=".SensorPluginService"
+            android:exported="true"
+            android:permission="com.azurehalcyon.palimpsest.permission.PLUGIN">
+            <intent-filter>
+                <action android:name="com.azurehalcyon.palimpsest.plugin.BIND" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>
