@@ -28,7 +28,8 @@ class Embedder:
         for start in range(0, len(texts), self.config.embed_batch):
             chunk = texts[start:start + self.config.embed_batch]
             body = json.dumps({"model": self.config.embed_model,
-                               "input": chunk}).encode("utf-8")
+                               "input": chunk,
+                               "dimensions": self.config.embed_dim}).encode("utf-8")
             request = urllib.request.Request(
                 self.credentials.embed_url + "/embeddings", data=body, method="POST")
             request.add_header("Authorization", "Bearer " + self.credentials.embed_key)
@@ -40,13 +41,22 @@ class Embedder:
             except Exception as exc:
                 raise EmbedError(str(exc)) from exc
             items = sorted(payload.get("data") or [], key=lambda item: item.get("index", 0))
-            vectors.extend(item.get("embedding") or [] for item in items)
+            for item in items:
+                vector = item.get("embedding") or []
+                if len(vector) != self.config.embed_dim:
+                    raise EmbedError(
+                        "embedding dimension %d != requested %d"
+                        % (len(vector), self.config.embed_dim))
+                vectors.append(vector)
         return vectors
 
 
 def cosine(first, second) -> float:
     if not first or not second:
         return 0.0
+    if len(first) != len(second):
+        raise ValueError("vector dimension mismatch: %d != %d"
+                         % (len(first), len(second)))
     dot = sum(a * b for a, b in zip(first, second))
     norm = math.sqrt(sum(a * a for a in first)) * math.sqrt(sum(b * b for b in second))
     return dot / norm if norm else 0.0

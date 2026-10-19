@@ -49,11 +49,25 @@ python -m memory_v2 mark --event <id>
 python -m memory_v2 detach --event <id> --last
 python -m memory_v2 unlink --first <id> --second <id>
 
-# 从状态记录重建图
+# 从状态记录补齐（可重复跑）
 python -m memory_v2 ingest
+
+# 整体重建：清空当前图，旧图先备份；重放边、强度、奖励与手工修改不恢复
+python -m memory_v2 ingest --rebuild
+
+# 升级/迁移：把当前 live 图与向量写成全局冻结版（之后新场从这里开场）
+python -m memory_v2 freeze
+
+# 备份 / 恢复（包含 frozen、messages、说法与全局冻结）
+python -m memory_v2 snapshot --out memory.psnap
+python -m memory_v2 restore --snapshot memory.psnap --to <dir>
 ```
 
 `chat --replay-on-exit` 是封口开关：聊完自动跑一次重放，不自动对别的场跑。
+归档会把 live 图与向量写成下一版 `冻结/`；新场开场复制到 `状态/<场>.frozen/`，
+本场 recall 只读这份冻结副本。续聊会加载本场 frozen 和 `messages.json`（含 tool calls）。
+升级旧数据时先跑一次 `freeze`；旧未归档场没有开始副本和 messages 日志，续聊只能退回
+最新全局冻结，并按 `状态` 里的 user/assistant 重建，无法保证工具上下文逐字一致。
 
 ## 一句一发的入口
 
@@ -81,7 +95,9 @@ python tools/文档/check_docs.py
 ```
 
 `check.py` 不需要网络和凭证，模型调用走脚本桩；覆盖事件模式、栈、多父、单轮一个事件、
-状态快照、读取、编写、重放、回灌、`mark` / `detach` / `unlink`、每轮催查、随机 id 与 `seq` 排序。
+状态快照、读取、编写、重放、封口只读、回灌及其幂等、整体重建、坏图隔离、续聊接续与
+完整 messages 恢复、本场冻结/归档冻结、向量缓存维度、快照往返、`mark` / `detach` /
+`unlink`、每轮催查、随机 id 与 `seq` 排序。
 
 ## 目前的状态
 

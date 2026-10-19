@@ -55,6 +55,50 @@ class SessionStore:
             os.fsync(handle.fileno())
         os.replace(temporary, self.marker)
 
+    @property
+    def messages_path(self) -> str:
+        return self.path + ".messages.json"
+
+    def save_messages(self, messages: List[Dict[str, Any]]) -> None:
+        if self.is_archived():
+            raise SessionSealed("这一场已归档（封口），只读：%s" % self.path)
+        os.makedirs(self.dir, exist_ok=True)
+        temporary = self.messages_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(messages, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.messages_path)
+
+    def load_messages(self):
+        if not os.path.exists(self.messages_path):
+            return None
+        try:
+            with open(self.messages_path, encoding="utf-8") as handle:
+                messages = json.load(handle)
+        except (OSError, ValueError, TypeError) as exc:
+            self._quarantine_messages("读不了（%s）" % exc)
+            return None
+        if not isinstance(messages, list) or any(not isinstance(item, dict)
+                                                 for item in messages):
+            self._quarantine_messages("结构不是 messages 列表")
+            return None
+        return messages
+
+    def _quarantine_messages(self, reason: str) -> None:
+        base = self.messages_path + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S")
+        target = base
+        suffix = 1
+        while os.path.exists(target):
+            target = "%s-%d" % (base, suffix)
+            suffix += 1
+        try:
+            os.replace(self.messages_path, target)
+        except OSError:
+            pass
+        print("警告：messages 日志作废：%s（%s）" % (self.messages_path, reason),
+              file=sys.stderr)
+
     def append(self, record: Dict[str, Any]) -> None:
         if self.is_archived():
             raise SessionSealed("这一场已归档（封口），只读：%s" % self.path)

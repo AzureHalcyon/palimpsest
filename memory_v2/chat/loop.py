@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable, Dict, List, Optional
 
+from ..core.config import ChatConfig
 from ..core.text import idf, match_score, terms
 from ..read.activate import activate
 from ..read.search import event_segments
 from ..read.write import write_memory
+from ..store.frozen import FrozenSession, global_dir
 from ..store.session import SessionStore, SessionSealed
 from ..store.writings import WriterArchive
 from . import tools
@@ -31,6 +34,7 @@ class EventChat:
         self.data_dir = data_dir
         self.session_id = session_id
         self.embedder = embedder
+        self.config = getattr(embedder, "config", None) or ChatConfig()
         self.messages: List[Dict] = [dict(message) for message in system_messages]
         self.max_tool_rounds = max_tool_rounds
         self.echo = echo or (lambda _text: None)
@@ -47,9 +51,13 @@ class EventChat:
         self._last_candidates: set = set()
         self._remembered_ids: set = set()
 
-        # 同一场还没归档时，进程重启后要接着编号、接着当前事件说；
-        # 旧内容仍由 recall / remember 从图里取，不把 transcript 塞回上下文。
+        # 本场在途只读“本场开始前”的冻结副本；live 图照常维护。
+        # 续聊恢复本场自己的 frozen + 完整 messages，做到和第一次完全一致。
         turns = store.turns()
+        self.frozen = FrozenSession(self.data_dir, self.session_id)
+        if (not turns and self.graph.events
+                and not os.path.exists(os.path.join(global_dir(self.data_dir), "graph.json"))):
+            self.echo("[冻结] 全局冻结不存在；先运行 freeze，本场 recall 为空")
         if turns:
             self.turn = max(int(turn.get("turn") or 0) for turn in turns)
             last = turns[-1]
@@ -58,6 +66,24 @@ class EventChat:
             if not stack and last.get("event_id") in graph.events:
                 stack = [str(last["event_id"])]
             self.stack = stack
+            if not self.frozen.exists():
+                self.echo("[冻结] 没有本场起始副本，退回最新全局冻结")
+                self.frozen.clone_global()
+            stored = self.store.load_messages()
+            if stored:
+                self.messages = stored
+            else:
+                self.echo("[续聊] 没有 messages 日志，只恢复 user/assistant")
+                self.messages = [dict(message) for message in system_messages]
+                for turn in turns:
+                    self.messages.append({"role": "user",
+                                          "content": str(turn.get("user") or "")})
+                    self.messages.append({"role": "assistant",
+                                          "content": str(turn.get("assistant") or "")})
+        else:
+            self.frozen.clone_global()
+        self.frozen_graph, self.frozen_vectors = self.frozen.load(
+            self.config.embed_model, self.config.embed_dim)
 
     def send(self, text: str) -> str:
         if self.store.is_archived():
@@ -170,6 +196,7 @@ class EventChat:
             "recall": recalled,
             "remember": remembered,
         })
+        self.store.save_messages(self.messages)
         return reply
 
     def _annotate(self, segments: List[dict]) -> str:
@@ -444,9 +471,10 @@ class EventChat:
             target = self.graph.resolve(reference)
             if target:
                 excluded.add(target)
-        result = activate(self.graph, self.data_dir, keywords, embedder=self.embedder,
-                          session=self.session_id, exclude=excluded,
-                          after=parsed["after"], before=parsed["before"])
+        result = activate(self.frozen_graph, self.data_dir, keywords,
+                          embedder=self.embedder, exclude=excluded,
+                          after=parsed["after"], before=parsed["before"],
+                          vector_store=self.frozen_vectors)
         self.activation = dict(result["activation"])
         self._cue_terms = set(result.get("query_terms") or set())
         self._cue_keywords = list(keywords)

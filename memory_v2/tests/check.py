@@ -9,11 +9,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from memory_v2 import cli
 from memory_v2.chat.loop import EventChat
 from memory_v2.consolidate.replay import consolidate
+from memory_v2.core.config import ChatConfig
+from memory_v2.core.embed import cosine
 from memory_v2.read.activate import activate
 from memory_v2.read.search import expand
+from memory_v2.store import snapshot as snapshot_store
 from memory_v2.store.graph import Graph, GraphError
 from memory_v2.store.ingest import ingest
 from memory_v2.store.session import SessionStore, SessionSealed
+from memory_v2.store.vectors import VectorStore
 
 
 class FakeClient:
@@ -43,6 +47,23 @@ def call(name, arguments, call_id="c1"):
             "tool_calls": [{"id": call_id, "type": "function",
                             "function": {"name": name, "arguments": arguments}}]}
 
+
+assert ChatConfig().embed_dim == 1024
+try:
+    cosine([1.0, 2.0], [1.0, 2.0, 3.0])
+except ValueError:
+    pass
+else:
+    raise AssertionError("cosine must reject different dimensions")
+cache_dir = tempfile.mkdtemp()
+cache_path = os.path.join(cache_dir, "vectors.json")
+cache = VectorStore(cache_path, model="m", dim=2)
+cache.put("e", "h", [1.0, 2.0])
+cache.save()
+assert VectorStore(cache_path, model="m", dim=2).get("e", "h") == [1.0, 2.0]
+stale = VectorStore(cache_path, model="m", dim=3)
+assert not stale.items and not os.path.exists(cache_path)
+shutil.rmtree(cache_dir, ignore_errors=True)
 
 data = tempfile.mkdtemp()
 os.makedirs(os.path.join(data, "状态"), exist_ok=True)
@@ -84,6 +105,7 @@ for _ in range(3):
 graph = Graph.open(data)
 assert any(edge.get("relation") == "相关" for edge in graph.edges.values()), graph.edges
 assert any(float(edge.get("strength", 0)) > 0.1 for edge in graph.edges.values()), graph.edges
+assert os.path.exists(os.path.join(data, "冻结", "graph.json"))
 assert SessionStore(data, "s1").is_archived()
 try:
     EventChat(FakeClient([]), SessionStore(data, "s1"), Graph.open(data), data, "s1", [])
@@ -100,10 +122,17 @@ client = FakeClient([
 ])
 chat = EventChat(client, store, Graph.open(data), data, "s3",
                  [{"role": "system", "content": "x"}])
+assert os.path.isdir(os.path.join(data, "状态", "s3.frozen"))
+assert "新的事" not in [event["name"] for event in chat.frozen_graph.events.values()]
 reply = chat.send("说件新事")
 assert reply == "好。", reply
 saved = store.turns()
 assert saved[-1]["event"] == "新的事" and saved[-1]["event_id"], saved[-1]
+assert "新的事" not in [event["name"] for event in chat.frozen_graph.events.values()]
+assert "新的事" in [event["name"] for event in Graph.open(data).events.values()]
+assert os.path.exists(os.path.join(data, "状态", "s3.jsonl.messages.json"))
+_, frozen_recall = chat._handle_recall(json.dumps({"keywords": ["新的事"]}))
+assert "新的事" not in [item["name"] for item in frozen_recall["candidates"]]
 
 client = FakeClient([
     call("event", json.dumps({"name": "空调的事"})),
@@ -200,6 +229,7 @@ client.script.extend([
 ])
 chat.send("回装修")
 assert chat.stack == [decoration], chat.stack
+s7_messages = json.loads(json.dumps(chat.messages, ensure_ascii=False))
 
 chat = EventChat(FakeClient([]), SessionStore(data, "s8"), Graph.open(data), data, "s8", [])
 chat.stack = [decoration]
@@ -282,6 +312,7 @@ client = FakeClient([
 resumed = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7", [])
 assert resumed.turn == 2, resumed.turn
 assert resumed.stack == [decoration], resumed.stack
+assert resumed.messages == s7_messages
 assert resumed.send("接着聊") == "接着聊。"
 assert resumed.turn == 3, resumed.turn
 assert SessionStore(data, "s7").turns()[-1]["turn"] == 3
@@ -289,6 +320,8 @@ assert Graph.open(data).events[decoration]["segments"] == [
     {"session": "s7", "start": 2, "end": 3}], Graph.open(data).events[decoration]
 
 consolidate(Graph.open(data), data, "s7")
+global_graph = Graph(os.path.join(data, "冻结", "graph.json"))
+assert any(event["name"] == "装修" for event in global_graph.events.values())
 try:
     resumed.send("再聊一句")
 except SessionSealed:
@@ -330,6 +363,15 @@ assert len(rebuilt.events) == stats["events"], (len(rebuilt.events), stats)
 assert any(edge.get("relation") == "属于" for edge in rebuilt.edges.values()), rebuilt.edges
 assert any({edge.get("a"), edge.get("b")} == {"e-333333333333", "e-444444444444"}
            for edge in rebuilt.edges.values()), rebuilt.edges
+
+snapshot_dir = tempfile.mkdtemp()
+snapshot_path = os.path.join(snapshot_dir, "data.psnap")
+snapshot_store.create(data, snapshot_path)
+restored = snapshot_store.restore(snapshot_path, os.path.join(snapshot_dir, "restored"))
+assert os.path.exists(os.path.join(restored, "冻结", "graph.json"))
+assert os.path.exists(os.path.join(restored, "状态", "s7.jsonl.messages.json"))
+assert os.path.exists(os.path.join(restored, "状态", "s3.frozen", "graph.json"))
+shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 shutil.rmtree(data, ignore_errors=True)
 print("OK")

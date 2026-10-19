@@ -51,5 +51,6 @@ class ChatConfig:
     timeout: float = 600.0
     retries: int = 3
     embed_model: str = "qwen3.7-text-embedding"
+    embed_dim: int = 1024
     embed_batch: int = 20
     embed_timeout: float = 120.0

@@ -8,6 +8,7 @@ import random
 from ..core.text import terms
 from ..read.activate import event_vectors, _similarity
 from ..read.search import event_text
+from ..store.frozen import update_global
 from ..store.graph import edge_key
 from ..store.session import SessionStore
 
@@ -147,5 +148,6 @@ def consolidate(graph, data_dir: str, session: str, sample: int = 5,
 
     graph.save()
     SessionStore(data_dir, session).archive()
+    update_global(data_dir)
     return {"seeds": len(seeds), "lit": len(counts), "edges": formed,
             "reinforced": reinforced, "pruned": pruned, "content": content_total}

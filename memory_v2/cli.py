@@ -24,6 +24,7 @@ from .core.embed import Embedder
 from .core.llm import ChatClient
 from .core.prompts import system_messages
 from .read.activate import activate
+from .store import frozen as frozen_store
 from .store import snapshot as snapshot_store
 from .store.graph import Graph, GraphError
 from .store.ingest import ingest
@@ -193,6 +194,12 @@ def _cmd_ingest(args) -> int:
     return 0
 
 
+def _cmd_freeze(args) -> int:
+    path = frozen_store.update_global(args.data)
+    print("冻结：%s" % path)
+    return 0
+
+
 def _cmd_snapshot(args) -> int:
     path = snapshot_store.create(args.data, args.out)
     print("快照：%s" % os.path.abspath(path))
@@ -328,6 +335,10 @@ def main(argv=None) -> int:
     ingest_parser.add_argument("--rebuild", action="store_true",
                                help="清空当前图后整体重建；旧图先备份")
     ingest_parser.set_defaults(func=_cmd_ingest)
+
+    freeze_parser = sub.add_parser("freeze", help="把当前 live 图/向量写成全局冻结版")
+    freeze_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
+    freeze_parser.set_defaults(func=_cmd_freeze)
 
     snapshot_parser = sub.add_parser("snapshot", help="把一个数据目录打成单文件 .psnap")
     snapshot_parser.add_argument("--data", default=DEFAULT_DATA_DIR)

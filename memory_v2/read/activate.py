@@ -17,8 +17,12 @@ def _digest(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def event_vectors(graph, data_dir: str, texts: dict, embedder) -> dict:
-    store = VectorStore.open(data_dir)
+def event_vectors(graph, data_dir: str, texts: dict, embedder, store=None) -> dict:
+    if store is None:
+        config = getattr(embedder, "config", None)
+        store = VectorStore.open(data_dir,
+                                 model=str(getattr(config, "embed_model", "") or ""),
+                                 dim=int(getattr(config, "embed_dim", 0) or 0))
     pending = []
     for event_id, text in texts.items():
         digest = _digest(text)
@@ -26,6 +30,9 @@ def event_vectors(graph, data_dir: str, texts: dict, embedder) -> dict:
             pending.append((event_id, text, digest))
     if pending:
         vectors = embedder.embed([item[1] for item in pending])
+        if len(vectors) != len(pending):
+            raise ValueError("embedding count %d != pending %d"
+                             % (len(vectors), len(pending)))
         for (event_id, _text, digest), vector in zip(pending, vectors):
             store.put(event_id, digest, vector)
         store.save()
@@ -61,7 +68,7 @@ def _access(event: dict, now: float) -> float:
 
 def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
              session: str = "", exclude=(), after: str = "", before: str = "",
-             limit: int = 3) -> dict:
+             limit: int = 3, vector_store=None) -> dict:
     excluded = {exclude} if isinstance(exclude, str) else set(exclude or ())
     excluded.discard("")
     allowed = set()
@@ -78,7 +85,7 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
     sets = {event_id: terms(text) | terms(str(graph.events[event_id].get("name") or ""))
             for event_id, text in texts.items()}
     weights = idf(list(sets.values()))
-    vectors = event_vectors(graph, data_dir, texts, embedder)
+    vectors = event_vectors(graph, data_dir, texts, embedder, store=vector_store)
 
     query_terms = set()
     for keyword in keywords:

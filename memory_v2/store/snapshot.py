@@ -6,7 +6,7 @@ import os
 import zipfile
 
 SUFFIX = ".psnap"
-ENTRIES = ("graph.json", "vectors.json", "状态", "说法")
+ENTRIES = ("graph.json", "vectors.json", "状态", "说法", "冻结")
 
 
 def create(data_dir: str, out_path: str) -> str:
