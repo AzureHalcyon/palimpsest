@@ -37,4 +37,4 @@ cmd /c mklink /J "app\app\src\main\python\memory" memory
 - 归档前的树由 `v0.2` tag（提交 `844415e`）保存；`v0.1` 是更早的发布标记。
   要回看历史用 `git show v0.2` / `git show v0.1`。
 - 归档后的相对路径：Python 包是 `archive/v1/memory/`，App 是 `archive/v1/app/`。
-- 设计文档仍在仓库根的 `docs/`（标着 v1 的那几份）。
+- 设计文档整体在 `docs/99_归档/v1/`；入口是 [`../../docs/99_归档/v1/归档说明.md`](../../docs/99_归档/v1/归档说明.md)。
