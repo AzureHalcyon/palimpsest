@@ -186,7 +186,7 @@ class SessionConfig:
     """每轮最多几次"再查一次"。【护栏】防模型反复查。
     【实测】80 轮里只触发 2 次、都在 1 次往返内完成 ⇒ **这个上限从没被碰到**。"""
 
-    push_header: str = "【这一轮想起的】"
+    push_header: str = "【记忆系统】"
     """注入内容的呈现头。⚠️ 措辞属于"呈现形态"，改动要留痕。"""
 
     render_recall: bool = True

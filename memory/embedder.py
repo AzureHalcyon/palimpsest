@@ -56,11 +56,18 @@ class Embedder:
         self.cfg = cfg
         self.url = creds.embed_base_url + "/embeddings"
         self.key = creds.embed_api_key
+        # ★ 2026-10-18（作者：嵌入 / 对话 / 编写三家的模型要分开）：模型名由参数账说话。
+        #   `嵌入.模型` 为空 ⇒ 用 `EmbedConfig.model`（⛔ 不要在这里再写一份默认值）。
+        try:
+            from .knobs import 嵌入 as K嵌入
+            self.model = str(K嵌入["模型"]["值"] or cfg.model)
+        except Exception:                                # noqa: BLE001
+            self.model = cfg.model
 
     @property
     def fingerprint(self) -> tuple:
         """编码器身份 = `(模型名, 维度)`。★ **换它就是换坐标系** ⇒ 缓存必须重建。"""
-        return embed_fingerprint(self.cfg)
+        return (self.model, self.cfg.dim)
 
     def raw_embed(self, texts: Sequence[str]) -> np.ndarray:
         texts = [("" if t is None else str(t)) for t in texts]
@@ -69,7 +76,7 @@ class Embedder:
         out: List[List[float]] = []
         for i in range(0, len(texts), self.cfg.batch):
             chunk = list(texts[i:i + self.cfg.batch])
-            d = self._post({"model": self.cfg.model, "input": chunk})
+            d = self._post({"model": self.model, "input": chunk})
             out.extend(e["embedding"] for e in sorted(d["data"], key=lambda e: e["index"]))
         return np.array(out, dtype=float)
 

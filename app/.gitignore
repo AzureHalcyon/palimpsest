@@ -1,4 +1,4 @@
-# Android 宿主工程（companion v0.1 的壳）
+# Android 宿主工程
 .gradle/
 build/
 app/build/
@@ -16,7 +16,6 @@ __pycache__/
 *.pyc
 
 # ★ 这条**必须**在：app/src/main/python/memory 是**目录 junction**，
-#   指向 ../../companion/companion（磁盘上只有一份源码）。
+#   指向仓库根的 memory/（磁盘上只有一份源码）。
 #   不排掉的话 git 会跟进去，把 Python 源码复制第二份进本仓 ⇒ 正是要避免的"两份实现"。
 app/src/main/python/memory/
-companion-backups/

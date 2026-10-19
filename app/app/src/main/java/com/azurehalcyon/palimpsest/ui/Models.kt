@@ -61,7 +61,7 @@ class ChatTurn(
 }
 
 /** 模型自己调 `read_z` 再查一次记忆：查了什么、拿回了哪几条。 */
-data class Pull(val query: String, val got: List<String>)
+data class Pull(val query: String, val got: List<String>, val 回: String = "")
 
 /** 一轮的"想起"侧信息。 */
 class Retrieval(
@@ -124,6 +124,9 @@ data class CredsState(
     /** ★ 只给"有没有"，**密钥本身绝不回显到界面**。 */
     val hasEmbedKey: Boolean = false,
     val hasChatKey: Boolean = false,
+    /** 密钥的开头结尾（`sk-1…abcd`）。⛔ 这里**没有**整把密钥，界面也拿不到。 */
+    val embedKeyHint: String = "",
+    val chatKeyHint: String = "",
 )
 
 /** 依据等级 → 徽标配色（页面里再用主题色画出来）。 */
@@ -173,6 +176,8 @@ internal fun parseCreds(raw: String): CredsState {
         chatUrl = o.str("chat_url"),
         hasEmbedKey = o.bool("has_embed_key"),
         hasChatKey = o.bool("has_chat_key"),
+        embedKeyHint = o.str("embed_key_hint"),
+        chatKeyHint = o.str("chat_key_hint"),
     )
 }
 
@@ -188,6 +193,36 @@ data class 件View(
 
 data class 件成员View(val 场id: String, val 轮: Int, val 文本: String, val 点亮: Boolean)
 
+/**
+ * 一个**组**（依赖簇）：一场里相邻、互相依赖的那几轮**算出来**的一段（`graph.组`）。
+ *
+ * ★ 它和 [件View] 不是一回事：件是**跨场**的落点（一批 cell 归在一起、带强度），
+ *   组是**按场**算出来的缓存（轮区间 + 成员格）。看组是为了检验"归档把它分对了吗"。
+ */
+data class 组View(
+    val id: String,
+    val 场id: String,
+    val 轮起: Int,
+    val 轮止: Int,
+    val 来源: String,
+    val 场们: List<String> = emptyList(),
+    val 成员: List<组成员View> = emptyList(),
+)
+
+data class 组成员View(val 场id: String, val 轮: Int, val 文本: String)
+
+/**
+ * 一格（或一件）的**势** —— 读取路径的 EMA（`势.json`，⛔ 不在图里）。
+ * ★ 它只**引导传播**（乘在 α/β/γ 上），不是准入；也不是"存不存"（那是标记集的事）。
+ */
+data class 势View(
+    val 单元: String,
+    val 标签: String,
+    val 文本: String,
+    val 势: Double,
+    val 唤醒: Double,
+)
+
 /** 记忆页的整份数据（`graph_view_json`）。 */
 data class GraphView(
     val ok: Boolean,
@@ -195,10 +230,131 @@ data class GraphView(
     val 版本: Int = 0,
     val cell数: Int = 0,
     val 件数: Int = 0,
+    val 组数: Int = 0,
     val 标记集数: Int = 0,
+    val 势数: Int = 0,
     val 待观察数: Int = 0,
     val 件们: List<件View> = emptyList(),
+    val 组们: List<组View> = emptyList(),
+    val 势们: List<势View> = emptyList(),
     val 待观察池: List<待观察View> = emptyList(),
 )
 
 data class 待观察View(val 单元: String, val 为什么: String)
+
+// ---------------------------------------------------------------- 参数账 / 提示词 / 模型（2026-10-18）
+
+/**
+ * 参数账里的一项。
+ *
+ * ★ `值` 一律按字符串交给界面：账上的类型有 bool / int / float / str 四种，
+ *   但界面要的是「一个框、随便填、我来校验」（作者：「不要加号减号，直接一个框」）。
+ */
+data class 账项(
+    val 键: String,
+    val 组: String,
+    /** 界面上那一组的名字（「标记规则」「记忆与衰减」…），⛔ 不用文档里的组键。 */
+    val 组名: String,
+    val 名: String,
+    val 值: String,
+    val 类型: String,
+    val 依据: String,
+    val 说明: String,
+    val 无读者: String,
+    /** false = 不该给人改（版本号 / 没有读者的旋钮）⇒ 界面不列出来。 */
+    val 可改: Boolean = true,
+    /** 能填的值（非空 ⇒ 界面上直接给选项，⛔ 不让人敲错）。 */
+    val 可填: List<String> = emptyList(),
+    /** 怎么填的一句话（⛔ 不是文档正文）。 */
+    val 提示: String = "",
+) {
+    /** 人话的当前值：bool 说 开/关，其余照原样。 */
+    val 显示值: String get() = if (类型 == "bool") (if (值 == "true") "开" else "关") else 值
+}
+
+/** 一行改动记录。 */
+data class 账改动(val 时间: String, val 键: String, val 旧: String, val 新: String)
+
+/** 提示词清单里的一项（正文不在这里，单独取 —— 正文很长）。 */
+data class 提示词项(
+    val id: String,
+    val 名称: String,
+    val 占位符: List<String>,
+    val 说明: String,
+    val 已改: Boolean,
+    val 字数: Int,
+)
+
+data class 提示词组(val 组: String, val 项: List<提示词项>)
+
+/** 一项提示词的编辑页数据：生效正文 + 默认正文（用来「恢复默认」前对照）。 */
+data class 提示词屏(
+    val id: String,
+    val 名称: String,
+    val 占位符: List<String>,
+    val 说明: String,
+    val 已改: Boolean,
+    val 正文: String,
+    val 默认: String,
+)
+
+/** 端点报回来的一个可用模型。 */
+data class 模型项(val id: String, val own: String)
+
+/** 旧场（已归档）的一条。 */
+data class PastSession(val 场id: String, val 轮数: Int, val ts: Double)
+
+/** 旧场里的一次工具调用（回忆）。 */
+data class PastCall(val 名: String, val 参数: String)
+
+/** 旧场里按时间顺序的一段：思考 / 回忆（含带回来的那段）/ 正文。 */
+data class PastSeg(val 类: String, val 文本: String, val 回: String = "")
+
+/** 旧场里的一轮（只读）。 */
+data class PastTurn(
+    val 轮: Int,
+    val user: String,
+    val ai: String,
+    val 段: List<PastSeg>,
+    val 撤回: Boolean,
+)
+
+/** 归档流程里的一条判 / 一次自标。 */
+data class PastJudge(
+    val 轮: Int,
+    val 来源: String,
+    val 归进: String,
+    val 新建: Boolean,
+    val 说法: String,
+    val 记: List<String>,
+    val err: String,
+)
+
+/** 这一场归档流程的全部落盘记录。 */
+data class PastArchive(val 判: List<PastJudge>, val 层1: List<String>)
+
+/** 旧场全貌（只读）。 */
+data class PastDetail(
+    val 场id: String,
+    val 系统前缀: List<String>,
+    val 常驻: String,
+    val 在场: String,
+    val 轮: List<PastTurn>,
+    val 指纹: String,
+    val 归档: PastArchive,
+)
+
+/** 「查一查」里的一格（只读探针）。 */
+data class ProbeCell(val 场: String, val 轮: Int, val 分: Double, val 组: String)
+
+/** 「查一查」里的一个件：被取用了没有。 */
+data class ProbePiece(val 件id: String, val 最高: Double, val 段数: Int, val 取用: Boolean)
+
+/** 「查一查」的结果：全量激活 + 取用/未取用。 */
+data class ProbeResult(
+    val 线索: String,
+    val 激活数: Int,
+    val 格: List<ProbeCell>,
+    val 件: List<ProbePiece>,
+)
+

@@ -14,7 +14,7 @@ lifecycleRuntimeKtx = "2.9.3"
 chaquopy = "17.0.0"
 # ⛔ Health Connect 客户端（healthConnect = 1.1.0）已于 2026-10-06 随"手环信源放弃"一起移除。
 #   若将来要复活：把下面两行加回来即可（版本与验证过程见
-#   `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/README.md`）。
+#   （留档不在本仓））。
 #   healthConnect = "1.1.0"
 #   androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "healthConnect" }
 
@@ -44,7 +44,7 @@ androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
 androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 # ⛔ Health Connect 客户端已于 2026-10-06 随"手环信源放弃"一起移除（app 里不再引用它）。
-#   复活方法见 `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/README.md`。
+#   复活方法见 （留档不在本仓）。
 # androidx-health-connect-client = { module = "androidx.health.connect:connect-client", version.ref = "healthConnect" }
 # 也走 BOM（=1.7.8）
 androidx-compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }

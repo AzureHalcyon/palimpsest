@@ -52,8 +52,21 @@ class Session:
         self._sys = (s1, s2)
         self.msgs: List[dict] = [{"role": "system", "content": s1},
                                  {"role": "system", "content": s2}]
+        # ★ 2026-10-19（作者：单独作为一个补充提示词）：在场（这是和谁的对话）
+        #   独立成一条 system，⛔ 揉进系统一 —— 它要能单独改、单独关。
+        try:
+            from . import 提示词库 as _词库
+            from .knobs import 对方名 as _对方
+            _在场 = _词库.填文(_词库.取("对话-补充"), 用户=_对方()).strip()
+        except Exception:                             # noqa: BLE001
+            _在场 = ""
+        self._在场 = _在场
+        if _在场:
+            self.msgs.append({"role": "system", "content": _在场})
         self.rec: Dict[str, object] = {
             "k": k, "open": opener, "turns": [], "pulls": [],
+            # ★ 前缀条数（系统消息的条数）：撤回 / 底片拼回时要用，⛔ 写死 2
+            "前缀条数": len(self.msgs),
             "push_n": [],
             "ts_start": time.time(),
         }
@@ -66,6 +79,7 @@ class Session:
         #   单位 = **一轮**（一次 `ask`）；**一场之内有效**，新场从空开始。
         self.cd_mask: Dict[str, int] = {}
         self._film = None
+        self._前缀条数 = len(self.msgs)
 
     # ------------------------------------------------------------------ 底片
     @property
@@ -87,8 +101,47 @@ class Session:
                               指纹(self.cfg, self._sys,
                                   读法版本=int(_K版本["读法版本"]["值"])),
                               self.engine.cache_dir,
-                              系统前缀=[str(m.get("content") or "") for m in self.msgs[:2]])
+                              # ★ 2026-10-18：常驻记忆插在**最前面**之后，`msgs[:2]` 不再等于前缀
+                              #   ⇒ 底片直接记「这一场生效的那两段」（作者定：常驻不进底片）。
+                              系统前缀=[str(x or "") for x in self._sys])
         return self._film
+
+    # ------------------------------------------------------------------ 常驻记忆
+    def _建常驻(self) -> dict:
+        """一次对话**开头只给一次**的那一段（`流程框架 [0]`）。
+
+        ★★ 2026-10-18（作者）：**这里只放手写设定** —— 时间锚与「上次的余温」都拿出去。
+          余温是读取的产物，混在她是谁里会把开场变成"一份记忆的拷贝"；
+          时间锚也不该由这段承担。
+        ★ 设定读 `提示词库.取("常驻-设定")`（空 = 这一段不存在）。
+        ★ 落盘 `缓存/常驻/<场id>.json`：这一场开头她被告知的是哪一版设定，事后可查。
+        ⛔ 不写图、不写标记集、不调模型：这是一次纯读。
+        """
+        if self.rec.get("常驻"):
+            return dict(self.rec["常驻"])
+        err = ""
+        文本 = ""
+        try:
+            from . import 提示词库
+            from .knobs import 助手名
+            # ⚠️ 设定正文里除了 `${我}`，其余人名是**故意写死的**（作者 2026-10-18）。
+            文本 = 提示词库.填文(提示词库.取("常驻-设定"), 我=助手名()).strip()
+        except Exception as e:                            # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        # ★ 2026-10-19（作者：第三段系统提示词没见）：把「在场」一起存进这一场的记录
+        #   —— 它不进底片（算提示词），但「旧场」要能看见当时那一条。
+        out = {"文本": 文本, "有设定": bool(文本),
+               "在场": str(getattr(self, "_在场", "") or ""), "err": err}
+        self.rec["常驻"] = out
+        try:
+            import json as _json
+            d = os.path.join(self.engine.cache_dir, "常驻")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, self.场id + ".json"), "w", encoding="utf-8") as f:
+                _json.dump({"场id": self.场id, **out}, f, ensure_ascii=False, indent=1)
+        except Exception:                                 # noqa: BLE001
+            pass
+        return out
 
     # ------------------------------------------------------------------ 一轮
     def ask(self, user_text: str, progress=None) -> dict:
@@ -102,13 +155,24 @@ class Session:
         now = eng.clock
         # ★ 本轮是第几轮（从 1 数）。**由已记录的轮数推**，所以恢复在途那一场之后不会错位。
         turn_no = len(self.rec.get("turns") or []) + 1
+        # ★ 2026-10-18：**开场那一段常驻记忆**（只给一次，⛔ 不是每轮重述）。
+        #   第一轮、且还没注入过（前缀只有两段）时才建 —— 恢复在途那一场时 `msgs` 里已经有了。
+        if turn_no == 1 and not self.rec.get("常驻"):
+            try:
+                常 = self._建常驻()
+                if str(常.get("文本") or "").strip():
+                    # ★ 2026-10-18（作者：常驻放到 sys1 之前）——插在最前面，不是追加。
+                    self.msgs.insert(0, {"role": "system", "content": str(常["文本"])})
+            except Exception:                             # noqa: BLE001
+                pass          # ⛔ 常驻建不出来，不许拦着这一场开不了口
+
         # ★ 这一轮**动上下文之前**的长度 —— 撤回时按它把 `msgs` 截回这一轮之前。
         #   为什么只记长度就够：`ask` 只往 `msgs` 的**尾巴上追加**（user / push / 工具往返 /
         #   最终那条 assistant），从不动前面已有的条 ⇒ 一个长度就能精确截回去。
         msgs_len_before = len(self.msgs)
         # ★★ **取件源**（2026-10-17）：只有一条 —— `[R] 回忆`（件 / 标记集 / 传播）。
         #   ⛔ 旧路（池子 + 余弦 + softmax）已经整个删掉：`session.use_recall` 这个开关
-        #      连同它的兜底分支一起没了（旧仓库里有完整的那一份）。
+        #      连同它的兜底分支一起没了（更早的实现里有完整的那一份）。
         取用: List[dict] = []
         回忆为什么 = ""
         from . import recall as _回忆          # ★ 懒导入（见文件头那条注释）
@@ -245,6 +309,9 @@ class Session:
                 for c in calls:
                     text, rec_one = _dispatch(eng, c, now, self)
                     if rec_one and rec_one.get("kind") == "pull":
+                        # ★ 2026-10-19（作者：返回值现在也看不见）：把**回给它的那段**
+                        #   一起记下来 —— 界面点开就能看到它到底拿到了什么（含三种空）。
+                        rec_one["回"] = text
                         pulls.append(rec_one)
                     elif rec_one:
                         wake_calls.append(rec_one)
@@ -342,11 +409,56 @@ class Session:
 
         return {"reply": reply, "push": shown,
                 "k": len(取用),                  # 这一轮用了几件
+                # ★ 2026-10-19：整轮的 CoT 一起回传 —— 界面原来只靠流式缓冲，
+                #   有工具往返时那一段会在这一步丢掉（真机：归档/工具轮之后气泡上没有 CoT）。
+                "reasoning": item.get("reasoning") or "",
                 "cd_blocked": blocked, "pulls": pulls, "usage": usage,
                 # ★★ 「那段回忆」（编写原文 + 用了哪几条 + 版本/耗时）—— 界面点开要看的就是它
                 "回忆": 回忆 or None,
                 # ★ 它自己排的唤醒 / 调过的渠道也回给宿主（界面与转写要看"它做过什么"）
                 "wakeups": wake_calls}
+
+    # ------------------------------------------------------------------ 查一查（只读探针）
+    def probe(self, 线索: str) -> dict:
+        """**只读**地跑一次 `[R]`：给界面看"此刻若用这句话去回想，会亮什么"。
+
+        ⛔ 不写图、⛔ 不改势（和真读取共用 `recall.回忆`，只是不叠势、不落盘）。
+        ★ 返回**全量激活**（不只前 k）＋ 每个件是否被取用 —— 归作者要的
+          「能看到没被取用的部分吗」。
+        """
+        from . import recall as _回忆
+        from . import 势 as _势
+        from .graph import 图 as _图
+        g = _图.载入(self.engine.cache_dir)
+        表 = _势.载入(os.path.join(self.engine.cache_dir, "势.json"))
+        r = _回忆.回忆(str(线索 or ""), g, os.path.join(self.engine.cache_dir, "底片"),
+                      嵌入=getattr(self.engine.embedder, "raw_embed", None),
+                      势表=表, 种子=0)
+        激活 = {str(k): float(v) for k, v in (r.get("激活") or {}).items()}
+        取用 = [str(o.get("件id")) for o in (r.get("件") or [])]
+        cell = {str(c.get("id")): c for c in (g.cell or [])}
+        组表 = {}
+        for gr in (g.组 or []):
+            for m in (gr.get("成员") or []):
+                组表[str(m)] = str(gr.get("id") or "")
+        格 = []
+        for cid, 分 in sorted(激活.items(), key=lambda kv: -kv[1])[:20]:
+            c = cell.get(cid) or {}
+            格.append({"id": cid, "场": str(c.get("场id") or ""),
+                       "轮": int(c.get("轮") or 0), "分": round(分, 3),
+                       "组": 组表.get(cid, "")})
+        件们 = []
+        for 件id, it in (g.件 or {}).items():
+            成 = [激活.get(str(m)) for m in (it.get("成员") or []) if str(m) in 激活]
+            if not 成:
+                continue
+            件们.append({"件id": str(件id), "最高": round(max(成), 3),
+                         "段数": len(it.get("成员") or []),
+                         "取用": str(件id) in 取用})
+        件们.sort(key=lambda x: -x["最高"])
+        return {"线索": str(线索 or ""), "激活数": len(激活),
+                "格": 格, "件": 件们[:15], "取用": 取用,
+                "有件": len(g.件 or {})}
 
     # ------------------------------------------------------------------ 撤回
     def 记住这一轮(self, 为什么: str = "") -> dict:
@@ -362,8 +474,14 @@ class Session:
         if not turns:
             return {"err": "还没有一轮可标"}
         轮 = int(len(turns))
-        self._底片().手工记(轮, 谁="用户", 为什么=str(为什么 or ""))
-        return {"轮": 轮, "谁": "用户"}
+        # ★ 2026-10-18（作者：就看是具体谁让记住的）：记下**当场的称呼**，不是笼统的"用户"。
+        try:
+            from .knobs import 对方名
+            谁 = 对方名()
+        except Exception:                            # noqa: BLE001
+            谁 = "用户"
+        self._底片().手工记(轮, 谁=谁, 为什么=str(为什么 or ""))
+        return {"轮": 轮, "谁": 谁}
 
     def withdraw_last(self) -> dict:
         """★ **撤回最后一轮**（2026-10-06）：把这一轮**当成没发生过**，可连续用。
@@ -478,6 +596,7 @@ class Session:
         s = cls(engine, int(rec.get("k") or (engine.sessions_done + 1)),
                 opener=rec.get("open"))
         s.rec = dict(rec)
+        s._前缀条数 = int(rec.get("前缀条数") or 2)
         msgs = rec.get("msgs")
         if msgs:
             s.msgs = list(msgs)
@@ -708,6 +827,8 @@ def _回忆工具(eng, 线索: str, sess=None) -> Dict:
             masked = set()
     件们: List[Dict] = []
     被挡 = 0
+    # 2026-10-18：这次一共取到几段（给"刚说过"那句报数用）
+    段数 = sum(len(list(one.get("原文们") or [])) for one in (r.get("件") or []))
     for one in (r.get("件") or []):
         原文们 = list(one.get("原文们") or [])
         强度们 = list(one.get("强度们") or [])
@@ -720,8 +841,8 @@ def _回忆工具(eng, 线索: str, sess=None) -> Dict:
                                        else (one.get("强度") or 0.0))})
     if not 件们:
         if 被挡:
-            return {"回忆": "", "件数": 0, "为什么": "冷却", "被挡": 被挡}
-        return {"回忆": "", "件数": 0, "为什么": "没取到件"}
+            return {"回忆": "", "件数": 0, "为什么": "冷却", "被挡": 被挡, "段数": 段数}
+        return {"回忆": "", "件数": 0, "为什么": "没取到件", "段数": 段数}
     # ★★★ 2026-10-18（第 20 场实测）：**判定只用于自动推送那条路**。
     #   工具这条的 `线索` 是**她自己的查询**（「陈师傅 是谁 厂里的同事」），
     #   本来就表示"我要找这个"；再拿判定那句「他这句话指回旧记录了吗」去判，
@@ -829,26 +950,21 @@ def _dispatch_内(eng, call: dict, now: float, sess=None):
             # ★★ 2026-10-18（作者：「冷却掩膜导致的查不到得给一个另外的理由」）：
             #   这是**第四种空**：不是没查到、不是没编出来、更不是没有这回事 —— 是刚说过。
             #   ⛔ 不这么说，她会把"刚讲过"读成"没有"，然后凭空给一个确定判断。
-            return ("（查到了 %d 段，但**这几段刚说过**，还在冷却里 —— 这一轮先不重复给你。\n"
-                    "· 这不是「没有」：是「刚讲过、别原地打转」；\n"
-                    "· 也不是「查不到」：等两轮它会自动回来；\n"
-                    "· 要换个角度，就把想查的说得更具体一点再查。）" % int(got.get("被挡") or 0),
+            return ("（查到了 %d 段记忆，但有 %d 段在上几轮对话已经给出，"
+                    "这一轮不再重复，跳过了。\n"
+                    "不是没查到，也不是没有这回事，只是刚说过；过两轮再查就会再查到。）"
+                    % (int(got.get("段数") or 0), int(got.get("被挡") or 0)),
                     {"kind": "pull", "query": q, "got": [], "empty": True,
                      "件数": int(got.get("件数") or 0), "err": "冷却"})
         if str(got.get("为什么") or "") == "编写失败":
-            return ("（这条查过了：取到了几段，但**没整理出来**（编写那一步失败了）。\n"
-                    "· 别当成「查到了」：我手里没有可以照着说的东西；\n"
-                    "· 别当成「没有这回事」。\n"
-                    "真要用到这一块，就照底色的写法说：这个我还不知道。）",
+            return ("（这条查过了：取到了记忆，但整理记忆那一步失败了，"
+                    "所以这一次没有可用的内容。\n"
+                    "再试试看；如果多次失败，去告诉 Ranchel 来修这个 bug。）",
                     {"kind": "pull", "query": q, "got": [], "empty": True,
                      "件数": int(got.get("件数") or 0), "err": "编写失败"})
         if not got.get("回忆"):
-            return ("（这条查过了：池子里没有哪一条够得上「贴得上」那条线，最靠前的也没够上"
-                    " —— 也就是说，没有贴得上的东西。\n"
-                    "· 别当成「查到了」：不许拿手里现有的条目当成他的意思；\n"
-                    "· 别当成「没有这回事」：这只是「没有贴得上的」，不等于事实不存在；\n"
-                    "· 别让他以为我以前知道过这件事。\n"
-                    "真要用到这一块，就照底色的写法说：这个我还不知道。）",
+            return ("（这条查过了：记忆里没有任何一条达到「贴得上」的标准，最接近的也没有。\n"
+                    "这不是「没有这回事」，只是这一次没有找到贴得上的东西。）",
                     {"kind": "pull", "query": q, "got": [], "empty": True,
                      "件数": int(got.get("件数") or 0)})
         return (str(got["回忆"]),

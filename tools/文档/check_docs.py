@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """检查文档的结构问题。
 
-它查四件事：
+它查五件事：
 
   1. 小节编号顺序倒退
   2. 小节编号重复
   3. 冲突标记残留（<<<<<<< / ======= / >>>>>>>）
   4. 表格头被切断（`|---|` 后面紧跟标题，说明有一行被切掉了）
+  5. **相对链接指向的文件/目录不存在**（外部 http(s)、`#锚点`、`mailto:` 不查）
 
 为什么需要它：改文档的脚本只能断言"替换命中了几处"，看不见"结构"。
 一处替换插错了位置，文字读起来还是通的，但编号会倒退或撞号。
@@ -42,11 +43,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))          # tools/文档/ → 仓库根
 
 # 跳过：版本控制、本机工作文件、依赖
-SKIP_DIRS = {".git", ".local", "99_归档", "__pycache__", ".venv", "venv", "node_modules"}
+SKIP_DIRS = {".git", ".local", "99_归档", "__pycache__", ".venv", "venv", "node_modules", "build", "trash"}
 
 CONFLICT = re.compile(r"^(<{7}|={7}|>{7})(\s|$)")
 BROKEN_TABLE = re.compile(r"\|-{2,}\|###")
 YEAR_HEAD = re.compile(r"^(19|20)\d{2}(?![\d.])")   # 日期当标题，不是编号
+LINK = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
 
 
 def headings(text):
@@ -111,7 +113,39 @@ def check(path):
         if BROKEN_TABLE.search(line):
             problems.append("表格头被切断：L%d  %s" % (i, line[:56]))
 
+    # 5) 相对链接：目标必须存在（外部地址 / 锚点 / 邮件不查）
+    base = os.path.dirname(os.path.abspath(path))
+    for i, line in enumerate(lines, 1):
+        for m in LINK.finditer(line):
+            target = m.group(1).strip()
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1]
+            low = target.lower()
+            if low.startswith(("http://", "https://", "mailto:", "#", "tel:", "data:")):
+                continue
+            t = target.split("#", 1)[0].split("?", 1)[0].strip()
+            if not t or "*" in t:                     # 空 / 模板占位
+                continue
+            full = os.path.normpath(os.path.join(base, t))
+            if not os.path.exists(full):
+                problems.append("断链：L%d  %s" % (i, target[:70]))
+
     return len(hs), problems
+
+
+def _git_ignored(paths):
+    """被 .gitignore 排掉的文件（第三方语料、构建产物）。没有 git 时返回空集。"""
+    if not paths or not os.path.isdir(os.path.join(ROOT, ".git")):
+        return set()
+    try:
+        import subprocess
+        # `-z`：用 NUL 分隔，中文路径不会被 git 转义成带引号的形状
+        r = subprocess.run(["git", "-C", ROOT, "check-ignore", "-z", "--stdin"],
+                           input="\0".join(paths).encode("utf-8"), capture_output=True)
+        out = r.stdout.decode("utf-8", "replace")
+        return {x for x in out.split("\0") if x.strip()}
+    except Exception:                                  # noqa: BLE001
+        return set()
 
 
 def gather(targets):
@@ -125,6 +159,12 @@ def gather(targets):
                         files.append(os.path.join(dirpath, n))
         else:
             files.append(t)
+    # 第三方语料与构建产物在 .gitignore 里 —— ⛔ 不查（它们随仓库走，不归我们维护）
+    rel = [os.path.relpath(os.path.abspath(f), ROOT) for f in files]
+    bad = _git_ignored(sorted(set(rel)))
+    if bad:
+        bad = {os.path.normpath(b) for b in bad}
+        files = [f for f, r in zip(files, rel) if os.path.normpath(r) not in bad]
     return files
 
 

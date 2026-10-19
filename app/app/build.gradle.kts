@@ -1,3 +1,8 @@
+// ★ 2026-10-18：`java.io.File` 在这个脚本里**不能直接写** —— Android 插件把 `java` 变成
+//   了一个 DSL 扩展（source set），于是 `java.io` 解析不到 `java` 包，报
+//   `Unresolved reference: io`（实测）。所以这里显式 import，下面只用 `File(...)`。
+import java.io.File
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -60,7 +65,7 @@ chaquopy {
                 "没给构建用 Python。请用 `build.ps1` 构建（它会自动发现并传 -PbuildPython），" +
                 "或手工加 `-PbuildPython=<你的 python.exe 绝对路径>`。"
             )
-        if (!java.io.File(buildPythonPath).isFile) {
+        if (!File(buildPythonPath).isFile) {
             error("buildPython 指向的文件不存在：$buildPythonPath")
         }
         buildPython(buildPythonPath)

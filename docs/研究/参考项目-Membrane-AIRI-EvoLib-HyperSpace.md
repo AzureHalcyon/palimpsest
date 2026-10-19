@@ -29,7 +29,7 @@
 
 ### 先回答最重要的核实点：这个仓库到底是不是备忘录说的那个 Membrane？
 
-**结论：是。** 本地 `D:\Works\workplace\dsh-workplace\membrane` 就是 `github.com/BennettSchwartz/membrane`（git remote 已确认），它的 README 原文写着 **"Five memory layers, connected by entities"**，并自述 "typed, revisable, decayable memory with competence learning and trust-aware retrieval"。这与备忘录里的「五层记忆，类型化、可修订、可衰减」**逐词对应**。`[源码]`
+**结论：是。** `github.com/BennettSchwartz/membrane` 的源码（本地 clone，git remote 已确认），它的 README 原文写着 **"Five memory layers, connected by entities"**，并自述 "typed, revisable, decayable memory with competence learning and trust-aware retrieval"。这与备忘录里的「五层记忆，类型化、可修订、可衰减」**逐词对应**。`[源码]`
 
 **你的怀疑有一半是对的，但结论要反过来。** 你看到根目录是 `package.json` / `docker-compose.yml` / `wrangler.jsonc` / `docusaurus.config.js` 就判断「像网关/文档站，不像记忆库」——这个表象是真的，但它**不构成否证**，原因是：
 
@@ -132,7 +132,7 @@ return (applicability + successRate + recency) / 3.0
 
 ### 来源
 
-- 本地源码：`D:\Works\workplace\dsh-workplace\membrane`（remote = `https://github.com/BennettSchwartz/membrane`）
+- 源码：`https://github.com/BennettSchwartz/membrane`
 - 上游：<https://github.com/BennettSchwartz/membrane>
 - 文档站：<https://membrane.gustycube.com>
 - 关键文件：`pkg/decay/curves.go`、`pkg/schema/enums.go`、`pkg/schema/memory.go`、`pkg/retrieval/selector.go`、`pkg/retrieval/graph.go`、`docs/architecture.mdx`、`docs/concepts/decay-and-consolidation.mdx`
@@ -231,7 +231,7 @@ AIRI 的「在线」在工程上是朴素的：Electron 桌面端常驻，配一
 
 ### 来源
 
-- 本地：`D:\Works\workplace\dsh-workplace\airi`（remote = `https://github.com/moeru-ai/AIRI`），关键文件副本在 `D:\Works\workplace\dsh-workplace\_airi_probe\`
+- 源码：`https://github.com/moeru-ai/AIRI`（本地 clone）
 - 上游：<https://github.com/moeru-ai/AIRI>
 - 关键文件：`packages/core-agent/src/agents/spark-notify/{agent.ts,tools.ts,types.ts,event-source.ts}`、`integrations/telegram-bot/src/prompts/system-ticking-v1.velin.md`、`DESIGN.md`
 - 社区提案（未取得正文）：<https://github.com/moeru-ai/airi/discussions/1512>
@@ -298,7 +298,7 @@ AIRI 的「在线」在工程上是朴素的：Electron 桌面端常驻，配一
 
 ### 取证方式
 
-**这次拿到了官方实现源码。** 顺着搜索命中找到 <https://github.com/microsoft/EvoLib> 并成功 clone 到 `D:\Works\workplace\dsh-workplace\evolib`，**通读核心算法文件 `EvoLib/evolib_agent.py`（409 行，全文）**，并读了 `README.md`（220 行，全文）。arXiv 摘要亦已取到官方原文。`[源码]` + `[论文原文]`
+**这次拿到了官方实现源码。** 顺着搜索命中找到 <https://github.com/microsoft/EvoLib> 并 clone 了官方仓库，**通读核心算法文件 `EvoLib/evolib_agent.py`（409 行，全文）**，并读了 `README.md`（220 行，全文）。arXiv 摘要亦已取到官方原文。`[源码]` + `[论文原文]`
 
 ### 「演化」机制到底怎么做的 `[源码]`
 
@@ -403,7 +403,7 @@ EvoLib 自己很清楚这个风险。README「Out-of-Scope Uses」原文警告�
 
 - arXiv 摘要页（本次取到完整摘要原文）：<https://arxiv.org/abs/2605.14477>
 - 官方实现（本次 clone 并通读核心算法）：<https://github.com/microsoft/EvoLib>
-- 本地：`D:\Works\workplace\dsh-workplace\evolib`
+- 源码：`https://github.com/microsoft/EvoLib`
 - 关键文件：`EvoLib/evolib_agent.py`（409 行，全文读过）、`README.md`、`EvoLib/eval_main.py`（读过函数清单与 prompt 构造器）
 - 作者：Weijia Xu, Alessandro Sordoni, Chandan Singh, Zelalem Gero, Michel Galley, Xingdi Yuan, Jianfeng Gao（Microsoft Research）
 

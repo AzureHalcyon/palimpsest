@@ -449,6 +449,7 @@ private fun ChatTurnItem(
                 ToolCallRow(
                     query = p.query,
                     got = p.got,
+                    回 = p.回,
                     onExpand = onDisclosureExpand,
                     onCollapse = onDisclosureCollapse,
                 )

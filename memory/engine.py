@@ -158,7 +158,13 @@ class Engine:
           "没有这个工具"（旧池子那五个 `find_text` / `read_entry` / `list_entries` /
           `pool_stats` / `search_memory` 就是这么被删掉的：表里有、实现没了）。
         """
-        tools = list(TOOLS_MEMORY) + list(TOOLS_AUTONOMY) + list(TOOLS_WEB)
+        # ★ 2026-10-18（作者：唤醒那三个先不接入）：只发记忆与联网两组。
+        #   `TOOLS_AUTONOMY`（schedule_wakeup / list_wakeups / cancel_wakeup）代码还在，
+        #   但**不进请求** —— 表里有、她又看不见，等于没接。
+        # ★ 2026-10-18（作者：唤醒那三个、以及联网那两个先不接入）：
+        #   联网这一版**没接搜索源**（`web.py` 开头写着）⇒ 发出去她只会拿到"没接"，
+        #   还白花一次往返。⇔ 等定了搜索源（SearXNG / 官方 API）再 `attach_web` 并放回来。
+        tools = list(TOOLS_MEMORY)
         tools.append({"type": "function", "function": {
             "name": "list_channels",
             "description": ("看看你现在能查哪些渠道、各自最近有没有变化。"

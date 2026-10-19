@@ -30,7 +30,7 @@ import urllib.request
 DEFAULT_BASE = "https://api.daapsaak.top/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash"   # ★ 别再写回 "deepseek-chat"：那条网关已经不提供它了
                                         #   （实测报 model_not_found ⇒ 404，白查半天）
-# ★ 2026-10-17：原来写死 `C:\Users\AzureHalcyon\.dsh\.credentials.yaml` —— 换人就崩。
+# ★ 2026-10-17：原来写死了某个用户主目录下的凭证路径 —— 换人就崩。
 #   改成按顺序找（⛔ 仓库里不出现任何绝对路径）：
 #     ① 环境变量 `DSH_CREDENTIALS`  ② `DSH_HOME` 下的 `.credentials.yaml`  ③ 用户目录下的 `.dsh`
 CRED = (

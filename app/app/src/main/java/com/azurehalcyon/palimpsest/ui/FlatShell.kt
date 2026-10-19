@@ -99,6 +99,9 @@ fun FlatShell(
 
     var menuOpen by remember { mutableStateOf(false) }
     var confirmFinish by remember { mutableStateOf(false) }
+    // ★ 2026-10-19（作者：加一个能看之前场的地方，放在归档按钮下面）：旧场 = 只读一页
+    var pastOpen by remember { mutableStateOf(false) }
+    var pastSid by remember { mutableStateOf<String?>(null) }
 
     // ★★ **键盘让位：图层平移，不是改布局**（2026-10-06，用户："然后就是压绘制本身"）。
     //   依据是每帧阶段拆解：**测量+布局 0.07ms（可忽略）、录制绘制 7.6ms**。
@@ -143,8 +146,11 @@ fun FlatShell(
                     .fillMaxWidth()
                     .clipToBounds()
                     .graphicsLayer {
+                        // ★ 2026-10-19（真机：记忆页的「查一查」被键盘顶没了）：
+                        //   这个上移本来是**给对话输入框让位**用的；别的页没有输入框，
+                        //   跟着上移只会把顶部内容推出屏幕 ⇒ 只在对话页生效。
                         val shift = (imePxState.value - barSlotPx.value).coerceAtLeast(0)
-                        translationY = -shift.toFloat()
+                        translationY = if (vm.tab == Tab.Chat) -shift.toFloat() else 0f
                     },
             ) {
                 // ★ 用 uikit **公开**的 `ProvideLiquidScreenContentForPreview` 提供上下文。
@@ -185,13 +191,48 @@ fun FlatShell(
                 onDismissRequest = { menuOpen = false },
             ) {
                 DropdownMenuItem(
-                    text = { Text("归档") },
-                    enabled = vm.chatSessionKey != null,
+                    // ★ 2026-10-19（作者：归档期间还能点归档，这不太妙）：
+                    //   归档中 / 草案待审时都禁用 —— 否则会再造一份草案、甚至重复落地。
+                    text = {
+                        Text(
+                            when {
+                                vm.chatPhase == ChatPhase.Archiving -> "归档中…"
+                                vm.archiveDraft != null -> "待完成（先按「完成」）"
+                                else -> "归档"
+                            },
+                        )
+                    },
+                    enabled = vm.chatSessionKey != null
+                        && vm.chatPhase != ChatPhase.Archiving
+                        && vm.archiveDraft == null,
                     onClick = {
                         menuOpen = false
                         confirmFinish = true
                     },
                 )
+                DropdownMenuItem(
+                    text = { Text("旧场") },
+                    onClick = {
+                        menuOpen = false
+                        pastSid = null
+                        vm.loadPastList()
+                        pastOpen = true
+                    },
+                )
+            }
+        }
+
+        if (pastOpen) {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                if (pastSid == null) {
+                    PastListPage(
+                        vm,
+                        onBack = { pastOpen = false },
+                        onOpen = { sid -> pastSid = sid; vm.loadPast(sid) },
+                    )
+                } else {
+                    PastDetailPage(vm, onBack = { pastSid = null; vm.closePast() })
+                }
             }
         }
     }

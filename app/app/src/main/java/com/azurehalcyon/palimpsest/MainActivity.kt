@@ -88,10 +88,9 @@ class MainActivity : ComponentActivity() {
         // ── ⛔ 这里曾经有两个诊断钩子（`--es health_probe 1` / `--es mi_probe 1`）：
         //    Health Connect 读数探针 · 小米运动健康 provider 探针。
         //    **2026-10-06 已按用户决定删除**：手环这条信源放弃（依据见
-        //    `companion-data/探针-HealthConnect-大陆地区门禁-2026-10-06.txt` 与
-        //    `companion-data/探针-小米provider直读-2026-10-06.txt`：
+        //    两份真机探针记录（留档不在本仓）：
         //    小米运动健康在大陆地区**不使用 Health Connect**，它自己的 provider 又只对手环名/电量开一格）。
-        //    代码与"如何复活"留档在 `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/`。
+        //    代码与"如何复活"的留档不随本仓。
 
         // ── 调试钩子（★ 只在 debug 包里）：发一条示例投递通知，用来验"通知 + 回话"渲染。
         //    走 `am start --es notify_test 1` —— 实测 **shell 广播送不到**（MIUI 拦跨 App 广播），

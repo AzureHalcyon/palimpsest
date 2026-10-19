@@ -1,8 +1,11 @@
 package com.azurehalcyon.palimpsest.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -54,9 +57,56 @@ import com.niki914.uikit.infra.component.settings.SettingsSpecPageContent
 @Composable
 fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     var knobDetail by remember { mutableStateOf<Knob?>(null) }
-    var credsDialog by remember { mutableStateOf(false) }
-    var promptDialog by remember { mutableStateOf(false) }
     var diagDialog by remember { mutableStateOf<Diag?>(null) }
+    // ★ 2026-10-18：四样东西各给一屏（作者：「需要做二级页面」）—— 弹窗装不下也翻不动。
+    var 子页 by remember { mutableStateOf("") }
+    var 提示词id by remember { mutableStateOf("") }
+    // ★ 2026-10-19（作者：设置里也记得加上）：旧场（只读）也留一个入口
+    var 旧场sid by remember { mutableStateOf("") }
+
+    // ★★ 2026-10-18（真机踩到）：这个对话框原来挂在下面 —— 而二级页是**早返回**的，
+    //   所以「API 与模型」里点温度/回复上限**什么都不会发生**。对话框是覆盖层，
+    //   放在这里与布局无关，反而在哪一页都弹得出来。
+    knobDetail?.let { k ->
+        KnobDetailDialog(
+            vm = vm,
+            knob = k,
+            onDismiss = { knobDetail = null },
+        )
+    }
+
+    if (子页.isNotBlank()) {
+        // ★ 系统返回键也要能回到上一级（否则它会一路退到外壳，二级页卡在那儿）
+        BackHandler {
+            when {
+                旧场sid.isNotBlank() -> 旧场sid = ""
+                提示词id.isNotBlank() -> 提示词id = ""
+                else -> 子页 = ""
+            }
+        }
+        when (子页) {
+            "api" -> ApiPage(vm, onKnob = { path ->
+            knobDetail = vm.knobs.firstOrNull { it.rawPath == path }
+        }, onBack = { 子页 = "" })
+            "ledger" -> LedgerPage(vm) { 子页 = "" }
+            "log" -> LedgerLogPage(vm) { 子页 = "" }
+            "past" ->
+                if (旧场sid.isBlank()) {
+                    PastListPage(vm, onBack = { 子页 = "" }, onOpen = { sid ->
+                        旧场sid = sid; vm.loadPast(sid)
+                    })
+                } else {
+                    PastDetailPage(vm, onBack = { 旧场sid = "" })
+                }
+            "prompts" ->
+                if (提示词id.isBlank()) {
+                    PromptsPage(vm, onOpen = { 提示词id = it }, onBack = { 子页 = "" })
+                } else {
+                    PromptEditPage(vm, 提示词id, onBack = { 提示词id = "" })
+                }
+        }
+        return
+    }
 
     SettingsSpecPageContent(
         spec = settingsSpec(vm),
@@ -64,8 +114,11 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
         onAction = { action ->
             when (action) {
                 is SettingsRowAction.Navigate -> when {
-                    action.id == ROW_CREDS -> credsDialog = true
-                    action.id == ROW_PROMPT -> promptDialog = true
+                    action.id.startsWith("page:") -> {
+                        提示词id = ""
+                        子页 = action.id.removePrefix("page:")
+                    }
+
                     action.id.startsWith("knob:") -> {
                         val p = action.id.removePrefix("knob:")
                         knobDetail = vm.knobs.firstOrNull { it.rawPath == p }
@@ -83,41 +136,20 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
                 is SettingsRowAction.Click -> Unit
             }
         },
-        contentAfterSections = {
-            // 「保存」只在一级页出现一次；参数改动攒在这里一起落盘。
-            val dirty = vm.knobs.count { vm.isDirty(it) }
-            Box(Modifier.padding(bottom = 8.dp)) {
-                MaterialTintLiquidButton(
-                    text = if (dirty > 0) "保存（$dirty 项）" else "保存",
-                    onClick = { vm.saveKnobs() },
-                    enabled = dirty > 0,
-                )
-            }
-            if (vm.settingsMsg.isNotBlank()) {
-                Text(
-                    text = vm.settingsMsg,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
+        // ★ 2026-10-18（作者：最下面那个保存按钮不知道是给谁用的）：
+        //   一级页不再有「保存」—— 每个二级页自己保存，改哪一项、按哪一次都看得见。
+        //   但**必须留一点底**：最后一行（在途场次）原来紧贴下边缘。
+        contentAfterSections = { Spacer(Modifier.height(28.dp)) },
     )
 
-    knobDetail?.let { k ->
-        KnobDetailDialog(
-            vm = vm,
-            knob = k,
-            onDismiss = { knobDetail = null },
-        )
-    }
 
-    if (credsDialog) {
-        CredsDialog(vm = vm, onDismiss = { credsDialog = false })
-    }
 
-    if (promptDialog) {
-        PromptDialog(vm = vm, onDismiss = { promptDialog = false })
-    }
+
+
+
+
+
+
 
     diagDialog?.let { d ->
         val running = vm.diagRunning
@@ -134,8 +166,11 @@ fun SettingsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
 }
 
 // --------------------------------------------------------------------------- 规格
-private const val ROW_CREDS = "creds"
-private const val ROW_PROMPT = "prompt"
+// ★ 2026-10-18：四样东西从弹窗改成**二级页面**（入口就是下面几个 `page:` 行）。
+private const val PAGE_API = "page:api"
+private const val PAGE_LEDGER = "page:ledger"
+private const val PAGE_LOG = "page:log"
+private const val PAGE_PROMPTS = "page:prompts"
 
 @Composable
 private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
@@ -144,29 +179,17 @@ private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
 
     return SettingsPageSpec(
         sections = listOf(
-            // ── 凭证
+            // ── 端点与模型（地址 / 密钥 / 拉可用列表 / 选对话模型）
             SettingsSectionSpec(
-                title = "凭证",
+                title = "API 与模型",
                 layout = SettingsSectionLayout.GroupedCard,
                 rows = listOf(
                     SettingsRowSpec.Navigation(
-                        id = ROW_CREDS,
-                        title = "API 凭证",
+                        id = PAGE_API,
+                        title = "端点与模型",
                         currentState = if (c.configured) "已配置" else "未配置",
                     ),
                 ),
-            ),
-
-            // ── 对话参数（按 settings.py 的分组，保持它的顺序与分组）
-            SettingsSectionSpec(
-                title = "对话",
-                layout = SettingsSectionLayout.GroupedCard,
-                rows = listOf(
-                    knobRow(vm, "chat.model"),
-                    knobRow(vm, "chat.temperature"),
-                    knobRow(vm, "chat.max_tokens"),
-                    knobRow(vm, "chat.effort"),
-                ).filterNotNull(),
             ),
 
             // ── 读取与注入（新线的活开关：编写成一段 / 她再查几次 / 冷却）
@@ -174,11 +197,25 @@ private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
                 title = "读取与注入",
                 layout = SettingsSectionLayout.GroupedCard,
                 rows = listOf(
-                    knobRow(vm, "session.render_recall"),
+                    // ★ 2026-10-18（作者：这些开关给得不合理）：只留两个**能改变行为**的；
+                    //   「注入写成一段」「冷却开关/轮数」是排查用的，进「参数」里，不占这一页。
+                    knobRow(vm, "session.auto_push"),
                     knobRow(vm, "session.max_pull"),
-                    knobRow(vm, "cooldown.enabled"),
-                    knobRow(vm, "cooldown.turns"),
                 ).filterNotNull(),
+            ),
+
+            // ── 参数账（48 项，可改）与改动记录
+            SettingsSectionSpec(
+                title = "参数",
+                layout = SettingsSectionLayout.GroupedCard,
+                rows = listOf(
+                    SettingsRowSpec.Navigation(
+                        id = PAGE_LEDGER,
+                        title = "查看与修改",
+                        currentState = if (vm.账计数 > 0) "${vm.账计数} 项" else "",
+                    ),
+                    SettingsRowSpec.Navigation(id = PAGE_LOG, title = "改动记录"),
+                ),
             ),
 
             // ── 收场整理
@@ -187,16 +224,21 @@ private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
             //   （`DreamConfig` + `dreaming.py`），而那条路已经删了。
             //   新线的归档温度/回合在 `archive_step` 与 `writing` 里，按参数账走。
 
-            // ── 提示词（可编辑；默认是 prompts.py 里的冻结稿，改过就存覆盖）
+            // ── 提示词（全部可编辑；默认正文在仓库的 `memory/提示词/*.txt`，改过的存这台手机上）
             SettingsSectionSpec(
                 title = "提示词",
                 layout = SettingsSectionLayout.GroupedCard,
                 rows = listOf(
-                    SettingsRowSpec.Navigation(
-                        id = ROW_PROMPT,
-                        title = "会话提示词",
-                        currentState = if (vm.promptEdited) "已改过" else "默认",
-                    ),
+                    SettingsRowSpec.Navigation(id = PAGE_PROMPTS, title = "提示词"),
+                ),
+            ),
+
+            // ── 旧场（已归档的场，只读：系统提示 / 常驻 / 在场 / 每轮 / 归档流程）
+            SettingsSectionSpec(
+                title = "旧场",
+                layout = SettingsSectionLayout.GroupedCard,
+                rows = listOf(
+                    SettingsRowSpec.Navigation(id = "page:past", title = "看已归档的场"),
                 ),
             ),
 
@@ -213,7 +255,7 @@ private fun settingsSpec(vm: AppViewModel): SettingsPageSpec {
             ),
 
             // ── ⛔ 原「手环 → 健康数据（Health Connect）」入口已删（2026-10-06，手环信源放弃；
-            //      理由与留档见 `companion-data/_archive/2026-10-06-手环与HealthConnect-已放弃/`）。
+            //      理由与留档不随本仓）。
             //      要补第二个独立信源，改走不依赖厂商的渠道（日历 / 通知 / 屏幕使用 / 位置…）。
         ),
         description = if (dirty > 0) "有 $dirty 项改动还没保存" else null,
@@ -239,6 +281,21 @@ private fun knobValueLabel(vm: AppViewModel, k: Knob): String {
         "float" -> trimNum(v) + if (k.unit.isNotBlank()) " ${k.unit}" else ""
         else -> v
     }
+}
+
+/**
+ * 校验一个数字输入（作者：「记得做一个简单的输入校验」）。
+ *
+ * 只判三件事：空 / 不是数字 / 整数项填了小数。**范围只提示、不夹住** ——
+ * 账上的 `low/high` 是给滑块的，不是一个不许越过的墙。
+ */
+private fun 校验数字(s: String, k: Knob): String {
+    val t = s.trim()
+    if (t.isEmpty()) return "还没填"
+    val v = t.toDoubleOrNull() ?: return "这不是一个数字"
+    if (v.isNaN() || v.isInfinite()) return "要是有限的数字"
+    if (k.kind == "int" && v != Math.floor(v)) return "这一项要整数"
+    return ""
 }
 
 // --------------------------------------------------------------------------- 参数详情
@@ -269,21 +326,44 @@ private fun KnobDetailDialog(vm: AppViewModel, knob: Knob, onDismiss: () -> Unit
                     onCheckedChange = { vm.setKnob(knob.rawPath, it.toString()) },
                 )
 
-                "int" -> Stepper(
-                    value = vm.knobValue(knob),
-                    low = (knob.low ?: 0.0).toInt().toDouble(),
-                    high = (knob.high ?: 100.0).toInt().toDouble(),
-                    step = intStep(knob),
-                    onValue = { vm.setKnob(knob.rawPath, it.toIntOrNull()?.toString() ?: it) },
-                )
-
-                "float" -> Stepper(
-                    value = vm.knobValue(knob),
-                    low = (knob.low ?: 0.0),
-                    high = (knob.high ?: 1.0),
-                    step = floatStep(knob),
-                    onValue = { vm.setKnob(knob.rawPath, it) },
-                )
+                // ★ 2026-10-18（作者：「所有旋钮都不要那个加号减号，直接一个框自己填」）：
+                //   int / float 都换成一个输入框，按 kind 校验，**非法就当场说，不静默钳**。
+                "int", "float" -> {
+                    var 文本 by remember(knob.rawPath) { mutableStateOf(vm.knobValue(knob)) }
+                    val 错 = 校验数字(文本, knob)
+                    androidx.compose.material3.OutlinedTextField(
+                        value = 文本,
+                        onValueChange = { 文本 = it },
+                        label = { Text(if (knob.unit.isNotBlank()) knob.unit else "值") },
+                        singleLine = true,
+                        isError = 错.isNotBlank(),
+                        // 正常时不加任何说明；只有填错才说一句（⛔ 不要把"自己填、不夹住"摆给人看）
+                        supportingText = if (错.isBlank()) null else {
+                            { Text(错) }
+                        },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = if (knob.kind == "int") {
+                                androidx.compose.ui.text.input.KeyboardType.Number
+                            } else {
+                                androidx.compose.ui.text.input.KeyboardType.Decimal
+                            },
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    MaterialTintLiquidButton(
+                        text = "填好了",
+                        onClick = {
+                            if (错.isBlank()) {
+                                vm.setKnob(knob.rawPath, 文本)
+                                onDismiss()
+                            }
+                        },
+                        enabled = 错.isBlank(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
 
                 else -> if (knob.choices.isNotEmpty()) {
                     knob.choices.forEach { choice ->
@@ -463,155 +543,13 @@ private fun WhyRow(note: String, grade: String) {
             )
         }
         if (open) {
-            Text(
-                text = note,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp, bottom = 2.dp),
-            )
+            // ★ 账本的 note 是 markdown（`**加粗**` / 反引号 / 列表）⇒ 用渲染器，
+            //   否则记号原样露出来（真机截图里就是一片 `**待标定**`）。
+            Column(Modifier.padding(top = 2.dp, bottom = 2.dp)) {
+                MarkdownText(markdown = note)
+            }
         }
     }
-}
-
-// --------------------------------------------------------------------------- 凭证
-@Composable
-private fun CredsDialog(vm: AppViewModel, onDismiss: () -> Unit) {
-    val c = vm.creds
-    FlatDialog(
-        visible = true,
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "API 凭证",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        },
-        content = {
-            if (c.err.isNotBlank()) {
-                Text(
-                    text = c.err,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-            SettingExpandableTextItem(
-                title = "接入地址",
-                value = vm.embedBaseUrlDraft,
-                onValueChange = vm::updateEmbedBaseUrl,
-                placeholder = "https://…",
-                minLines = 1,
-                maxLines = 2,
-            )
-            // ★ 密钥绝不回显：输入框永远从空开始，"已设置"只是一个标记。
-            SettingExpandableTextItem(
-                title = "编码器 Key" + if (c.hasEmbedKey) "（已设置）" else "（未设置）",
-                value = vm.embedKeyDraft,
-                onValueChange = vm::updateEmbedKey,
-                placeholder = if (c.hasEmbedKey) "留空 = 不动" else "粘贴",
-                minLines = 1,
-                maxLines = 2,
-                secretVisible = false,
-            )
-            SettingExpandableTextItem(
-                title = "对话 Key" + if (c.hasChatKey) "（已设置）" else "（未设置）",
-                value = vm.chatKeyDraft,
-                onValueChange = vm::updateChatKey,
-                placeholder = if (c.hasChatKey) "留空 = 不动" else "粘贴",
-                minLines = 1,
-                maxLines = 2,
-            )
-            if (vm.settingsMsg.isNotBlank()) {
-                Text(
-                    text = vm.settingsMsg,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        actions = {
-            MaterialTintLiquidButton(
-                text = "保存",
-                onClick = { vm.saveCreds() },
-                modifier = Modifier.fillMaxWidth(),
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            )
-        },
-    )
-}
-
-// --------------------------------------------------------------------------- 提示词
-/**
- * 会话提示词的编辑器。
- *
- * ★ 默认值（`companion/prompts.py` 里的**冻结稿**）留在代码里，这里改的是**覆盖**：
- *   存盘只放"他改过的那一份" ⇒ 默认改了能传下去，改过的也能一键回到默认。
- * ★ 改提示词 = 改行为，所以界面上要能一眼看出"现在跑的不是冻结稿"。
- */
-@Composable
-private fun PromptDialog(vm: AppViewModel, onDismiss: () -> Unit) {
-    FlatDialog(
-        visible = true,
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "会话提示词",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        },
-        content = {
-            Text(
-                text = if (vm.promptEdited) "现在跑的是你改过的版本，不是默认稿。"
-                else "现在是默认稿。改了就等于改了它的行为。",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (vm.promptEdited) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            SettingExpandableTextItem(
-                title = "① 处境与用法",
-                value = vm.promptSys1,
-                onValueChange = vm::updatePromptSys1,
-                placeholder = "你在和用户自然对话…",
-                minLines = 3,
-                maxLines = 10,
-            )
-            SettingExpandableTextItem(
-                title = "② 分寸",
-                value = vm.promptSys2,
-                onValueChange = vm::updatePromptSys2,
-                placeholder = "- 不派活…",
-                minLines = 4,
-                maxLines = 14,
-            )
-            if (vm.settingsMsg.isNotBlank()) {
-                Text(
-                    text = vm.settingsMsg,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        actions = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MaterialTintLiquidButton(
-                    text = "恢复默认",
-                    onClick = { vm.restoreDefaultPrompt() },
-                    modifier = Modifier.weight(1f),
-                )
-                MaterialTintLiquidButton(
-                    text = "保存",
-                    onClick = { vm.savePrompt() },
-                    modifier = Modifier.weight(1f),
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                )
-            }
-        },
-    )
 }
 
 // --------------------------------------------------------------------------- 诊断

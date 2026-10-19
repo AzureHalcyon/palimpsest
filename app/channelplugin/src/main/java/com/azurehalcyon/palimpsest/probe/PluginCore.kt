@@ -52,7 +52,7 @@ class PluginCore private constructor(private val ctx: Context) {
      *   · 包装层（触发式）⇒ 底层触发**必须武装成功过**（`since_motion_minutes` 的病正是这条）；
      *   · ⛔ OEM 私有号段（`har_wakeup` / `activity_recognition` / `DrivingDetection` …）
      *     `values` 语义**无从解释**（官方文档没有这些类型）⇒ **不暴露**。
-     *     判据与真机数据见 `companion-data/待办清单.md` 第 21 轮。
+     *     判据与真机数据见当时的记录（不在本仓）第 21 轮。
      *
      * 判据在插件侧（`SensorRecorder.exposable`），宿主只是**照实转交** ⇒
      * 换成别的手机（没有 HAR、没有显著运动）时，暴露的那几条会**自动变少**，不用改宿主。

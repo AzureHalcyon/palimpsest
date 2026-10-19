@@ -27,7 +27,7 @@ import java.io.File
  *   而是**压成标量后交给 `SensorStore` 落盘**（三档：1min/1h/1day）。
  *   `fetch()` 只从存储**交桶**（`[t,mean,lo,hi,n]`），**趋势由宿主算**（见 `SensorStore` 的说明）。
  *
- * ★★ 2026-10-05 第二轮（五条真问题，判据都在 `companion-data/待办清单.md` 第 21 轮）：
+ * ★★ 2026-10-05 第二轮（五条真问题，判据都在当时的记录（不在本仓）第 21 轮）：
  *   ① **触发后必须重新武装** —— significant motion 是**一次性**的（官方原话 "then it disables
  *      itself"）⇒ 不重新武装，"显著运动"这条路**只响一次**。
  *   ② **同一个事件不许记两遍** —— 同一个 type 常有 wakeup / non-wakeup 两个实例，

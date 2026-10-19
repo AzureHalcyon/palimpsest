@@ -11,7 +11,7 @@ import com.azurehalcyon.palimpsest.plugin.Contract
  * 插件的**传输层（ContentProvider）**。
  *
  * ★★ 为什么传输不是 bound Service（2026-10-05 实测）：
- *   在这台设备（小米 14 / Android 16 / HyperOS）上，**跨 App 绑 Service 被系统挡住**：
+ *   在实测的那台 HyperOS 设备上，**跨 App 绑 Service 被系统挡住**：
  *     · `resolveService` 能解析到、`exported=true`、`enabled=true`、权限也没问题；
  *     · 但 `bindService()` **返回 false 且不抛异常**；
  *     · `am startservice` 直接报 `Error: app is in background uid null`；

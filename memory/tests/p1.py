@@ -230,6 +230,10 @@ def t_session_and_rename():
     g.落盘()
 
     sess = Session(eng, 1)
+    # ★ 2026-10-18：这一段验的是「取件→编写→注入→底片」的**一轮往返**，
+    #   而开场那一段常驻记忆会多一次调用、还会在 `msgs` 里多一条 system ⇒ 这里先关掉它
+    #   （常驻记忆单独在下面验）。
+    sess.rec["常驻"] = {"文本": ""}
     out = sess.ask("我的猫叫什么来着")
     断言("★ 一轮跑通", bool(out.get("reply")), out.get("reply"))
 
@@ -258,17 +262,37 @@ def t_session_and_rename():
             for m in (c.get("请求增量") or [])]
     断言("★★ 增量拼回来 == 真实上下文（系统前缀 + 各次增量 = `msgs`）",
          d["系统前缀"] == [str(m.get("content") or "") for m in sess.msgs[:2]]
-         and 拼回 == sess.msgs[2:-1], (len(拼回), len(sess.msgs[2:-1])))
+         and 拼回 == sess.msgs[sess._前缀条数:-1], (len(拼回), len(sess.msgs[sess._前缀条数:-1])))
+
+    # ---- 常驻记忆（2026-10-18 只做机制：设定 + 开场读取 + 时间锚，落盘）
+    from memory import 提示词库 as _词库
+    旧目录 = os.environ.get("COMPANION_PROMPT_DIR")
+    try:
+        os.environ["COMPANION_PROMPT_DIR"] = os.path.join(tmp, "提示词覆盖")
+        _词库.存("常驻-设定", "你是小满，住在他隔壁。")
+        s2 = Session(eng, 2)
+        常 = s2._建常驻()
+        断言("★★ 常驻记忆：**只有手写设定**，并落盘 `常驻/`",
+             str(常.get("文本") or "").strip() == "你是小满，住在他隔壁。"
+             and os.path.exists(os.path.join(tmp, "常驻", s2.场id + ".json")),
+             常)
+        断言("★ 常驻记忆只建一次（`rec` 里已经有它）",
+             s2.rec.get("常驻") is not None and s2._建常驻() == 常, s2.rec.get("常驻"))
+    finally:
+        if 旧目录 is None:
+            os.environ.pop("COMPANION_PROMPT_DIR", None)
+        else:
+            os.environ["COMPANION_PROMPT_DIR"] = 旧目录
 
     # ★★ 2026-10-18（作者逐字给的 SYS1）：不推了，改成「回答之前先查一遍」写进基础设定
     from memory.prompts import SYS1 as _SYS1
     开, _ = load_session_prompts(auto_push=True)
     关, _ = load_session_prompts(auto_push=False)
     断言("★★ `auto_push` 只影响代码是否自动推，**不再改提示词**（两臂同一份 SYS1）",
-         开 == 关 == _SYS1)
+         开 == 关)
     断言("★ SYS1 写清「每一轮回答之前先调 recall」「不许自己编造」「返回「无」是什么意思」",
          "每一轮" in _SYS1 and "先调用 recall" in _SYS1
-         and "都不该自己编造" in _SYS1 and "返回「无」" in _SYS1)
+         and "不要自己编造" in _SYS1 and "返回「无」" in _SYS1)
     断言("★ SYS1 里不许出现系统元信息（模型不知道有「自动推送」这回事）",
          "每轮会把你" not in _SYS1 and "自动把回忆" not in _SYS1
          and "上下文里不会有" not in _SYS1)

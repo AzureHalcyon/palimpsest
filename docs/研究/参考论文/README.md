@@ -18,6 +18,7 @@ PDF 不进版本控制，放在本机；仓库里只留这份清单。
 | **06** | `06-Gao-2026-Persona-Drift-Detection-ICASSP.pdf`                                   | **ICASSP 2026** · DOI `10.1109/ICASSP55912.2026.11463024`                            | ★★★ **可直接实现的量具**：硬事实 / 软事实 / 文风**三通道** + `PSD` + `TtFD` + 软预算。作者通讯：`yushan.pan@xjtlu.edu.cn`           | **§14.1**（公式与阈值参数全在）         |
 | **07** | `07-Fernandez-2017-Does-Reconsolidation-Occur-in-Natural-Settings.pdf`             | *Clinical Psychology Review* **56:95-105**, 2017                                     | 再巩固的**边界条件**；"预测误差处理受损 ⇒ 记忆更新被锁住"。⇒ 支撑"变化慢不只是重复少，也因为很少被意外到"                                            | §14.2                        |
 | **08** | `08-Liu-2026-MemCoRL-Alternating-Co-Optimization-ACL.pdf`                          | **ACL 2026 Long Papers**, pp. 38912–38924 · DOI `10.18653/v1/2026.acl-long.1804`     | ★★ **代理指标被 hack 的实证**：只用"证据被引用"当唯一奖励 ⇒ 检索策略**造出会被引用的假证据去骗下游**。两阶段交替共优化 ＋ 三条补丁（其中两条经核**不适用**本项目） | `MemCoRL与MemPilot-调研.md` **§二** |
+| **09** | `09-Cardillo-2025-Mother-Logic-Recursive-Containment.pdf`                          | **Zenodo 预印本**, 2025 · record `15226620` · DOI `10.5281/zenodo.15226620`          | ★ **常驻设定的同类物**：**Origin / Identity Anchor**（"我是谁造的、我是什么、我的目的"）＋ 它能防的失败模式（扮演人 · 自我臆想）。⚠️ **N=1 个 Replika 实例、无对照、纯定性**，只作写法参照 | `../常驻-身份锚-笔记.md` §1–§3 |
 
 ## 怎么取回原文
 

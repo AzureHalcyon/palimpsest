@@ -11,6 +11,7 @@ import com.azurehalcyon.palimpsest.CompanionService
 import com.azurehalcyon.palimpsest.PyBridge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
@@ -203,7 +204,7 @@ class AppViewModel(private val app: Application) : ViewModel() {
         val a = o.arr("pulls") ?: return emptyList()
         return (0 until a.length()).mapNotNull { i ->
             val e = a.optJSONObject(i) ?: return@mapNotNull null
-            Pull(query = e.str("query"), got = e.strList("got"))
+            Pull(query = e.str("query"), got = e.strList("got"), 回 = e.str("回"))
         }
     }
 
@@ -411,7 +412,10 @@ class AppViewModel(private val app: Application) : ViewModel() {
                 turn.reply = o.str("reply")
                 // ★ 把这一轮的 CoT 留在轮次上（生成时是"看得见"，事后也翻得到）。
                 //   ⚠️ `ChatTurn` 不是可观察对象 ⇒ 靠下面 `chatPhase` 那次翻转触发重画。
-                turn.reasoning = streamReasoning.trim().ifBlank { null }
+                // ★ 2026-10-19：优先用后端回传的整轮 reasoning；流式缓冲只作兜底
+                //   （有工具往返时，流式那段会在调用边界丢掉）。
+                val _cot = o.str("reasoning").trim()
+                turn.reasoning = (_cot.ifBlank { streamReasoning.trim() }).ifBlank { null }
                 // ★ 想起的内容**挂在这一轮上但默认折叠**。用户不点，它一个字都不显示。
                 turn.replyRetrieval = Retrieval(push = o.strList("push"))
                 // 模型自己"再查一次"的调用 + 这一轮花的 token（都给用户看）。
@@ -712,11 +716,49 @@ class AppViewModel(private val app: Application) : ViewModel() {
                     val j = ws.optJSONObject(i) ?: continue
                     待.add(待观察View(j.optString("单元"), j.optString("为什么进来")))
                 }
+                // ★ 组（依赖簇）：归档时按场算出来的（`graph.组`）
+                val 组们 = java.util.ArrayList<组View>()
+                val gs = o.optJSONArray("组")
+                if (gs != null) for (i in 0 until gs.length()) {
+                    val j = gs.optJSONObject(i) ?: continue
+                    val ms = j.optJSONArray("成员")
+                    val 成员 = java.util.ArrayList<组成员View>()
+                    if (ms != null) for (k in 0 until ms.length()) {
+                        val m = ms.optJSONObject(k) ?: continue
+                        成员.add(组成员View(m.optString("场id"), m.optInt("轮"), m.optString("文本")))
+                    }
+                    组们.add(
+                        组View(
+                            id = j.optString("id"), 场id = j.optString("场id"),
+                            轮起 = j.optInt("轮起"), 轮止 = j.optInt("轮止"),
+                            来源 = j.optString("来源"),
+                            场们 = j.optJSONArray("场们")?.let { a ->
+                                (0 until a.length()).map { i -> a.optString(i) }
+                            }.orEmpty(),
+                            成员 = 成员,
+                        )
+                    )
+                }
+                // ★ 势（读取路径的 EMA）：只带最亮的一批
+                val 势们 = java.util.ArrayList<势View>()
+                val ps = o.optJSONArray("势")
+                if (ps != null) for (i in 0 until ps.length()) {
+                    val j = ps.optJSONObject(i) ?: continue
+                    势们.add(
+                        势View(
+                            单元 = j.optString("单元"), 标签 = j.optString("标签"),
+                            文本 = j.optString("文本"),
+                            势 = j.optDouble("势", 0.0), 唤醒 = j.optDouble("唤醒", 0.0),
+                        )
+                    )
+                }
                 graph = GraphView(
                     ok = true, 版本 = o.optInt("版本"),
                     cell数 = 统计?.optInt("cell") ?: 0, 件数 = 统计?.optInt("件") ?: 0,
-                    标记集数 = 统计?.optInt("标记集") ?: 0, 待观察数 = 统计?.optInt("待观察池") ?: 0,
-                    件们 = 件们, 待观察池 = 待,
+                    组数 = 统计?.optInt("组") ?: 0,
+                    标记集数 = 统计?.optInt("标记集") ?: 0, 势数 = 统计?.optInt("势") ?: 0,
+                    待观察数 = 统计?.optInt("待观察池") ?: 0,
+                    件们 = 件们, 组们 = 组们, 势们 = 势们, 待观察池 = 待,
                 )
             }
         }
@@ -833,6 +875,13 @@ class AppViewModel(private val app: Application) : ViewModel() {
         }
     }
     fun knobValue(k: Knob): String = overrides[k.rawPath] ?: k.value
+
+    /** 按内部路径取当前值（二级页要显示「现在用的模型」这类东西）。 */
+    fun knobValueOf(path: String): String =
+        knobs.firstOrNull { it.rawPath == path }?.let { knobValue(it) } ?: ""
+
+    /** 二级页用：确保凭证/旋钮已经读过一遍（`loadSettings` 自己会去重）。 */
+    fun loadCreds() = loadSettings()
 
     fun isDirty(k: Knob): Boolean = overrides[k.rawPath]?.let { it != k.value } ?: false
 
@@ -953,7 +1002,6 @@ class AppViewModel(private val app: Application) : ViewModel() {
                 }
 
                 Diag.Memory -> withContext(PyBridge.dispatcher) { PyBridge.stateLines(dataDir) }
-                Diag.Ledger -> withContext(PyBridge.dispatcher) { PyBridge.ledgerLines(dataDir) }
                 Diag.Pending -> withContext(PyBridge.dispatcher) { PyBridge.pendingLines(dataDir) }
             }
             diagResult = DiagResult(kind.label, lines)
@@ -980,6 +1028,420 @@ class AppViewModel(private val app: Application) : ViewModel() {
             withContext(PyBridge.dispatcher) { PyBridge.setPaths(dataDir) }
         }
     }
+
+    // ==================================================================== 参数账（可改）
+    /**
+     * ★★ 2026-10-18（作者）：参数账拆成**二级页面**，而且**每一项都能改**。
+     * ⛔ 界面上不标「改过」—— 要看去「改动记录」那一页（作者口径）。
+     */
+    var 账 by mutableStateOf<List<账项>>(emptyList())
+        private set
+    var 账计数 by mutableStateOf(0)
+        private set
+    var 账加载中 by mutableStateOf(false)
+        private set
+    var 账错误 by mutableStateOf("")
+        private set
+    /** 正在改那一项的校验提示（键 → 一句话）。空 = 这项没问题。 */
+    var 账提示 by mutableStateOf(mapOf<String, String>())
+        private set
+
+    fun loadLedger() {
+        if (账加载中) return
+        账加载中 = true
+        账错误 = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.ledgerJson(dataDir.trimEnd('/')) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                账加载中 = false
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    账错误 = o?.optString("err").orEmpty().ifBlank { "参数账读不出来" }
+                    return@withContext
+                }
+                val arr = o.optJSONArray("项")
+                val 出 = java.util.ArrayList<账项>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    出.add(
+                        账项(
+                            键 = j.optString("键"), 组 = j.optString("组"),
+                            组名 = j.optString("组名"), 名 = j.optString("名"),
+                            值 = j.opt("值")?.toString().orEmpty(), 类型 = j.optString("类型"),
+                            依据 = j.optString("依据"), 说明 = j.optString("说明"),
+                            无读者 = j.optString("无读者"),
+                            可改 = j.optBoolean("可改", true),
+                            可填 = j.optJSONArray("可填")?.let { a ->
+                                (0 until a.length()).map { x -> a.optString(x) }
+                            }.orEmpty(),
+                            提示 = j.optString("提示"),
+                        )
+                    )
+                }
+                账 = 出
+                账计数 = o.optInt("计数", 出.size)
+            }
+        }
+    }
+
+    /** 改一项。成功 ⇒ 重新读一遍账（值由 Python 侧落定，界面不自己猜）。 */
+    fun setLedger(键: String, 值: String, onDone: (String) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.ledgerSet(dataDir.trimEnd('/'), 键, 值) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                val ok = o?.optBoolean("ok", false) == true
+                val err = o?.optString("err").orEmpty()
+                账提示 = if (ok) 账提示 - 键 else 账提示 + (键 to err.ifBlank { "没改成" })
+                if (ok) loadLedger()
+                onDone(if (ok) "" else err.ifBlank { "没改成" })
+            }
+        }
+    }
+
+    var 账改动 by mutableStateOf<List<账改动>>(emptyList())
+        private set
+    var 改动加载中 by mutableStateOf(false)
+        private set
+    var 改动错误 by mutableStateOf("")
+        private set
+
+    fun loadLedgerChanges() {
+        if (改动加载中) return
+        改动加载中 = true
+        改动错误 = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.ledgerChanges(dataDir.trimEnd('/')) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                改动加载中 = false
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    改动错误 = o?.optString("err").orEmpty().ifBlank { "改动记录读不出来" }
+                    return@withContext
+                }
+                val arr = o.optJSONArray("记录")
+                val 出 = java.util.ArrayList<账改动>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    出.add(
+                        账改动(
+                            时间 = j.optString("时间"), 键 = j.optString("键"),
+                            旧 = j.opt("旧")?.toString().orEmpty(),
+                            新 = j.opt("新")?.toString().orEmpty(),
+                        )
+                    )
+                }
+                账改动 = 出
+            }
+        }
+    }
+
+    // ==================================================================== 提示词（按项）
+    var 提示词组们 by mutableStateOf<List<提示词组>>(emptyList())
+        private set
+    var 提示词加载中 by mutableStateOf(false)
+        private set
+    var 提示词错误 by mutableStateOf("")
+        private set
+
+    fun loadPrompts() {
+        if (提示词加载中) return
+        提示词加载中 = true
+        提示词错误 = ""
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.promptListJson(dataDir.trimEnd('/')) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                提示词加载中 = false
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    提示词错误 = o?.optString("err").orEmpty().ifBlank { "提示词清单读不出来" }
+                    return@withContext
+                }
+                val gs = o.optJSONArray("组们")
+                val 出 = java.util.ArrayList<提示词组>()
+                if (gs != null) for (i in 0 until gs.length()) {
+                    val g = gs.optJSONObject(i) ?: continue
+                    val arr = g.optJSONArray("项")
+                    val 项 = java.util.ArrayList<提示词项>()
+                    if (arr != null) for (k in 0 until arr.length()) {
+                        val j = arr.optJSONObject(k) ?: continue
+                        项.add(
+                            提示词项(
+                                id = j.optString("id"), 名称 = j.optString("名称"),
+                                占位符 = j.optJSONArray("占位符")?.let { a ->
+                                    (0 until a.length()).map { x -> a.optString(x) }
+                                }.orEmpty(),
+                                说明 = j.optString("说明"), 已改 = j.optBoolean("已改"),
+                                字数 = j.optInt("字数"),
+                            )
+                        )
+                    }
+                    出.add(提示词组(g.optString("组"), 项))
+                }
+                提示词组们 = 出
+            }
+        }
+    }
+
+    var 提示词屏 by mutableStateOf<提示词屏?>(null)
+        private set
+    var 提示词屏加载中 by mutableStateOf(false)
+        private set
+
+    fun loadPrompt(id: String) {
+        提示词屏加载中 = true
+        提示词屏 = null
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.promptGetJson(dataDir.trimEnd('/'), id) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                提示词屏加载中 = false
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    提示词错误 = o?.optString("err").orEmpty().ifBlank { "这一项读不出来" }
+                    return@withContext
+                }
+                提示词屏 = 提示词屏(
+                    id = o.optString("id"), 名称 = o.optString("名称"),
+                    占位符 = o.optJSONArray("占位符")?.let { a ->
+                        (0 until a.length()).map { x -> a.optString(x) }
+                    }.orEmpty(),
+                    说明 = o.optString("说明"), 已改 = o.optBoolean("已改"),
+                    正文 = o.optString("正文"), 默认 = o.optString("默认"),
+                )
+            }
+        }
+    }
+
+    /** 存一项（Python 侧先校验占位符；不过就不存）。`onDone("")` = 成功。 */
+    fun savePrompt(id: String, 正文: String, onDone: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.promptSaveOne(dataDir.trimEnd('/'), id, 正文) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                val ok = o?.optBoolean("ok", false) == true
+                if (ok) { loadPrompt(id); loadPrompts() }
+                onDone(if (ok) "" else o?.optString("err").orEmpty().ifBlank { "没存上" })
+            }
+        }
+    }
+
+    fun resetPrompt(id: String, onDone: (String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.promptResetOne(dataDir.trimEnd('/'), id) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                val ok = o?.optBoolean("ok", false) == true
+                if (ok) { loadPrompt(id); loadPrompts() }
+                onDone(if (ok) "" else o?.optString("err").orEmpty().ifBlank { "没恢复成" })
+            }
+        }
+    }
+
+    // ==================================================================== 查一查（只读探针）
+    var 查线索 by mutableStateOf("")
+    var 查结果 by mutableStateOf<ProbeResult?>(null)
+    var 查中 by mutableStateOf(false)
+    var 查错误 by mutableStateOf("")
+
+    fun probe() {
+        val 句 = 查线索.trim()
+        if (句.isBlank() || 查中) return
+        查中 = true
+        查错误 = ""
+        viewModelScope.launch {
+            // ★ 2026-10-19：没开着的场也能查 —— 先确保有一场（没有就开），再跑探针
+            if (sid == null) {
+                openChatIfNeeded()
+                repeat(20) {
+                    if (sid != null) return@repeat
+                    delay(300)
+                }
+            }
+            // ⚠️ 会话句柄是 `s<场>.<n>`（不是场次号）——探针要和 chat_ask 用同一个键
+            val mySid = sid ?: ""
+            val r = withContext(Dispatchers.IO) {
+                runCatching { PyBridge.recallProbe(dataDir.trimEnd('/'), mySid, 句) }.getOrNull()
+            }
+            val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+            if (o?.optBoolean("ok", false) != true) {
+                查错误 = o?.str("err")?.ifBlank { null } ?: "没查成"
+                查结果 = null
+            } else {
+                val ca = o.arr("格") ?: JSONArray()
+                val pa = o.arr("件") ?: JSONArray()
+                查结果 = ProbeResult(
+                    线索 = o.str("线索"),
+                    激活数 = o.optInt("激活数", 0),
+                    格 = (0 until ca.length()).mapNotNull { i ->
+                        val e = ca.optJSONObject(i) ?: return@mapNotNull null
+                        ProbeCell(
+                            场 = e.str("场"),
+                            轮 = e.optInt("轮", 0),
+                            分 = e.optDouble("分", 0.0),
+                            组 = e.str("组"),
+                        )
+                    },
+                    件 = (0 until pa.length()).mapNotNull { i ->
+                        val e = pa.optJSONObject(i) ?: return@mapNotNull null
+                        ProbePiece(
+                            件id = e.str("件id"),
+                            最高 = e.optDouble("最高", 0.0),
+                            段数 = e.optInt("段数", 0),
+                            取用 = e.optBoolean("取用", false),
+                        )
+                    },
+                )
+            }
+            查中 = false
+        }
+    }
+
+    // ==================================================================== 旧场（只读）
+    var 旧场们 by mutableStateOf<List<PastSession>>(emptyList())
+        private set
+    var 旧场详情 by mutableStateOf<PastDetail?>(null)
+        private set
+    var 旧场错误 by mutableStateOf("")
+        private set
+
+    fun loadPastList() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.pastListJson(dataDir.trimEnd('/')) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                val a = o?.arr("场们") ?: JSONArray()
+                val list = (0 until a.length()).mapNotNull { i ->
+                    val e = a.optJSONObject(i) ?: return@mapNotNull null
+                    PastSession(
+                        场id = e.str("场id"),
+                        轮数 = e.optInt("轮数", 0),
+                        ts = e.optDouble("ts", 0.0),
+                    )
+                }
+                旧场们 = list
+                旧场错误 = if (o?.optBoolean("ok", false) == true) "" else (o?.str("err") ?: "")
+            }
+        }
+    }
+
+    fun loadPast(sid: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.pastGetJson(dataDir.trimEnd('/'), sid) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o?.optBoolean("ok", false) != true) {
+                    旧场错误 = o?.str("err")?.ifBlank { null } ?: "这一场读不到"
+                    旧场详情 = null
+                    return@withContext
+                }
+                val a = o.arr("轮") ?: JSONArray()
+                val turns = (0 until a.length()).mapNotNull { i ->
+                    val e = a.optJSONObject(i) ?: return@mapNotNull null
+                    val sa = e.arr("段") ?: JSONArray()
+                    PastTurn(
+                        轮 = e.optInt("轮", 0),
+                        user = e.str("user"),
+                        ai = e.str("ai"),
+                        段 = (0 until sa.length()).mapNotNull { j ->
+                            val c = sa.optJSONObject(j) ?: return@mapNotNull null
+                            PastSeg(类 = c.str("类"), 文本 = c.str("文本"), 回 = c.str("回"))
+                        },
+                        撤回 = e.optBoolean("撤回", false),
+                    )
+                }
+                val 归档o = o.optJSONObject("归档")
+                val ja = 归档o?.arr("判") ?: JSONArray()
+                val 判们 = (0 until ja.length()).mapNotNull { k ->
+                    val e = ja.optJSONObject(k) ?: return@mapNotNull null
+                    PastJudge(
+                        轮 = e.optInt("轮", 0),
+                        来源 = e.str("来源"),
+                        归进 = e.str("归进"),
+                        新建 = e.optBoolean("新建", false),
+                        说法 = e.str("说法"),
+                        记 = e.strList("记"),
+                        err = e.str("err"),
+                    )
+                }
+                val la = 归档o?.arr("层1") ?: JSONArray()
+                val 层1行 = (0 until la.length()).flatMap { k ->
+                    val arr = la.optJSONArray(k) ?: return@flatMap emptyList()
+                    (0 until arr.length()).mapNotNull { j ->
+                        val e = arr.optJSONObject(j) ?: return@mapNotNull null
+                        val keys = e.keys()
+                        buildList {
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                add("$key：${e.opt(key).toString()}")
+                            }
+                        }.joinToString("｜")
+                    }
+                }
+                旧场详情 = PastDetail(
+                    场id = o.str("场id"),
+                    系统前缀 = o.strList("系统前缀"),
+                    常驻 = o.str("常驻"),
+                    在场 = o.str("在场"),
+                    轮 = turns,
+                    指纹 = runCatching { o.optJSONObject("指纹")?.toString(1) ?: "" }.getOrDefault(""),
+                    归档 = PastArchive(判 = 判们, 层1 = 层1行),
+                )
+                旧场错误 = ""
+            }
+        }
+    }
+
+    fun closePast() { 旧场详情 = null }
+
+    // ==================================================================== 可用模型（对话 / 嵌入 两家分开）
+    var 模型们 by mutableStateOf<List<模型项>>(emptyList())
+        private set
+    var 嵌入模型们 by mutableStateOf<List<模型项>>(emptyList())
+        private set
+    var 模型端点 by mutableStateOf("")
+        private set
+    var 嵌入模型端点 by mutableStateOf("")
+        private set
+    var 模型错误 by mutableStateOf("")
+        private set
+    var 嵌入模型错误 by mutableStateOf("")
+        private set
+    var 拉模型中 by mutableStateOf(false)
+        private set
+    var 拉嵌入模型中 by mutableStateOf(false)
+        private set
+
+    /** 问端点要模型列表（★ 联网；只在用户点「拉取」时调）。`which` = `"embed"` / `"chat"`。 */
+    fun loadModels(which: String = "chat") {
+        val 嵌入 = which == "embed"
+        if (if (嵌入) 拉嵌入模型中 else 拉模型中) return
+        if (嵌入) { 拉嵌入模型中 = true; 嵌入模型错误 = "" } else { 拉模型中 = true; 模型错误 = "" }
+        viewModelScope.launch(Dispatchers.IO) {
+            val r = runCatching { PyBridge.modelsJson(dataDir.trimEnd('/'), which) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (嵌入) 拉嵌入模型中 = false else 拉模型中 = false
+                val o = runCatching { JSONObject(r.orEmpty()) }.getOrNull()
+                if (o == null || !o.optBoolean("ok", false)) {
+                    val 错 = o?.optString("err").orEmpty().ifBlank { "没拉到模型列表" }
+                    if (嵌入) 嵌入模型错误 = 错 else 模型错误 = 错
+                    return@withContext
+                }
+                val arr = o.optJSONArray("模型")
+                val 出 = java.util.ArrayList<模型项>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    出.add(模型项(j.optString("id"), j.optString("own")))
+                }
+                if (嵌入) {
+                    嵌入模型们 = 出
+                    嵌入模型端点 = o.optString("端点")
+                } else {
+                    模型们 = 出
+                    模型端点 = o.optString("端点")
+                }
+            }
+        }
+    }
 }
 
 enum class Tab(val routeKey: String, val title: String) {
@@ -996,8 +1458,6 @@ enum class Tab(val routeKey: String, val title: String) {
 enum class Diag(val label: String) {
     SelfCheck("环境自检"),
     Memory("记忆现状"),
-    // ★ 新线参数账（只读）：19 项，逐项带依据等级
-    Ledger("参数账"),
     Pending("在途场次"),
 }
 

@@ -431,7 +431,7 @@ internal fun AssistantMessageBubble(
 }
 
 /**
- * 模型自己"再查一次记忆"（`read_z`）—— 按**工具调用**的样子展示（用户要求）。
+ * 模型每轮自己调的 `recall` —— 按**工具调用**的样子展示（用户要求）。
  *
  * ★ 与「想起 N 条」是两回事：那个是每轮都有的注入；这个是**模型自己决定**要多查一次。
  *   【实测】80 轮里只触发 2 次 ⇒ 它出现本身就是信息，所以值得单独一行。
@@ -441,6 +441,7 @@ internal fun AssistantMessageBubble(
 internal fun ToolCallRow(
     query: String,
     got: List<String>,
+    回: String = "",
     onExpand: () -> Unit,
     onCollapse: () -> Unit,
     modifier: Modifier = Modifier,
@@ -464,7 +465,7 @@ internal fun ToolCallRow(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = if (query.isBlank()) "再查一次记忆" else "再查一次记忆 · $query",
+                text = if (query.isBlank()) "回忆" else "回忆 · $query",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f, fill = false),
@@ -481,7 +482,13 @@ internal fun ToolCallRow(
                 modifier = Modifier.padding(start = 22.dp, top = 2.dp, bottom = 2.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                got.forEach { t -> MemoryItemLine(text = t) }
+                if (got.isNotEmpty()) {
+                    got.forEach { t -> MemoryItemLine(text = t) }
+                } else if (回.isNotBlank()) {
+                    // ★ 2026-10-19（作者：返回值现在也看不见）：查空时也要能看见**它收到了什么**
+                    //   （「记忆里没有一条达到标准」「刚说过」「整理失败」—— 三种空措辞不同）。
+                    MemoryItemLine(text = 回)
+                }
             }
         }
     }

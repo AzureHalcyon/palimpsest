@@ -232,11 +232,56 @@ object PyBridge {
         chatUrl: String,
     ): String = json5("creds_save", dataDir, embedBaseUrl, embedApiKey, chatApiKey, chatUrl)
 
-    /** 会话前缀（system①②）的当前生效值 + 它是不是被改过 + 默认稿长什么样。 */    fun promptJson(dataDir: String): String = json1("prompt_json", dataDir)
+    /** 会话前缀（system①②）的当前生效值 + 它是不是被改过 + 默认稿长什么样。 */
+    fun promptJson(dataDir: String): String = json1("prompt_json", dataDir)
 
     /** 存提示词覆盖；两段都传空 = 恢复默认（Python 侧会删掉覆盖文件）。 */
     fun promptSave(dataDir: String, sys1: String, sys2: String): String =
         json3("prompt_save", dataDir, sys1, sys2)
+
+    // ---- 2026-10-18：参数账可改 / 提示词按项改 / 可用模型列表
+    /** 参数账全部 48 项（键 / 值 / 类型 / 依据 / 说明）。⛔ 只读地列，改走 [ledgerSet]。 */
+    fun ledgerJson(dataDir: String): String = json1("ledger_json", dataDir)
+
+    /** 改一项参数（Python 侧校验类型、写覆盖、立刻生效、记一行）。 */
+    fun ledgerSet(dataDir: String, key: String, value: String): String =
+        json3("ledger_set", dataDir, key, value)
+
+    /** 参数改动记录（新在前）。 */
+    fun ledgerChanges(dataDir: String, n: String = "200"): String = json2("ledger_changes", dataDir, n)
+
+    /** 全部提示词（按组）—— 只有元信息，正文单独取。 */
+    fun promptListJson(dataDir: String): String = json1("prompt_list_json", dataDir)
+
+    /** 一项提示词的正文（生效那份 + 默认那份）。 */
+    fun promptGetJson(dataDir: String, id: String): String = json2("prompt_get_json", dataDir, id)
+
+    // ------------------------------------------------------------------ 旧场（只读）
+    /** 已归档的场列表（新在前）。 */
+    fun pastListJson(dataDir: String): String = guard { glue().callAttr("past_list_json", dataDir).toString() }
+
+    /** 某一场的全貌：系统前缀 + 常驻 + 每轮（含 CoT / 回忆调用）。只读。 */
+    fun pastGetJson(dataDir: String, sid: String): String = json2("past_get_json", dataDir, sid)
+
+    /** 「查一查」（只读）：这句话去回想会亮什么。 */
+    fun recallProbe(dataDir: String, sid: String, clue: String): String =
+        json3("recall_probe", dataDir, sid, clue)
+
+    /** 存一项提示词（Python 侧校验占位符，不过就不存）。 */
+    fun promptSaveOne(dataDir: String, id: String, text: String): String =
+        json3("prompt_save_one", dataDir, id, text)
+
+    /** 删掉一项的覆盖 ⇒ 回到仓库默认。 */
+    fun promptResetOne(dataDir: String, id: String): String =
+        json2("prompt_reset_one", dataDir, id)
+
+    /**
+     * 问端点要可用模型（`GET {base}/models`）。
+     * `which` = `"embed"` 问嵌入那一家，`"chat"` 问对话那一家（★ 实测不是同一家）。
+     * ⚠️ 会联网，必须走 [dispatcher]。
+     */
+    fun modelsJson(dataDir: String, which: String = "chat"): String =
+        json2("models_json", dataDir, which)
 
     // ------------------------------------------------------------------ 内部
     /** ★ **它最近做了什么**（活动记录；**只读、不推送**）。 */

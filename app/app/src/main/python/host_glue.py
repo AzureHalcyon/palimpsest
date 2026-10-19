@@ -68,7 +68,12 @@ def selfcheck(data_dir: str = "") -> str:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)      # ⛔ 别在用户的数据目录里留垃圾
 
-    return "memory %s · numpy %s · %s" % (memory.__version__, numpy.__version__, 图行)
+    # ★ 2026-10-18（作者：自检说「图 2 个件 2 段」，而记忆现状是 0，看着像打架）：
+    #   那两个数说的是**临时样例**（`_自检/` 里现建、`finally` 里删掉），⛔ 不是她的记忆。
+    #   所以这句话必须写明来源；「你的记忆」由 `state_summary_lines` 单独报。
+    return ("memory %s · numpy %s · 临时样例：%s"
+            "（现建在 `_自检/`、跑完已删，不是你的记忆）"
+            % (memory.__version__, numpy.__version__, 图行))
 
 
 def python_info() -> Dict[str, str]:
@@ -544,13 +549,17 @@ def chat_open(data_dir: str) -> str:
 
 
 def graph_view_json(data_dir: str) -> str:
-    """★ **件浏览**（记忆页的新数据源，2026-10-17）：图里的件 + 它们锚住的原文。
+    """★ **记忆页的数据源**：图里的 **件 / 组** + 它们锚住的原文 + **势**（2026-10-18）。
 
-    ⛔ 旧的四档池子（短期/中期/悬着/长期）在新线里**不存在**了：那边的 `pool_view_json` 读的
-      是已经不再更新的旧池子。这一屏改成显示**件**：每个件 = 一组 cell（场id + 轮 + 原文区间），
-      强度来自标记集；点开能看到它由哪几段原文组成。
+    ⛔ 旧的四档池子（短期/中期/悬着/长期）在新线里**不存在**了。
 
-    ★ 只读：不建、不删、不改图。
+    三样东西各是什么（别混）：
+      · **件** —— 一批 cell 归在一起（图上那个节点-组），强度来自标记集；
+      · **组** —— **依赖簇**：一场里相邻、互相依赖的那几轮算出来的一段（`graph.组`）。
+        它是**算出来的缓存**，按场分；件是跨场的落点。
+      · **势** —— 读取路径的 EMA（`势.json`，⛔ 不在图里）。它**只引导传播**，不是准入。
+
+    ★ 只读：不建、不删、不改图（势也不在这里写）。
     """
     import json
     try:
@@ -566,26 +575,92 @@ def graph_view_json(data_dir: str) -> str:
                     读底片(os.path.join(cache_dir(data_dir), "底片", 场 + ".json"))
             return 切回原文(底片们[场] or {}, int(轮), 哪句)
 
+        # ★ 一次建索引：原来每一格都 `next(x for x in g.cell ...)` ⇒ 350 格 × 40 件 = O(n·m)，
+        #   手机上这一屏会卡在"读取中…"。按 id 查就只是一次字典。
+        按格 = {str(c.get("id")): c for c in (g.cell or [])}
+
+        def 格文本(c) -> str:
+            if not isinstance(c, dict):
+                return ""
+            return (取原文(c["场id"], c["轮"], "刺激")
+                    + 取原文(c["场id"], c["轮"], "她说")).strip()
+
         件们 = []
         for 件id, it in g.件.items():
             成员 = []
             for cid in (it.get("成员") or []):
-                c = next((x for x in g.cell if x["id"] == cid), None)
+                c = 按格.get(str(cid))
                 if c is None:
                     continue
-                文本 = (取原文(c["场id"], c["轮"], "刺激") + 取原文(c["场id"], c["轮"], "她说")).strip()
-                成员.append({"场id": c["场id"], "轮": int(c["轮"]), "文本": 文本,
+                成员.append({"场id": c["场id"], "轮": int(c["轮"]), "文本": 格文本(c),
                              "点亮": cid in (it.get("点亮") or [])})
             件们.append({"件id": 件id, "强度": float(g.标记集.get(件id, 0.0)),
                          "在标记集": 件id in g.标记集, "成员": 成员,
                          "代表": str(it.get("代表") or "")})
         件们.sort(key=lambda x: (-x["强度"], x["件id"]))
+
+        # ---- 组（依赖簇）：按场排，组内按轮
+        # ★ 两种形态（`graph.组`）：① 依赖簇（带 `场id` / `轮起` / `轮止`）；
+        #   ② 相似聚类（带 `场们`，**跨场**，没有轮区间 —— 那时按成员算 min/max，⛔ 显示成"第 0 轮"）。
+        组们 = []
+        for gr in (g.组 or []):
+            if not isinstance(gr, dict):
+                continue
+            成员 = []
+            轮们 = []
+            for cid in (gr.get("成员") or []):
+                c = 按格.get(str(cid))
+                if c is None:
+                    continue
+                轮们.append(int(c["轮"]))
+                成员.append({"id": str(cid), "场id": c["场id"], "轮": int(c["轮"]),
+                             "文本": 格文本(c)})
+            场们 = [str(x) for x in (gr.get("场们") or []) if str(x or "")]
+            if not 场们 and gr.get("场id"):
+                场们 = [str(gr.get("场id"))]
+            组们.append({"id": str(gr.get("id") or ""),
+                         "场id": str(gr.get("场id") or (场们[0] if 场们 else "")),
+                         "场们": 场们,
+                         "轮起": int(gr.get("轮起") or (min(轮们) if 轮们 else 0)),
+                         "轮止": int(gr.get("轮止") or (max(轮们) if 轮们 else 0)),
+                         "来源": str(gr.get("来源") or ""), "成员": 成员})
+        组们.sort(key=lambda x: (x["场id"], x["轮起"]))
+
+        # ---- 势（读取路径的 EMA）：只读 `势.json`，⛔ 不在这里更新
+        势表 = {}
+        try:
+            from memory import 势 as _势
+            势表 = _势.载入(os.path.join(cache_dir(data_dir), "势.json"))
+        except Exception:                                     # noqa: BLE001
+            势表 = {}
+        势们 = []
+        for 单元, v in (势表 or {}).items():
+            单元 = str(单元)
+            if 单元 in 按格:
+                c = 按格[单元]
+                标签 = "%s 第 %d 轮" % (c["场id"], int(c["轮"]))
+                文本 = 格文本(c)
+            elif 单元 in g.件:
+                c = 按格.get(str(g.件[单元].get("代表") or ""))
+                标签 = "件 · 它最亮的那一格"
+                文本 = 格文本(c)
+            else:
+                continue
+            势们.append({"单元": 单元, "标签": 标签, "文本": 文本,
+                        "势": round(float(v.get("势") or 0.0), 3),
+                        "唤醒": round(float(v.get("唤醒") or 0.0), 3)})
+        势们.sort(key=lambda x: (-x["势"], x["单元"]))
+
         return json.dumps({
             "ok": True,
             "版本": int(g.版本),
-            "统计": {"cell": len(g.cell), "件": len(g.件), "标记集": len(g.标记集),
+            "统计": {"cell": len(g.cell), "件": len(g.件), "组": len(组们),
+                     "标记集": len(g.标记集), "势": len(势表),
                      "待观察池": len(g.待观察池)},
             "件": 件们,
+            "组": 组们,
+            # 只带最亮的一批（30 条）—— 界面是给人扫一眼的，⛔ 把 400 条塞进手机
+            "势": 势们[:30],
             "待观察池": [{"单元": str(x.get("单元") or ""), "为什么进来": str(x.get("为什么进来") or "")}
                         for x in g.待观察池],
         }, ensure_ascii=False)
@@ -776,6 +851,8 @@ def chat_ask(data_dir: str, sid: str, text: str, sink=None) -> str:
         # ★ 注入冷却掩膜：这一轮被掩掉几条（刚说过的原文不再注入）。
         "cd_blocked": res.get("cd_blocked", 0),
         "pulls": res["pulls"],
+        # ★ 整轮的思考（界面事后要能翻到；⛔ 不进 msgs）
+        "reasoning": res.get("reasoning") or "",
         # ★★ 「那段回忆」：编写出的那一段 + 用了哪几条 + 编写版本/耗时（界面默认不显示，点开才看）
         #   ⛔ 2026-10-17：这里原来还兜了一层 `_sess()`（往"最近一轮"里回捞）——
         #     那个助手函数随旧池子一起删了，于是每次**答完之后**拼 JSON 都抛
@@ -1187,6 +1264,170 @@ def prompt_save(data_dir: str, sys1: str, sys2: str) -> str:
                           ensure_ascii=False)
 
 
+# --------------------------------------------------------------------------- 参数账（可改）
+def ledger_json(data_dir: str) -> str:
+    """**参数账**：每项的键 / 组 / 名 / 值 / 类型 / 依据 / 说明（⛔ 只读说明，值可改）。
+
+    ★ 2026-10-18（作者）：「参数改为每个都可以改」 —— 界面按这里给的 `类型` 出控件，
+      按 `依据` 出折叠说明；改走 `ledger_set`（校验 + 留一行改动记录）。
+    """
+    import json
+    try:
+        from memory import knobs as K
+        项 = []
+        for p, v in K.参数账().items():
+            组, 名 = p.split(".", 1)
+            值 = v.get("值")
+            类型 = ("bool" if isinstance(值, bool)
+                    else "int" if isinstance(值, int)
+                    else "float" if isinstance(值, float) else "str")
+            项.append({"键": p, "组": 组,
+                       # ★ 界面标签用 `显示名`/`组名`（⛔ 不把「②分项」「全场兜底」这种
+                       #   文档内部称谓直接摆给用户 —— 作者指出过）
+                       "组名": K.组界面名(组), "名": K.界面名(p),
+                       "值": 值, "类型": 类型,
+                       "可改": p not in K.不可改,
+                       "可填": list(K.可填.get(p) or []),
+                       "提示": K.提示.get(p) or "",
+                       "依据": str(v.get("依据") or ""),
+                       "说明": str(v.get("说明") or ""),
+                       "无读者": str(v.get("无读者") or "")})
+        return json.dumps({"ok": True, "计数": len(项), "项": 项}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+def ledger_set(data_dir: str, 键: str, 值: str) -> str:
+    """改一项参数：类型校验 → 写覆盖 → **立刻生效**（内存那格也改） → 记一行。"""
+    import json
+    try:
+        from memory import knobs
+        r = knobs.存覆盖(str(键 or ""), 值)
+        return json.dumps(r, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+def ledger_changes(data_dir: str, n: str = "200") -> str:
+    """**改动记录**（新在前）：谁在什么时候把哪一项从什么改成了什么。"""
+    import json
+    try:
+        from memory import knobs
+        return json.dumps({"ok": True, "记录": knobs.改动们(int(n))}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc),
+                           "记录": []}, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- 提示词（可改）
+def prompt_list_json(data_dir: str) -> str:
+    """全部提示词（按组）：id / 名称 / 占位符 / 说明 / 有没有改过 / 字数。"""
+    import json
+    try:
+        from memory import 提示词库
+        项 = 提示词库.列表()
+        组们 = []
+        for x in 项:
+            if not 组们 or 组们[-1]["组"] != x["组"]:
+                组们.append({"组": x["组"], "项": []})
+            组们[-1]["项"].append(x)
+        return json.dumps({"ok": True, "计数": len(项), "组们": 组们}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc),
+                           "组们": []}, ensure_ascii=False)
+
+
+def prompt_get_json(data_dir: str, id: str) -> str:
+    """一项的正文（生效那份）＋ 默认那份，给编辑页。"""
+    import json
+    try:
+        from memory import 提示词库
+        d = 提示词库.一屏(str(id))
+        return json.dumps(dict({"ok": True}, **d), ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+def prompt_save_one(data_dir: str, id: str, 正文: str) -> str:
+    """存一项：校验占位符 → 存覆盖。校验不过就不存（⛔ 把坏提示词塞进去等于悄悄改行为）。"""
+    import json
+    try:
+        from memory import 提示词库
+        验 = 提示词库.校验(str(id), str(正文))
+        if not 验.get("ok"):
+            return json.dumps({"ok": False, "err": str(验.get("err") or "校验没过")},
+                              ensure_ascii=False)
+        提示词库.存(str(id), str(正文))
+        return json.dumps({"ok": True}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+def prompt_reset_one(data_dir: str, id: str) -> str:
+    """删掉一项的覆盖 ⇒ 回到仓库默认。"""
+    import json
+    try:
+        from memory import 提示词库
+        return json.dumps({"ok": True, "恢复": 提示词库.恢复(str(id))}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- 可用模型
+def models_json(data_dir: str, which: str = "chat") -> str:
+    """问端点要**可用模型列表**（`GET {base}/models`）。
+
+    ★ 2026-10-18（作者）：「模型名称不该手填，应该给了地址之后程序去请求可用列表」。
+    ★ 实测阿里云 MaaS 兼容模式支持这个接口（200 + `data[].id`）。
+    ⚠️ 只在**用户点「拉取」那一下**调用；失败就把原因如实带回去，⛔ 不猜一个列表糊上。
+    """
+    import json
+    import socket
+    import urllib.request
+
+    def _仅v4(原, 主机, 端口, 家族=0, *a, **kw):
+        return 原(主机, 端口, socket.AF_INET, *a, **kw)
+
+    原 = socket.getaddrinfo
+    socket.getaddrinfo = lambda *a, **k: _仅v4(原, *a, **k)
+    try:
+        from memory.config import Credentials
+        c = Credentials.load()
+        # ★ 2026-10-18：**嵌入与对话不是同一家**（实测：嵌入走阿里云 MaaS、对话走 api.deepseek.com）。
+        #   所以「拉取可用模型」必须指明问哪一家，⛔ 不能拿一个端点凑两家。
+        if str(which or "chat").lower() == "embed":
+            base = str(c.embed_base_url or "").rstrip("/")
+            key = str(getattr(c, "embed_api_key", "") or "")
+        else:
+            base = str(c.chat_url or "").rstrip("/")
+            if base.endswith("/chat/completions"):
+                base = base[: -len("/chat/completions")]
+            key = str(getattr(c, "chat_api_key", "") or "") or str(getattr(c, "embed_api_key", "") or "")
+        if not base or not key:
+            return json.dumps({"ok": False, "err": "还没配地址或密钥"}, ensure_ascii=False)
+        请求 = urllib.request.Request(base + "/models",
+                                      headers={"Authorization": "Bearer " + key})
+        with urllib.request.urlopen(请求, timeout=25) as r:
+            数据 = json.loads(r.read().decode("utf-8"))
+        名们 = []
+        for x in (数据.get("data") or []):
+            if isinstance(x, dict) and x.get("id"):
+                名们.append({"id": str(x["id"]), "own": str(x.get("owned_by") or "")})
+        名们.sort(key=lambda x: x["id"])
+        return json.dumps({"ok": True, "模型": 名们, "端点": base + "/models"},
+                          ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc),
+                           "模型": []}, ensure_ascii=False)
+    finally:
+        socket.getaddrinfo = 原
+
+
 def creds_state_json(data_dir: str) -> str:
     """凭证的**状态**（**绝不回显密钥本身**）。
 
@@ -1203,9 +1444,18 @@ def creds_state_json(data_dir: str) -> str:
             return json.dumps({"ok": True, "configured": False,
                                "err": str(e).splitlines()[0], "path": _cred_path_str()},
                               ensure_ascii=False)
+        def _提示(k: str) -> str:
+            """密钥的**开头与结尾**（作者：对话密钥展示开头结尾）。⛔ 中间一律不给。"""
+            k = str(k or "")
+            if len(k) <= 8:
+                return "****" if k else ""
+            return k[:4] + "…" + k[-4:]
+
         return json.dumps({
             "ok": True, "configured": True, "path": _cred_path_str(),
             "embed_base_url": c.embed_base_url,
+            "embed_key_hint": _提示(getattr(c, "embed_api_key", "")),
+            "chat_key_hint": _提示(getattr(c, "chat_api_key", "")),
             "chat_url": c.chat_url,
             # 只给"有没有"，不给值
             "has_embed_key": bool(c.embed_api_key),
@@ -1251,3 +1501,149 @@ def creds_save(data_dir: str, embed_base_url: str, embed_api_key: str,
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
                           ensure_ascii=False)
+
+# --------------------------------------------------------------------------- 旧场（只读）
+def past_list_json(data_dir: str) -> str:
+    """列**已经归档**的场（`底片/` 下每一份 = 一场）。只读，⛔ 不碰图。"""
+    import json as _json
+    import os as _os
+    d = _os.path.join(str(data_dir), "cache", "底片")
+    出 = []
+    try:
+        for f in _os.listdir(d):
+            if f.endswith(".json.gz"):
+                sid = f[:-len(".json.gz")]
+            elif f.endswith(".json"):
+                sid = f[:-len(".json")]
+            else:
+                continue
+            full = _os.path.join(d, f)
+            try:
+                from memory.film import 读底片
+                底 = 读底片(full) or {}
+                轮数 = len(底.get("逐轮") or [])
+            except Exception:                              # noqa: BLE001
+                轮数 = 0
+            出.append({"场id": sid, "轮数": 轮数, "ts": _os.path.getmtime(full)})
+    except Exception:                                      # noqa: BLE001
+        pass
+    出.sort(key=lambda x: str(x.get("场id") or ""), reverse=True)
+    return _json.dumps({"ok": True, "场们": 出}, ensure_ascii=False)
+
+
+def past_get_json(data_dir: str, sid: str) -> str:
+    """读**一场**的全貌（只读）：系统前缀 + 常驻 + 每轮（含 CoT / 回忆调用）。"""
+    import json as _json
+    import os as _os
+    from memory.film import 读底片
+    目录 = _os.path.join(str(data_dir), "cache", "底片")
+    p = _os.path.join(目录, str(sid) + ".json.gz")
+    if not _os.path.exists(p):
+        p = _os.path.join(目录, str(sid) + ".json")
+    底 = 读底片(p)
+    if not 底:
+        return _json.dumps({"ok": False, "err": "这一场读不到（%s）" % sid}, ensure_ascii=False)
+    常驻 = ""
+    在场 = ""
+    try:
+        with open(_os.path.join(str(data_dir), "cache", "常驻", str(sid) + ".json"),
+                  encoding="utf-8") as f:
+            _常 = _json.load(f)
+            常驻 = str(_常.get("文本") or "")
+            在场 = str(_常.get("在场") or "")
+    except Exception:                                      # noqa: BLE001
+        常驻 = ""
+    轮们 = []
+    for it in (底.get("逐轮") or []):
+        # ★ 2026-10-19（作者：一次往返里正文之后还有思考，按时间顺序排，⛔ 合并）：
+        #   把每一次模型往返摊成**段**：思考 → 回忆（带回来的那段）→ 正文。
+        #   顺序 = 调用顺序；⛔ 不再"取最后一段思考"。
+        段们 = []
+        调用们 = list(it.get("调用") or [])
+        for i, c in enumerate(调用们):
+            输出 = (c or {}).get("输出") or {}
+            # ① 上一次调用的**工具结果**在本条的 `请求增量` 里（role=tool）⇒ 挂回上一次回忆
+            for m in ((c or {}).get("请求增量") or []):
+                if str((m or {}).get("role") or "") == "tool":
+                    回 = str((m or {}).get("content") or "")
+                    for 段 in reversed(段们):
+                        if 段.get("类") == "回忆" and "回" not in 段:
+                            段["回"] = 回
+                            break
+            # ② 这一次的思考
+            if 输出.get("reasoning"):
+                段们.append({"类": "思考", "文本": str(输出.get("reasoning"))})
+            # ③ 这一次发出的工具调用
+            for tc in (输出.get("tool_calls") or []):
+                段们.append({"类": "回忆",
+                             "文本": str((tc or {}).get("arguments") or "")})
+            # ④ 这一次的正文（最后一次的正文 = `她说`，不在段里重复）
+            if 输出.get("content") and i < len(调用们) - 1:
+                段们.append({"类": "正文", "文本": str(输出.get("content"))})
+        轮们.append({"轮": int(it.get("轮") or 0),
+                     "user": str(it.get("刺激") or ""),
+                     "ai": str(it.get("她说") or ""),
+                     "段": 段们,
+                     "撤回": bool(it.get("撤回")),
+                     "成本": it.get("成本") or {}})
+    return _json.dumps({
+        "ok": True, "场id": str(sid),
+        "系统前缀": [str(x) for x in (底.get("系统前缀") or [])],
+        # ⚠️ 「在场」那条**不进底片**（按作者定：常驻/在场算提示词）⇒ 这里没有；
+        #    要对照就去「提示词」页看当前值。
+        "常驻": 常驻,
+        "在场": 在场,
+        "轮": 轮们,
+        "指纹": 底.get("指纹") or {},
+        "手工标记": 底.get("手工标记") or [],
+        "归档": _旧场归档记录(str(data_dir), str(sid)),
+    }, ensure_ascii=False)
+
+
+def _旧场归档记录(data_dir: str, sid: str) -> Dict:
+    """这一场**归档流程**的落盘记录：`判/<场id>.jsonl`（每处判 + 自标）＋ `归档-层1.jsonl`。"""
+    import json as _json
+    import os as _os
+    判目录 = _os.path.join(str(data_dir), "cache", "判")
+    判们 = []
+    try:
+        with open(_os.path.join(判目录, sid + ".jsonl"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        判们.append(_json.loads(line))
+                    except Exception:                      # noqa: BLE001
+                        continue
+    except Exception:                                      # noqa: BLE001
+        pass
+    层1们 = []
+    try:
+        with open(_os.path.join(判目录, "归档-层1.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = _json.loads(line)
+                except Exception:                          # noqa: BLE001
+                    continue
+                if str(d.get("场id") or "") == sid:
+                    层1们.append(d.get("层1") or [])
+    except Exception:                                      # noqa: BLE001
+        pass
+    return {"判": 判们, "层1": 层1们}
+
+def recall_probe(data_dir: str, sid: str, clue: str) -> str:
+    """「查一查」（只读）：这句话去回想会亮什么 —— 全量激活 + 哪些件取了/没取。"""
+    import json
+    sess = _SESS.get(str(sid))
+    if sess is None:
+        return json.dumps({"ok": False, "err": "这一场不在了（先开一场）"}, ensure_ascii=False)
+    try:
+        r = sess.probe(str(clue or ""))
+    except Exception as exc:                               # noqa: BLE001
+        return json.dumps({"ok": False, "err": "%s: %s" % (type(exc).__name__, exc)},
+                          ensure_ascii=False)
+    return json.dumps(dict(r, ok=True), ensure_ascii=False)
+
