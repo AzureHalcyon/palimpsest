@@ -1249,6 +1249,33 @@ def _archive(chat, sink=None, record: Optional[dict] = None) -> dict:
     return stats
 
 
+def _backup_after_archive(data_dir: str, sid: str) -> str:
+    """归档落地后留一份 .psnap；备份失败不能影响归档。"""
+    try:
+        from memory_v2.store.snapshot import create
+        root = _data_dir(data_dir)
+        folder = os.path.join(root, "backups")
+        os.makedirs(folder, exist_ok=True)
+        stem = "%s-%s" % (str(sid), time.strftime("%Y%m%d-%H%M%S"))
+        path = os.path.join(folder, stem + ".psnap")
+        suffix = 1
+        while os.path.exists(path):
+            path = os.path.join(folder, "%s-%d.psnap" % (stem, suffix))
+            suffix += 1
+        create(root, path)
+        items = [os.path.join(folder, name) for name in os.listdir(folder)
+                 if name.endswith(".psnap")]
+        items.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+        for old in items[8:]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        return path
+    except Exception:
+        return ""
+
+
 def chat_finish(data_dir: str, sid: str, sink=None) -> str:
     try:
         with _LOCK:
@@ -1256,12 +1283,14 @@ def chat_finish(data_dir: str, sid: str, sink=None) -> str:
             if chat is None:
                 chat = _open(data_dir, _cred_path(data_dir), sid)
             stats = _archive(chat, sink)
+            _sink_call(sink, "phase", "归档：备份")
+            backup = _backup_after_archive(data_dir, sid)
             _drop_review(data_dir, sid)
             return _ok(failed=False,
                        facts_added=stats.get("edges", 0),
                        kept_added=stats.get("reinforced", 0),
                        dream_rounds=stats.get("seeds", 0),
-                       note="", stats=stats)
+                       note="", stats=stats, backup=backup)
     except Exception as exc:  # noqa: BLE001
         return _err("%s: %s" % (type(exc).__name__, exc), "finish")
 
@@ -1332,12 +1361,14 @@ def chat_archive_commit(data_dir: str, sid: str, sink=None) -> str:
                       "摘要": draft.get("摘要") or "",
                       "建议": state.get("said") or []}
             stats = _archive(chat, sink, record=record)
+            _sink_call(sink, "phase", "归档：备份")
+            backup = _backup_after_archive(data_dir, sid)
             _drop_review(data_dir, sid)
             return _ok(failed=False,
                        facts_added=stats.get("edges", 0),
                        kept_added=stats.get("reinforced", 0),
                        dream_rounds=stats.get("seeds", 0),
-                       note="", stats=stats)
+                       note="", stats=stats, backup=backup)
     except Exception as exc:  # noqa: BLE001
         return _err("%s: %s" % (type(exc).__name__, exc), "archive")
 
