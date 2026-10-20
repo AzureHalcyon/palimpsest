@@ -12,7 +12,8 @@ def _session_turns(data_dir: str, session: str) -> Dict[int, dict]:
     return {int(turn.get("turn")): turn for turn in SessionStore(data_dir, session).turns()}
 
 
-def event_segments(graph, data_dir: str, event_id: str) -> List[dict]:
+def event_segments(graph, data_dir: str, event_id: str,
+                   skip_session: str = "") -> List[dict]:
     event = graph.events.get(event_id)
     if not event:
         return []
@@ -20,6 +21,8 @@ def event_segments(graph, data_dir: str, event_id: str) -> List[dict]:
     out: List[dict] = []
     for segment in event.get("segments") or []:
         session = str(segment.get("session"))
+        if skip_session and session == skip_session:
+            continue
         if session not in cache:
             cache[session] = _session_turns(data_dir, session)
         turns = cache[session]

@@ -6,8 +6,8 @@
 
 ## 它是什么
 
-- **单位是事件**：模型在对话里用 `event` 工具标出“正在说哪件事”，每轮落一条状态；
-- **数据是网**：边只有 `属于`（包含）和 `相关`（关联）；一个父可以挂很多子，一个子也可以连别的根；
+- **单位是事件**：模型在对话里用 `event` 工具标出“正在说哪件事”，一轮可以标多个；
+- **数据是网**：节点之间只有关联，没有父子、没有栈；旧数据里的 `属于` 按关联读；
 - **读**：线索 → 种子 → 沿网和内容扩散 → 竞争 → 重建 → 编写；
 - **归档**：不再有模型判断，只剩每轮落盘 ＋ 一场结束跑一次重放（REM-SWS：不均匀激活、加强、全局衰减、剪枝）；
 - **进上下文的只有编写出来的那段**，原文和候选都不进。
@@ -64,10 +64,9 @@ python -m memory_v2 restore --snapshot memory.psnap --to <dir>
 ```
 
 `chat --replay-on-exit` 是封口开关：聊完自动跑一次重放，不自动对别的场跑。
-归档会把 live 图与向量写成下一版 `冻结/`；新场开场复制到 `状态/<场>.frozen/`，
-本场 recall 只读这份冻结副本。续聊会加载本场 frozen 和 `messages.json`（含 tool calls）。
-升级旧数据时先跑一次 `freeze`；旧未归档场没有开始副本和 messages 日志，续聊只能退回
-最新全局冻结，并按 `状态` 里的 user/assistant 重建，无法保证工具上下文逐字一致。
+归档会把 live 图与向量写成下一版 `冻结/`。本场 recall 直接读 live 图（含本场和旧场），
+不再依赖 `状态/<场>.frozen/`。续聊加载 `messages.json`（含 tool calls）；旧未归档场没有
+messages 日志时，按 `状态` 里的 user/assistant 重建，无法保证工具上下文逐字一致。
 
 ## 一句一发的入口
 
@@ -84,7 +83,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8765/send' `
   -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-返回 `reply`，外加这一轮的 `event` / `event_id` / `mode` / `stack`。
+返回 `reply`，外加这一轮的 `events`（多个事件）。
 `GET /state` 看整场；`POST /close` 跑这一场的重放。
 
 ## 测试
@@ -94,10 +93,9 @@ python memory_v2/tests/check.py
 python tools/文档/check_docs.py
 ```
 
-`check.py` 不需要网络和凭证，模型调用走脚本桩；覆盖事件模式、栈、多父、单轮一个事件、
-状态快照、读取、编写、重放、封口只读、回灌及其幂等、整体重建、坏图隔离、续聊接续与
-完整 messages 恢复、本场冻结/归档冻结、向量缓存维度、快照往返、event 必须最后、
-`mark` / `detach` / `unlink`、每轮催查、随机 id 与 `seq` 排序。
+`check.py` 不需要网络和凭证，模型调用走脚本桩；覆盖事件网络、一轮多事件、孤立节点、
+同名拒绝、读取、编写、重放、封口只读、坏图隔离、续聊与 messages 恢复、向量缓存维度、
+event 必须最后、随机 id 与 `seq` 排序。
 
 ## 目前的状态
 

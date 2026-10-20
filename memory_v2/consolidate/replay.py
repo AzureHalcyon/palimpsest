@@ -22,11 +22,14 @@ def _marked_seeds(graph, data_dir: str, session: str) -> list:
     seeds = set(graph.events_in_session(session))
     for turn in SessionStore(data_dir, session).turns():
         for call in turn.get("calls") or []:
-            claim = str(call.get("claim") or "")
-            if claim:
-                target = graph.resolve(claim)
+            for reference in (call.get("id"), call.get("event")):
+                target = graph.resolve(str(reference or ""))
                 if target:
                     seeds.add(target)
+        for event in turn.get("events") or []:
+            target = graph.resolve(str(event.get("id") or ""))
+            if target:
+                seeds.add(target)
         for item in turn.get("remember") or []:
             target = graph.resolve(str(item.get("id") or ""))
             if target:
@@ -47,7 +50,7 @@ def propagate(graph, seed: str, sets: dict, vectors: dict, hops: int = 2,
         nxt = {}
         for node, score in frontier.items():
             for other, edge in graph.neighbors(node):
-                weight = 0.9 if edge.get("relation") == "属于" else 0.6
+                weight = 0.85 if edge.get("source") == "model" else 0.6
                 gain = score * float(edge.get("strength", 0.2)) * weight
                 if gain <= 0.05:
                     continue
@@ -134,7 +137,7 @@ def consolidate(graph, data_dir: str, session: str, sample: int = 5,
 
     pruned = 0
     for key, edge in list(graph.edges.items()):
-        if edge.get("source") == "model" and edge.get("relation") == "属于":
+        if edge.get("source") == "model":
             edge["strength"] = max(MODEL_FLOOR, float(edge.get("strength", 0.0)) * DECAY)
             continue
         edge["strength"] = float(edge.get("strength", 0.0)) * DECAY

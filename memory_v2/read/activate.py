@@ -141,7 +141,7 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
                 for other, edge in graph.neighbors(node):
                     if other not in allowed:
                         continue
-                    weight = 0.9 if edge.get("relation") == "属于" else 0.6
+                    weight = 0.85 if edge.get("source") == "model" else 0.6
                     gain = score * float(edge.get("strength", 0.2)) * weight
                     if gain > 0.05:
                         nxt[other] = max(nxt.get(other, 0.0), gain)

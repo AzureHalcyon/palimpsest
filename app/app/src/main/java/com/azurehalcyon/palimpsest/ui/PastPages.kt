@@ -199,6 +199,13 @@ fun PastDetailPage(vm: AppViewModel, onBack: () -> Unit) {
                                     Text(sg.回, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
+                            "事件" -> {
+                                Text("事件 · ${sg.文本}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                if (sg.回.isNotBlank()) {
+                                    Text(sg.回, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            "正文" -> Unit
                             else -> {
                                 Text("她（这一轮中途）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                 Text(sg.文本, style = MaterialTheme.typography.bodySmall)

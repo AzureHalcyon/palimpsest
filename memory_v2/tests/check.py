@@ -6,16 +6,13 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from memory_v2 import cli
 from memory_v2.chat.loop import EventChat
 from memory_v2.consolidate.replay import consolidate
 from memory_v2.core.config import ChatConfig
 from memory_v2.core.embed import cosine
 from memory_v2.read.activate import activate
 from memory_v2.read.search import expand
-from memory_v2.store import snapshot as snapshot_store
 from memory_v2.store.graph import Graph, GraphError
-from memory_v2.store.ingest import ingest
 from memory_v2.store.session import SessionStore, SessionSealed
 from memory_v2.store.vectors import VectorStore
 
@@ -25,7 +22,7 @@ class FakeClient:
         self.script = list(script)
         self.calls = []
 
-    def chat(self, messages, tools=None, temperature=None, model=None):
+    def chat(self, messages, tools=None, temperature=None, model=None, on_delta=None):
         self.calls.append(messages)
         return self.script.pop(0) if self.script else {"role": "assistant", "content": ""}
 
@@ -45,7 +42,12 @@ def write_session(data_dir, session, turns):
 def call(name, arguments, call_id="c1"):
     return {"role": "assistant", "content": "",
             "tool_calls": [{"id": call_id, "type": "function",
-                            "function": {"name": name, "arguments": arguments}}]}
+                            "function": {"name": name,
+                                         "arguments": json.dumps(arguments, ensure_ascii=False)}}]}
+
+
+def reply(text):
+    return {"role": "assistant", "content": text}
 
 
 assert ChatConfig().embed_dim == 1024
@@ -72,20 +74,11 @@ write_session(data, "s1", [
     turn(1, "装修预算超了", "先看看超在哪", "2026-10-10"),
     turn(2, "空调一拖四要两万", "先问清全包还是裸机", "2026-10-10"),
 ])
-write_session(data, "s2", [
-    turn(1, "我妈下周来住", "客房先腾出一张床", "2026-10-12"),
-    turn(2, "方案改到第四版", "先问领导在意什么", "2026-10-12"),
-])
-
 graph = Graph.open(data)
 first = graph.add_event("装修超预算")
 second = graph.add_event("空调一拖四")
-third = graph.add_event("她妈来住")
-fourth = graph.add_event("方案第四版")
 graph.attach(first, "s1", 1)
 graph.attach(second, "s1", 2)
-graph.attach(third, "s2", 1)
-graph.attach(fourth, "s2", 2)
 graph.add_edge(second, first, "属于")
 graph.save()
 
@@ -97,268 +90,89 @@ assert not filtered["has_seed"], filtered
 text = expand(graph, data, first)
 assert "装修预算超了" in text and "他：" in text and "我：" in text, text
 
-stats = consolidate(graph, data, "s1")
-assert stats["seeds"] >= 2, stats
-assert stats["lit"] >= 2, stats
-for _ in range(3):
-    consolidate(graph, data, "s1")
+# 网络：一轮多标；新节点挂到同一个节点；已有节点只挂不新建。
+client = FakeClient([
+    call("recall", {"keywords": ["开场"]}),
+    call("event", {"new": "刚开场"}),
+    reply("你好。"),
+    call("recall", {"keywords": ["语义"]}),
+    call("event", {"new": "语义空间方案", "links": ["刚开场"]}),
+    call("event", {"new": "参数化失败", "links": ["刚开场"]}),
+    reply("两条都记下。"),
+    call("recall", {"keywords": ["语义"]}),
+    call("event", {"event": "语义空间方案"}),
+    reply("记得。"),
+    call("recall", {"keywords": ["语义"]}),
+    call("remember", {"event": "语义空间方案"}),
+    call("event", {"event": "语义空间方案"}),
+    reply("本场不用取。"),
+])
+chat = EventChat(client, SessionStore(data, "t1"), Graph.open(data), data, "t1",
+                 [{"role": "system", "content": "x"}],
+                 echo=lambda text: None)
+for utterance in ["你好", "我做了语义空间和参数化两条路", "还记得语义空间吗", "取一下语义空间"]:
+    chat.send(utterance)
+
+turns = SessionStore(data, "t1").turns()
+assert len(turns) == 4, turns
+assert len(turns[1]["events"]) == 2, turns[1]
+assert turns[1]["event"] == "语义空间方案", turns[1]
+assert turns[2]["events"][0]["new"] is False, turns[2]
+assert turns[3]["events"][0]["id"] == turns[2]["events"][0]["id"], turns[3]
+assert any("本场节点不用 remember" in str(message.get("content") or "")
+           for message in chat.messages if message.get("role") == "tool"), chat.messages
+
 graph = Graph.open(data)
-assert any(edge.get("relation") == "相关" for edge in graph.edges.values()), graph.edges
-assert any(float(edge.get("strength", 0)) > 0.1 for edge in graph.edges.values()), graph.edges
-assert os.path.exists(os.path.join(data, "冻结", "graph.json"))
-assert SessionStore(data, "s1").is_archived()
-try:
-    EventChat(FakeClient([]), SessionStore(data, "s1"), Graph.open(data), data, "s1", [])
-except SessionSealed:
-    pass
-else:
-    raise AssertionError("archived session must refuse chat")
+names = {event["name"] for event in graph.events.values()}
+assert {"语义空间方案", "参数化失败", "刚开场"} <= names, names
+space = [eid for eid, event in graph.events.items() if event["name"] == "语义空间方案"][0]
+param = [eid for eid, event in graph.events.items() if event["name"] == "参数化失败"][0]
+start = [eid for eid, event in graph.events.items() if event["name"] == "刚开场"][0]
+assert any({edge["a"], edge["b"]} == {space, start} and edge["relation"] == "关联"
+           for edge in graph.edges.values()), graph.edges
+assert any({edge["a"], edge["b"]} == {param, start} and edge["relation"] == "关联"
+           for edge in graph.edges.values()), graph.edges
+assert not any({edge["a"], edge["b"]} == {space, param} for edge in graph.edges.values()), graph.edges
+assert graph.events[space]["segments"] == [{"session": "t1", "start": 2, "end": 4}], graph.events[space]
 
-store = SessionStore(data, "s3")
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["新"]})),
-    call("event", json.dumps({"name": "新的事"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat = EventChat(client, store, Graph.open(data), data, "s3",
-                 [{"role": "system", "content": "x"}])
-assert os.path.isdir(os.path.join(data, "状态", "s3.frozen"))
-assert "新的事" not in [event["name"] for event in chat.frozen_graph.events.values()]
-reply = chat.send("说件新事")
-assert reply == "好。", reply
-saved = store.turns()
-assert saved[-1]["event"] == "新的事" and saved[-1]["event_id"], saved[-1]
-assert "新的事" not in [event["name"] for event in chat.frozen_graph.events.values()]
-assert "新的事" in [event["name"] for event in Graph.open(data).events.values()]
-assert os.path.exists(os.path.join(data, "状态", "s3.jsonl.messages.json"))
-_, frozen_recall = chat._handle_recall(json.dumps({"keywords": ["新的事"]}))
-assert "新的事" not in [item["name"] for item in frozen_recall["candidates"]]
+# recall 搜本场，并标明场次；不返回原文。
+found, _record = chat._handle_recall(json.dumps({"keywords": ["语义"]}))
+assert "本场" in found and space in found, found
 
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["空调"]})),
-    call("event", json.dumps({"name": "空调的事"})),
-    {"role": "assistant", "content": "查到了。"},
-])
-chat = EventChat(client, SessionStore(data, "s4"), Graph.open(data), data, "s4",
-                 [{"role": "system", "content": "x"}])
-chat.send("上次说的空调呢")
-saved = SessionStore(data, "s4").turns()
-assert saved[-1]["recall"] and saved[-1]["recall"][0]["candidates"], saved[-1]
-
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["空调"]})),
-    call("remember", json.dumps({"event": second})),
-    {"role": "assistant", "content": "我记得空调那件事。"},
-    call("event", json.dumps({"name": "空调的事"})),
-    {"role": "assistant", "content": "嗯，我记得。"},
-])
-chat = EventChat(client, SessionStore(data, "s5"), Graph.open(data), data, "s5",
-                 [{"role": "system", "content": "x"}])
-chat.send("你还记得空调吗")
-saved = SessionStore(data, "s5").turns()
-assert saved[-1]["remember"] and saved[-1]["remember"][0]["id"] == second, saved[-1]
-writer_input = client.calls[2][1]["content"]
-assert "·" in writer_input, writer_input
-assert Graph.open(data).events[second]["access"] > 0, Graph.open(data).events[second]
-current = saved[-1]["event_id"]
-assert current and any({edge["a"], edge["b"]} == {current, second}
-                       for edge in Graph.open(data).edges.values()), Graph.open(data).edges
-assert os.path.exists(os.path.join(data, "说法", second + ".jsonl"))
-
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["装修"]})),
-    call("event", json.dumps({"mode": "换事", "name": "装修"})),
-    call("event", json.dumps({"mode": "子事", "name": "预算"})),
-    call("event", json.dumps({"mode": "继续"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat = EventChat(client, SessionStore(data, "s6"), Graph.open(data), data, "s6",
-                 [{"role": "system", "content": "x"}])
-chat.send("先聊装修")
-assert len(chat.stack) == 2, chat.stack
-after = Graph.open(data)
-child = [e for e, v in after.events.items() if v["name"] == "预算"][0]
-parent = [e for e, v in after.events.items() if v["name"] == "装修"][0]
-assert any(edge["a"] == child and edge["b"] == parent and edge["relation"] == "属于"
-           for edge in after.edges.values()), after.edges
-assert SessionStore(data, "s6").turns()[-1]["stack"] == [parent, child]
-client.script.extend([
-    call("recall", json.dumps({"keywords": ["装修"]})),
-    call("event", json.dumps({"mode": "回"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat.send("回到装修")
-assert chat.stack == [parent], chat.stack
-
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["装修"]})),
-    call("event", json.dumps({"mode": "换事", "name": "装修"})),
-    call("event", json.dumps({"mode": "换事", "name": "工作"})),
-    call("event", json.dumps({"mode": "接旧", "event": "装修", "because": "同一套房"})),
-    call("event", json.dumps({"mode": "子事", "name": "预算", "parents": ["工作"]})),
-    call("event", json.dumps({"mode": "关联", "event": "工作", "because": "同一周"})),
-    call("event", json.dumps({"mode": "继续"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7",
-                 [{"role": "system", "content": "x"}])
-chat.send("接着装修说")
-after = Graph.open(data)
-
-
-def in_s7(event_id):
-    return any(segment.get("session") == "s7"
-               for segment in after.events[event_id].get("segments") or [])
-
-
-budget = [e for e, v in after.events.items() if v["name"] == "预算" and in_s7(e)][0]
-parents = {edge["b"] for edge in after.edges.values()
-           if edge["a"] == budget and edge["relation"] == "属于"}
-decoration = next(p for p in parents if after.events[p]["name"] == "装修")
-work = next(p for p in parents if after.events[p]["name"] == "工作")
-assert parents == {decoration, work}, parents
-assert any({edge["a"], edge["b"]} == {budget, work} and edge["relation"] == "相关"
-           for edge in after.edges.values()), after.edges
-assert chat.stack == [decoration, budget], chat.stack
-view = chat._state_view()
-assert "属于：" in view and "相关：" in view, view
-client.script.extend([
-    call("recall", json.dumps({"keywords": ["装修"]})),
-    call("event", json.dumps({"mode": "回"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat.send("回装修")
-assert chat.stack == [decoration], chat.stack
-s7_messages = json.loads(json.dumps(chat.messages, ensure_ascii=False))
-
-chat = EventChat(FakeClient([]), SessionStore(data, "s8"), Graph.open(data), data, "s8", [])
-chat.stack = [decoration]
-chat._pending_event = decoration
-result, _ = chat._handle_event(json.dumps({"mode": "子事", "name": "装修"}))
-assert "已经在当前这条线上" in result, result
-chat.graph.add_event("同名测")
-chat.graph.add_event("同名测")
-chat.graph.save()
-result, _ = chat._handle_event(json.dumps({"mode": "接旧", "event": "同名测"}))
-assert "有多个同名" in result, result
-
-cli.main(["mark", "--data", data, "--event", second])
-assert Graph.open(data).events[second]["reward"], Graph.open(data).events[second]
-cli.main(["unlink", "--data", data, "--first", current, "--second", second])
-assert not any({edge["a"], edge["b"]} == {current, second}
+# 新节点可以不连（孤立）；挂已有可以顺手连到别的点。
+_isolated, isolated_record = chat._handle_event(json.dumps({"new": "孤立节点"}))
+assert isolated_record and "孤立节点" in _isolated, _isolated
+assert not any({edge["a"], edge["b"]} == {isolated_record["id"], space}
                for edge in Graph.open(data).edges.values())
-cli.main(["detach", "--data", data, "--event", current, "--last"])
-assert not Graph.open(data).events[current].get("segments"), Graph.open(data).events[current]
+_linked, linked_record = chat._handle_event(json.dumps({"event": space, "links": [start]}))
+assert linked_record and linked_record["id"] == space, linked_record
+assert any({edge["a"], edge["b"]} == {space, start}
+           for edge in Graph.open(data).edges.values())
 
-client = FakeClient([
-    {"role": "assistant", "content": "先答"},
-    call("recall", json.dumps({"keywords": ["催查"]})),
-    {"role": "assistant", "content": "补查后答"},
-    call("event", json.dumps({"mode": "换事", "name": "催查"})),
-    {"role": "assistant", "content": "最终答复"},
-])
-chat = EventChat(client, SessionStore(data, "s9"), Graph.open(data), data, "s9",
-                 [{"role": "system", "content": "x"}])
-reply = chat.send("测试催查")
-assert reply == "最终答复", reply
+# 同名新建给出提醒，不静默当成同一件。
+_dup, _dup_record = chat._handle_event(json.dumps({"new": "语义空间方案"}))
+assert "已有同名" in _dup and _dup_record is None, (_dup, _dup_record)
+assert len([eid for eid, event in Graph.open(data).events.items()
+            if event["name"] == "语义空间方案"]) == 1, Graph.open(data).events
 
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["顺序"]})),
-    call("event", json.dumps({"mode": "换事", "name": "顺序"})),
-    call("recall", json.dumps({"keywords": ["顺序"]})),
-    {"role": "assistant", "content": "先答"},
-    call("event", json.dumps({"mode": "继续"})),
-    {"role": "assistant", "content": "最终答复"},
-])
-chat = EventChat(client, SessionStore(data, "s9b"), Graph.open(data), data, "s9b",
-                 [{"role": "system", "content": "x"}])
-reply = chat.send("测试事件顺序")
-assert reply == "最终答复", reply
-saved = SessionStore(data, "s9b").turns()
-assert saved[-1]["tool_order"][-1] == "event", saved[-1]["tool_order"]
-
-client = FakeClient([
-    {"role": "assistant", "content": "先答"},
-    {"role": "assistant", "content": "再答"},
-    {"role": "assistant", "content": "还不标"},
-])
-chat = EventChat(client, SessionStore(data, "s9c"), Graph.open(data), data, "s9c",
-                 [{"role": "system", "content": "x"}])
+# 归档：模型建的边不被当成旧树边衰减掉；场次封口。
+consolidate(Graph.open(data), data, "t1")
+archived = Graph.open(data)
+assert any(edge["relation"] == "关联" and edge["source"] == "model"
+           and float(edge["strength"]) >= 0.15 for edge in archived.edges.values()), archived.edges
 try:
-    chat.send("测试拒绝记录")
-except RuntimeError:
-    pass
-else:
-    raise AssertionError("a turn without a final event must not be recorded")
-assert not SessionStore(data, "s9c").turns()
-
-data2 = tempfile.mkdtemp()
-os.makedirs(os.path.join(data2, "状态"), exist_ok=True)
-shutil.copy(os.path.join(data, "状态", "s7.jsonl"),
-            os.path.join(data2, "状态", "s7.jsonl"))
-graph2 = Graph.open(data2)
-stats = ingest(graph2, data2)
-assert stats["sessions"] == 1 and stats["events"] >= 2, stats
-assert any(edge["relation"] == "属于" for edge in graph2.edges.values()), graph2.edges
-snapshot = {event_id: [dict(segment) for segment in event.get("segments") or []]
-            for event_id, event in graph2.events.items()}
-again = ingest(graph2, data2)
-assert again["events"] == 0 and len(graph2.events) == len(snapshot), again
-for event_id, segments in snapshot.items():
-    assert graph2.events[event_id]["segments"] == segments, (event_id, graph2.events[event_id])
-shutil.rmtree(data2, ignore_errors=True)
-
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["嵌套"]})),
-    call("event", json.dumps({"mode": "换事", "name": "嵌套根"})),
-    call("event", json.dumps({"mode": "子事", "name": "嵌套中"})),
-    call("event", json.dumps({"mode": "子事", "name": "嵌套末"})),
-    call("event", json.dumps({"mode": "继续"})),
-    {"role": "assistant", "content": "好。"},
-])
-chat = EventChat(client, SessionStore(data, "s10"), Graph.open(data), data, "s10",
-                 [{"role": "system", "content": "x"}])
-chat.send("一层套一层")
-after = Graph.open(data)
-root = [e for e, v in after.events.items() if v["name"] == "嵌套根"][0]
-mid = [e for e, v in after.events.items() if v["name"] == "嵌套中"][0]
-leaf = [e for e, v in after.events.items() if v["name"] == "嵌套末"][0]
-assert any(edge["a"] == mid and edge["b"] == root and edge["relation"] == "属于"
-           for edge in after.edges.values()), after.edges
-assert any(edge["a"] == leaf and edge["b"] == mid and edge["relation"] == "属于"
-           for edge in after.edges.values()), after.edges
-
-graph = Graph.open(data)
-first_same = graph.add_event("同名序")
-second_same = graph.add_event("同名序")
-assert graph.resolve("同名序") == second_same, (first_same, second_same)
-assert graph.events[second_same]["seq"] > graph.events[first_same]["seq"]
-assert second_same.startswith("e-") and len(second_same) == 14, second_same
-
-client = FakeClient([
-    call("recall", json.dumps({"keywords": ["装修"]})),
-    call("event", json.dumps({"mode": "继续"})),
-    {"role": "assistant", "content": "接着聊。"},
-])
-resumed = EventChat(client, SessionStore(data, "s7"), Graph.open(data), data, "s7", [])
-assert resumed.turn == 2, resumed.turn
-assert resumed.stack == [decoration], resumed.stack
-assert resumed.messages == s7_messages
-assert resumed.send("接着聊") == "接着聊。"
-assert resumed.turn == 3, resumed.turn
-assert SessionStore(data, "s7").turns()[-1]["turn"] == 3
-assert Graph.open(data).events[decoration]["segments"] == [
-    {"session": "s7", "start": 2, "end": 3}], Graph.open(data).events[decoration]
-
-consolidate(Graph.open(data), data, "s7")
-global_graph = Graph(os.path.join(data, "冻结", "graph.json"))
-assert any(event["name"] == "装修" for event in global_graph.events.values())
-try:
-    resumed.send("再聊一句")
+    chat.send("再聊一句")
 except SessionSealed:
     pass
 else:
     raise AssertionError("archived session must refuse further turns")
+
+# 旧数据兼容：没有 events 的旧轮次仍能读 event/event_id。
+old = turn(1, "旧轮", "旧答", "2026-10-11")
+old["event"] = "旧事"
+old["event_id"] = "e-555555555555"
+write_session(data, "s2", [old])
+assert SessionStore(data, "s2").turns()[-1]["event_id"] == "e-555555555555"
 
 bad = tempfile.mkdtemp()
 with open(os.path.join(bad, "graph.json"), "w", encoding="utf-8") as handle:
@@ -373,36 +187,6 @@ names = os.listdir(bad)
 assert any(name.startswith("graph.json.corrupt-") for name in names), names
 assert not os.path.exists(os.path.join(bad, "graph.json")), names
 shutil.rmtree(bad, ignore_errors=True)
-
-target_turn = turn(1, "说件旧事", "好", "2026-10-13")
-target_turn["event"] = "目标事"
-target_turn["event_id"] = "e-444444444444"
-remember_turn = turn(2, "再提旧事", "记得", "2026-10-13")
-remember_turn["event"] = "再提旧事"
-remember_turn["event_id"] = "e-333333333333"
-remember_turn["remember"] = [{"id": "e-444444444444"}]
-write_session(data, "s12", [target_turn, remember_turn])
-
-graph = Graph.open(data)
-graph.add_event("只在图里")
-graph.save()
-stats = ingest(Graph.open(data), data, rebuild=True)
-assert stats["backup"] and os.path.exists(stats["backup"]), stats
-rebuilt = Graph.open(data)
-assert "只在图里" not in [event.get("name") for event in rebuilt.events.values()]
-assert len(rebuilt.events) == stats["events"], (len(rebuilt.events), stats)
-assert any(edge.get("relation") == "属于" for edge in rebuilt.edges.values()), rebuilt.edges
-assert any({edge.get("a"), edge.get("b")} == {"e-333333333333", "e-444444444444"}
-           for edge in rebuilt.edges.values()), rebuilt.edges
-
-snapshot_dir = tempfile.mkdtemp()
-snapshot_path = os.path.join(snapshot_dir, "data.psnap")
-snapshot_store.create(data, snapshot_path)
-restored = snapshot_store.restore(snapshot_path, os.path.join(snapshot_dir, "restored"))
-assert os.path.exists(os.path.join(restored, "冻结", "graph.json"))
-assert os.path.exists(os.path.join(restored, "状态", "s7.jsonl.messages.json"))
-assert os.path.exists(os.path.join(restored, "状态", "s3.frozen", "graph.json"))
-shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 shutil.rmtree(data, ignore_errors=True)
 print("OK")

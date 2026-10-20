@@ -867,6 +867,8 @@ def _push_from_turn(turn: dict) -> List[str]:
     out = []
     for recall in turn.get("recall") or []:
         for item in recall.get("candidates") or []:
+            if item.get("current"):
+                continue
             text = "%s %s" % (item.get("id") or "", item.get("name") or "")
             if text.strip() and text not in out:
                 out.append(text.strip())
@@ -884,12 +886,16 @@ def _pulls_from_turn(turn: dict) -> List[dict]:
         event_id = str(call.get("id") or "")
         if not event_id:
             continue
-        mode = str(call.get("mode") or "")
         name = str(call.get("name") or "")
-        query = " ".join(item for item in ("event", mode, name) if item)
+        is_new = bool(call.get("new"))
+        links = [str(item) for item in
+                 (call.get("link_names") or call.get("links") or []) if str(item)]
+        query = ("新节点 " if is_new else "挂 ") + name
         got = [" ".join(item for item in (event_id, name) if item)]
+        if links:
+            got.append("连 " + "、".join(links))
         out.append({"query": query, "got": [g for g in got if g],
-                    "回": str(call.get("because") or "记下"), "kind": "事件"})
+                    "回": "新节点" if is_new else "挂已有", "kind": "事件"})
     for item in turn.get("remember") or []:
         target = str(item.get("id") or "")
         if target:
@@ -906,9 +912,10 @@ def _turn_json(turn: dict) -> dict:
         "reasoning": str(turn.get("reasoning") or ""),
         "push": _push_from_turn(turn),
         "push_n": len(_push_from_turn(turn)),
-        "件数": len(turn.get("stack") or []),
+        "件数": len(turn.get("events") or []),
         "usage": {str(k): _as_int(v) for k, v in (turn.get("usage") or {}).items()},
         "pulls": _pulls_from_turn(turn),
+        "events": turn.get("events") or [],
     }
 
 
@@ -943,7 +950,7 @@ def send(data_dir: str, sid: str, text: str, sink=None) -> str:
             return _ok(
                 reply=reply,
                 push=_push_from_turn(turn),
-                k=len(turn.get("stack") or []),
+                k=len(turn.get("events") or []),
                 cd_blocked=0,
                 pulls=_pulls_from_turn(turn),
                 reasoning=reasoning,
@@ -952,6 +959,7 @@ def send(data_dir: str, sid: str, text: str, sink=None) -> str:
                 event=str(turn.get("event") or ""),
                 event_id=str(turn.get("event_id") or ""),
                 mode=str(turn.get("mode") or ""),
+                events=turn.get("events") or [],
             )
     except Exception as exc:  # noqa: BLE001
         with _LOCK:
@@ -1040,11 +1048,6 @@ def chat_withdraw(data_dir: str, sid: str) -> str:
             chat.store.save_messages(messages)
             chat.messages = messages
             chat.turn = max(0, _as_int(last.get("turn")) - 1)
-            previous = turns[-2] if len(turns) > 1 else {}
-            chat.stack = [str(item) for item in (previous.get("stack") or [])
-                          if str(item) in graph.events]
-            chat.last_event_id = (str(previous.get("event_id") or "") or None)
-            chat._pending_event = None
             return _ok(user=str(last.get("user") or ""),
                        ai=str(last.get("assistant") or ""),
                        turns_left=len(turns) - 1)
@@ -1115,16 +1118,26 @@ def _build_draft(chat, state: dict) -> dict:
     names = []
     for turn in turns:
         number = _as_int(turn.get("turn"))
-        event_id = str(turn.get("event_id") or "")
-        name = str(turn.get("event") or "")
-        skipped = number in drop_turns or event_id in drop_events
-        if name and name not in names:
-            names.append(name)
+        calls = [call for call in (turn.get("calls") or []) if call.get("id")]
+        turn_names = []
+        for call in calls:
+            label = str(call.get("name") or "")
+            if label and label not in turn_names:
+                turn_names.append(label)
+        if not turn_names and turn.get("event"):
+            turn_names = [str(turn.get("event"))]
+        ids = [str(call.get("id") or "") for call in calls] or [
+            str(turn.get("event_id") or "")]
+        skipped = number in drop_turns or any(item in drop_events for item in ids)
+        for label in turn_names:
+            if label and label not in names:
+                names.append(label)
+        label = "、".join(turn_names)
         items.append({
             "轮": number,
-            "归进": name,
-            "新建": False,
-            "说法": ("这一轮记在「%s」" % name) if name else "这一轮没有事件",
+            "归进": label,
+            "新建": any(bool(call.get("new")) for call in calls),
+            "说法": ("这一轮记在「%s」" % label) if label else "这一轮没有事件",
             "跳过": skipped,
         })
     summary = "这一场 %d 轮，涉及 %d 件事：%s。" % (
@@ -1416,10 +1429,15 @@ def past_get_json(data_dir: str, sid: str) -> str:
             for item in turn.get("remember") or []:
                 segments.append({"类": "回忆", "文本": "remember",
                                  "回": str(item.get("id") or "")})
-            if turn.get("event"):
+            events = turn.get("events") or []
+            if events:
+                for event in events:
+                    segments.append({"类": "事件",
+                                     "文本": str(event.get("name") or ""),
+                                     "回": str(event.get("id") or "")})
+            elif turn.get("event"):
                 segments.append({"类": "事件", "文本": str(turn.get("event")),
                                  "回": str(turn.get("event_id") or "")})
-            segments.append({"类": "正文", "文本": str(turn.get("assistant") or ""), "回": ""})
             out_turns.append({
                 "轮": _as_int(turn.get("turn")),
                 "user": str(turn.get("user") or ""),
@@ -1451,14 +1469,13 @@ def recall_probe(data_dir: str, sid: str, clue: str) -> str:
         from memory_v2.read.activate import activate
         with _LOCK:
             chat = _chat_for(data_dir, sid)
-            result = activate(chat.frozen_graph, data_dir, [str(clue or "")],
-                              embedder=chat.embedder,
-                              vector_store=chat.frozen_vectors)
+            result = activate(chat.graph, data_dir, [str(clue or "")],
+                              embedder=chat.embedder)
         items = result.get("candidates") or []
         pieces = []
         for item in items:
             event_id = str(item.get("id") or "")
-            event = chat.frozen_graph.events.get(event_id) or {}
+            event = chat.graph.events.get(event_id) or {}
             pieces.append({"件id": event_id,
                            "最高": round(_as_float(item.get("score")), 3),
                            "段数": len(event.get("segments") or []),

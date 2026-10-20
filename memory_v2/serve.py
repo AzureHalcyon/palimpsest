@@ -53,7 +53,7 @@ class ChatService:
                 "event": last.get("event"),
                 "event_id": last.get("event_id"),
                 "mode": last.get("mode"),
-                "stack": last.get("stack") or [],
+                "events": last.get("events") or [],
             }
 
     def state(self) -> dict:
@@ -64,7 +64,7 @@ class ChatService:
                 "event": turn.get("event"),
                 "event_id": turn.get("event_id"),
                 "mode": turn.get("mode"),
-                "stack": turn.get("stack") or [],
+                "events": turn.get("events") or [],
             })
         return {"session": self.store.session_id, "turns": turns}
 
