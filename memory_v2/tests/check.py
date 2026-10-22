@@ -30,7 +30,7 @@ class FakeClient:
 def turn(number, user, assistant, day):
     return {"turn": number, "ts": day + "T10:00:00", "user": user,
             "assistant": assistant, "event": None, "event_id": None,
-            "calls": [], "recall": [], "remember": []}
+            "calls": [], "recall": [], "recollect": []}
 
 
 def write_session(data_dir, session, turns):
@@ -103,7 +103,7 @@ client = FakeClient([
     call("event", {"event": "语义空间方案"}),
     reply("记得。"),
     call("recall", {"keywords": ["语义"]}),
-    call("remember", {"event": "语义空间方案"}),
+    call("recollect", {"event": "语义空间方案"}),
     call("event", {"event": "语义空间方案"}),
     reply("本场不用取。"),
 ])
@@ -119,7 +119,7 @@ assert len(turns[1]["events"]) == 2, turns[1]
 assert turns[1]["event"] == "语义空间方案", turns[1]
 assert turns[2]["events"][0]["new"] is False, turns[2]
 assert turns[3]["events"][0]["id"] == turns[2]["events"][0]["id"], turns[3]
-assert any("本场节点不用 remember" in str(message.get("content") or "")
+assert any("本场节点不用 recollect" in str(message.get("content") or "")
            for message in chat.messages if message.get("role") == "tool"), chat.messages
 
 graph = Graph.open(data)

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 import time
+from collections import OrderedDict
 from datetime import datetime
 
 from ..core.embed import cosine
 from ..core.text import idf, terms
 from ..store.vectors import VectorStore
-from .search import event_date, event_last_ts, event_text
+from .search import event_date, event_label, event_last_ts
 
 
 def _digest(text: str) -> str:
@@ -26,6 +29,10 @@ def event_vectors(graph, data_dir: str, texts: dict, embedder, store=None) -> di
     pending = []
     for event_id, text in texts.items():
         digest = _digest(text)
+        if not str(text or "").strip():
+            # 刚建出来还没挂上正文的节点（segments 为空）：没有可嵌的文本，
+            # 词面相似度顶上，等它有了正文再补向量。
+            continue
         if store.get(event_id, digest) is None and embedder and embedder.available:
             pending.append((event_id, text, digest))
     if pending:
@@ -45,6 +52,185 @@ def _similarity(first: str, second: str, sets: dict, vectors: dict) -> float:
         return cosine(vectors[first], vectors[second])
     left, right = sets[first], sets[second]
     return len(left & right) / math.sqrt(len(left) * len(right) + 1.0)
+
+
+def _lexical_neighbors(ids: list, sets: dict, limit: int) -> dict:
+    postings = {}
+    for event_id in ids:
+        for term in sets.get(event_id, ()):
+            postings.setdefault(term, []).append(event_id)
+    out = {}
+    for event_id in ids:
+        left = sets.get(event_id, set())
+        counts = {}
+        for term in left:
+            for other in postings.get(term, ()):
+                if other != event_id:
+                    counts[other] = counts.get(other, 0) + 1
+        scored = []
+        for other, count in counts.items():
+            size = len(sets.get(other, ()))
+            if size:
+                scored.append((count / math.sqrt(len(left) * size + 1.0), other))
+        scored.sort(reverse=True)
+        out[event_id] = scored[:limit]
+    return out
+
+
+_CONTENT_CACHE = OrderedDict()
+_CONTENT_CACHE_LIMIT = 1
+ANN_MIN = 3000
+NEIGHBOR_LIMIT = 256
+
+
+def _vector_neighbors(ids: list, vectors: dict, limit: int) -> dict:
+    import numpy as np
+
+    matrix = np.asarray([vectors[event_id] for event_id in ids], dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    normalized = matrix / norms
+    keep = min(limit, len(ids) - 1)
+    out = {event_id: [] for event_id in ids}
+    if keep <= 0:
+        return out
+
+    if len(ids) >= ANN_MIN:
+        try:
+            import faiss
+
+            index = faiss.IndexHNSWFlat(matrix.shape[1], 32,
+                                        faiss.METRIC_INNER_PRODUCT)
+            index.add(normalized)
+            distances, indexes = index.search(normalized, keep + 1)
+            for row, event_id in enumerate(ids):
+                scored = [(float(distances[row, column]),
+                           ids[int(indexes[row, column])])
+                          for column in range(indexes.shape[1])
+                          if int(indexes[row, column]) >= 0
+                          and int(indexes[row, column]) != row]
+                scored.sort(reverse=True)
+                out[event_id] = [(value, other) for value, other in scored if value > 0][:keep]
+            return out
+        except Exception:
+            pass
+
+    similarity = normalized @ normalized.T
+    np.fill_diagonal(similarity, -1.0)
+    indexes = np.argpartition(-similarity, keep, axis=1)[:, :keep]
+    for row, event_id in enumerate(ids):
+        scored = [(float(similarity[row, column]), ids[int(column)])
+                  for column in indexes[row]]
+        scored.sort(reverse=True)
+        out[event_id] = [(value, other) for value, other in scored if value > 0]
+    return out
+
+
+def _neighbor_fingerprint(texts: dict, sets: dict, store, limit: int,
+                          vectors: dict = None) -> str:
+    digest = hashlib.sha1()
+    model = str(getattr(store, "model", "") or "")
+    dim = int(getattr(store, "dim", 0) or 0)
+    digest.update(("k=%d|model=%s|dim=%d|" % (limit, model, dim)).encode("utf-8"))
+    for event_id in sorted(texts or {}):
+        digest.update(str(event_id).encode("utf-8"))
+        digest.update(hashlib.sha1(str(texts[event_id]).encode("utf-8")).digest())
+        digest.update(hashlib.sha1(
+            "\0".join(sorted(sets.get(event_id, ()))).encode("utf-8")).digest())
+        digest.update(b"1" if (vectors or {}).get(event_id) else b"0")
+    return digest.hexdigest()
+
+
+def _load_neighbor_cache(path: str, fingerprint: str):
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+    if str((payload.get("meta") or {}).get("fingerprint") or "") != fingerprint:
+        return None
+    items = payload.get("items")
+    if not isinstance(items, dict):
+        return None
+    return {event_id: [(float(value), str(other))
+                       for value, other in pairs]
+            for event_id, pairs in items.items()}
+
+
+def _save_neighbor_cache(path: str, fingerprint: str, content: dict) -> None:
+    if not path:
+        return
+    payload = {
+        "meta": {"fingerprint": fingerprint},
+        "items": {event_id: [[value, other] for value, other in pairs]
+                  for event_id, pairs in content.items()},
+    }
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LIMIT,
+                      texts: dict = None, data_dir: str = "", store=None) -> dict:
+    """Top-k content neighbours, computed once per graph/vector version.
+
+    The old path compared every node with every event inside the propagation
+    loop.  With 1024-d vectors that is hundreds of thousands of Python cosine
+    calls per recall.  Here the same work is done once (numpy or faiss when
+    available), cached in memory and on disk, and propagation only walks the
+    short list.
+    """
+    fingerprint = _neighbor_fingerprint(texts or {}, sets, store, limit, vectors)
+    cached = _CONTENT_CACHE.get(fingerprint)
+    if cached is not None:
+        _CONTENT_CACHE.move_to_end(fingerprint)
+        return cached
+    path = os.path.join(data_dir, "content-index.json") if data_dir else ""
+    cached = _load_neighbor_cache(path, fingerprint)
+    if cached is not None:
+        _CONTENT_CACHE[fingerprint] = cached
+        while len(_CONTENT_CACHE) > _CONTENT_CACHE_LIMIT:
+            _CONTENT_CACHE.popitem(last=False)
+        return cached
+
+    ids = [event_id for event_id in graph.events if event_id in sets]
+    with_vectors = [event_id for event_id in ids if vectors.get(event_id)]
+    lexical = _lexical_neighbors(ids, sets, limit)
+    if with_vectors:
+        try:
+            vector = _vector_neighbors(with_vectors, vectors, limit)
+        except (ImportError, ValueError):
+            vector = {}
+        merged = {}
+        for event_id in ids:
+            candidates = {}
+            for value, other in lexical.get(event_id, ()):
+                candidates[other] = max(candidates.get(other, 0.0), value)
+            for value, other in vector.get(event_id, ()):
+                candidates[other] = max(candidates.get(other, 0.0), value)
+            merged[event_id] = sorted(
+                ((value, other) for other, value in candidates.items()),
+                reverse=True)[:limit]
+        content = merged
+    else:
+        content = lexical
+
+    _CONTENT_CACHE[fingerprint] = content
+    while len(_CONTENT_CACHE) > _CONTENT_CACHE_LIMIT:
+        _CONTENT_CACHE.popitem(last=False)
+    _save_neighbor_cache(path, fingerprint, content)
+    return content
 
 
 def _recency(graph, data_dir: str, event_id: str) -> float:
@@ -81,11 +267,21 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
             continue
         allowed.add(event_id)
 
-    texts = {event_id: event_text(graph, data_dir, event_id) for event_id in graph.events}
-    sets = {event_id: terms(text) | terms(str(graph.events[event_id].get("name") or ""))
-            for event_id, text in texts.items()}
+    texts = {event_id: event_label(graph, event_id) for event_id in graph.events}
+    sets = {
+        event_id: terms(text)
+        | terms(str(graph.events[event_id].get("name") or ""))
+        for event_id, text in texts.items()
+    }
     weights = idf(list(sets.values()))
-    vectors = event_vectors(graph, data_dir, texts, embedder, store=vector_store)
+    config = getattr(embedder, "config", None)
+    store = vector_store or VectorStore.open(
+        data_dir,
+        model=str(getattr(config, "embed_model", "") or ""),
+        dim=int(getattr(config, "embed_dim", 0) or 0))
+    vectors = event_vectors(graph, data_dir, texts, embedder, store=store)
+    content = content_neighbors(graph, sets, vectors, limit=NEIGHBOR_LIMIT, texts=texts,
+                                data_dir=data_dir, store=store)
 
     query_terms = set()
     for keyword in keywords:
@@ -145,11 +341,8 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
                     gain = score * float(edge.get("strength", 0.2)) * weight
                     if gain > 0.05:
                         nxt[other] = max(nxt.get(other, 0.0), gain)
-                for other in graph.events:
-                    if other == node or other not in allowed:
-                        continue
-                    similarity = _similarity(node, other, sets, vectors)
-                    if similarity <= 0:
+                for similarity, other in content.get(node, ()):
+                    if other not in allowed:
                         continue
                     gain = score * 0.5 * similarity
                     if gain > 0.05:

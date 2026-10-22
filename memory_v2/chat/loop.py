@@ -44,7 +44,7 @@ class EventChat:
         self.activation: Dict[str, float] = {}
         self._cue_terms = set()
         self._cue_keywords: List[str] = []
-        self._remembered = 0
+        self._recollected = 0
         self._turn_events: List[str] = []
         self._turn_new: List[str] = []
 
@@ -67,7 +67,7 @@ class EventChat:
         if self.store.is_archived():
             raise SessionSealed("这一场已归档（封口），只读：%s" % self.store.path)
         self.turn += 1
-        self._remembered = 0
+        self._recollected = 0
         self._turn_events = []
         self._turn_new = []
         self._reasoning = ""
@@ -76,7 +76,7 @@ class EventChat:
 
         calls: List[Dict] = []
         recalled: List[Dict] = []
-        remembered: List[Dict] = []
+        recollected: List[Dict] = []
         tool_order: List[str] = []
         reply = ""
         rounds = 0
@@ -113,7 +113,7 @@ class EventChat:
                         self.messages.append({
                             "role": "system",
                             "content": ("这一轮的要求没满足：%s。顺序固定为 recall →"
-                                        "（必要时 remember）→ event → 正文；"
+                                        "（必要时 recollect）→ event → 正文；"
                                         "event 可以调多次，最后一次之后不要再调工具。"
                                         % "；".join(problems)),
                         })
@@ -144,8 +144,8 @@ class EventChat:
                                 calls.append(record)
                         elif name == "recall":
                             recalled.append(record)
-                        elif name == "remember":
-                            remembered.append(record)
+                        elif name == "recollect":
+                            recollected.append(record)
                     if name == "event":
                         last_event_ok = record is not None
                     else:
@@ -195,7 +195,7 @@ class EventChat:
             "tool_order": tool_order,
             "calls": calls,
             "recall": recalled,
-            "remember": remembered,
+            "recollect": recollected,
             "reasoning": self._reasoning,
             "usage": self._usage,
         })
@@ -220,8 +220,8 @@ class EventChat:
             return self._handle_event(arguments)
         if name == "recall":
             return self._handle_recall(arguments)
-        if name == "remember":
-            return self._handle_remember(arguments)
+        if name == "recollect":
+            return self._handle_recollect(arguments)
         return "unknown tool: %s" % name, None
 
     def _lookup(self, reference: str):
@@ -390,14 +390,14 @@ class EventChat:
             lines.append("%s %s · %s · 连 %d" % (
                 event_id, item.get("name") or event.get("name") or "",
                 self._where(event_id, event), links))
-        lines.append("要连就把 id 写进 event 的 event/links；本场节点不要 remember。")
+        lines.append("要连就把 id 写进 event 的 event/links；本场节点不要 recollect。")
         return "\n".join(lines), record
 
-    def _handle_remember(self, arguments: str):
+    def _handle_recollect(self, arguments: str):
         try:
-            reference = tools.parse_remember_call(arguments)
+            reference = tools.parse_recollect_call(arguments)
         except tools.ToolCallError as exc:
-            return "not remembered: %s" % exc, None
+            return "not recollected: %s" % exc, None
 
         event_id, error = self._lookup(reference)
         if error:
@@ -409,14 +409,14 @@ class EventChat:
                 str(segment.get("session") or "") == self.session_id
                 for segment in self.graph.events[event_id].get("segments") or [])
             if has_current:
-                return ("本场节点不用 remember；原文就在对话里。"
+                return ("本场节点不用 recollect；原文就在对话里。"
                         "要连它就用 event 的 event/links。"), None
             return "这一件没有原文。", None
         segments = self._select_segments(segments)
         if not segments:
             return "这一件没有原文。", None
 
-        self._remembered += 1
+        self._recollected += 1
         memory = write_memory(self.client, self._annotate(segments))
         WriterArchive(self.data_dir).append(event_id, self.session_id,
                                             self._cue_keywords, memory)

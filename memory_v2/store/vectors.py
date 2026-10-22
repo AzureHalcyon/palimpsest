@@ -108,6 +108,9 @@ class VectorStore:
         return vector
 
     def put(self, event_id: str, text_hash: str, vector: list) -> None:
+        if not vector:
+            # 没有正文的节点拿不到向量，别当成维度错误。
+            return
         if self.dim and len(vector) != self.dim:
             raise ValueError("vector dimension %d != cache dimension %d"
                              % (len(vector), self.dim))

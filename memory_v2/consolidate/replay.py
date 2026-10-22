@@ -6,11 +6,12 @@ import itertools
 import random
 
 from ..core.text import terms
-from ..read.activate import event_vectors, _similarity
-from ..read.search import event_text
+from ..read.activate import content_neighbors, event_vectors, _similarity
+from ..read.search import event_label
 from ..store.frozen import update_global
 from ..store.graph import edge_key
 from ..store.session import SessionStore
+from ..store.vectors import VectorStore
 
 REINFORCE = 0.02
 DECAY = 0.87
@@ -30,7 +31,7 @@ def _marked_seeds(graph, data_dir: str, session: str) -> list:
             target = graph.resolve(str(event.get("id") or ""))
             if target:
                 seeds.add(target)
-        for item in turn.get("remember") or []:
+        for item in turn.get("recollect") or turn.get("remember") or []:
             target = graph.resolve(str(item.get("id") or ""))
             if target:
                 seeds.add(target)
@@ -41,7 +42,7 @@ def _marked_seeds(graph, data_dir: str, session: str) -> list:
 
 
 def propagate(graph, seed: str, sets: dict, vectors: dict, hops: int = 2,
-              content_k: int = 1):
+              content_k: int = 1, content: dict = None):
     lit = {seed: 1.0}
     edge_hits = {}
     content_pairs = {}
@@ -57,15 +58,19 @@ def propagate(graph, seed: str, sets: dict, vectors: dict, hops: int = 2,
                 nxt[other] = max(nxt.get(other, 0.0), gain)
                 key = edge_key(edge.get("a"), edge.get("b"), edge.get("relation"))
                 edge_hits[key] = edge_hits.get(key, 0.0) + gain
-            scored = []
-            for other in graph.events:
-                if other == node:
-                    continue
-                similarity = _similarity(node, other, sets, vectors)
-                if similarity > 0:
-                    scored.append((similarity, other))
-            scored.sort(reverse=True)
-            for similarity, other in scored[:content_k]:
+            if content is not None:
+                candidates = content.get(node, ())[:content_k]
+            else:
+                scored = []
+                for other in graph.events:
+                    if other == node:
+                        continue
+                    similarity = _similarity(node, other, sets, vectors)
+                    if similarity > 0:
+                        scored.append((similarity, other))
+                scored.sort(reverse=True)
+                candidates = scored[:content_k]
+            for similarity, other in candidates:
                 gain = score * 0.5 * similarity
                 if gain <= 0.05:
                     continue
@@ -86,10 +91,17 @@ def consolidate(graph, data_dir: str, session: str, sample: int = 5,
     extra = picker.sample(others, min(sample, len(others))) if others else []
     seeds = seeds + extra
 
-    texts = {event_id: event_text(graph, data_dir, event_id) for event_id in graph.events}
+    texts = {event_id: event_label(graph, event_id) for event_id in graph.events}
     sets = {event_id: terms(text) | terms(str(graph.events[event_id].get("name") or ""))
             for event_id, text in texts.items()}
-    vectors = event_vectors(graph, data_dir, texts, embedder)
+    config = getattr(embedder, "config", None)
+    store = VectorStore.open(
+        data_dir,
+        model=str(getattr(config, "embed_model", "") or ""),
+        dim=int(getattr(config, "embed_dim", 0) or 0))
+    vectors = event_vectors(graph, data_dir, texts, embedder, store=store)
+    content = content_neighbors(graph, sets, vectors, limit=256,
+                                texts=texts, data_dir=data_dir, store=store)
 
     counts = {}
     pair_support = {}
@@ -97,7 +109,7 @@ def consolidate(graph, data_dir: str, session: str, sample: int = 5,
     content_total = 0
     for seed in seeds:
         lit, edge_hits, content_pairs = propagate(
-            graph, seed, sets, vectors, hops=hops)
+            graph, seed, sets, vectors, hops=hops, content=content)
         for event_id in lit:
             counts[event_id] = counts.get(event_id, 0) + 1
         for first, second in itertools.combinations(sorted(lit), 2):

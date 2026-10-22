@@ -340,7 +340,7 @@ _PROMPT_META = {
                      "每轮先 recall，最后 event；改坏会导致这一轮记不下来。", "event-system.txt"),
     "sys2": ("系统③ · 分寸", "会话的补充口径：不派活、不附和、不套话。", "sys2.txt"),
     "date": ("系统④ · 日期补充", "每条 system 里的“今天是 $today”那一段。", "date.txt"),
-    "write-memory": ("记忆编写", "`remember` 取回原文时，用来压成一段回忆。", "write-memory.txt"),
+    "write-memory": ("记忆编写", "`recollect` 取回原文时，用来压成一段回忆。", "write-memory.txt"),
 }
 
 
@@ -896,10 +896,10 @@ def _pulls_from_turn(turn: dict) -> List[dict]:
             got.append("连 " + "、".join(links))
         out.append({"query": query, "got": [g for g in got if g],
                     "回": "新节点" if is_new else "挂已有", "kind": "事件"})
-    for item in turn.get("remember") or []:
+    for item in turn.get("recollect") or turn.get("remember") or []:
         target = str(item.get("id") or "")
         if target:
-            out.append({"query": "remember " + target, "got": [target],
+            out.append({"query": "recollect " + target, "got": [target],
                         "回": "取回原文", "kind": "回忆"})
     return out
 
@@ -1457,8 +1457,8 @@ def past_get_json(data_dir: str, sid: str) -> str:
                 winner = recall.get("winner") or {}
                 segments.append({"类": "回忆", "文本": "recall " + keywords,
                                  "回": str(winner.get("name") or "")})
-            for item in turn.get("remember") or []:
-                segments.append({"类": "回忆", "文本": "remember",
+            for item in turn.get("recollect") or turn.get("remember") or []:
+                segments.append({"类": "回忆", "文本": "recollect",
                                  "回": str(item.get("id") or "")})
             events = turn.get("events") or []
             if events:

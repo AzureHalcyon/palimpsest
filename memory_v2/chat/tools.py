@@ -96,13 +96,13 @@ RECALL_TOOL: Dict = {
 }
 
 
-REMEMBER_TOOL: Dict = {
+RECOLLECT_TOOL: Dict = {
     "type": "function",
     "function": {
-        "name": "remember",
+        "name": "recollect",
         "description": (
             "取回一件旧事的原文（压成一段第一人称回忆）。只取旧场事件；"
-            "本场节点不用取，原文就在对话里。先 recall 再 remember，不要凭印象拼 id。"
+            "本场节点不用取，原文就在对话里。先 recall 再 recollect，不要凭印象拼 id。"
         ),
         "parameters": {
             "type": "object",
@@ -121,7 +121,7 @@ REMEMBER_TOOL: Dict = {
 }
 
 
-TOOLS = [EVENT_TOOL, RECALL_TOOL, REMEMBER_TOOL]
+TOOLS = [EVENT_TOOL, RECALL_TOOL, RECOLLECT_TOOL]
 
 
 @dataclass
@@ -180,7 +180,7 @@ def parse_recall_call(arguments: str) -> dict:
     }
 
 
-def parse_remember_call(arguments: str) -> str:
+def parse_recollect_call(arguments: str) -> str:
     raw = _load(arguments)
     event = str(raw.get("event") or "").strip()
     if not event:

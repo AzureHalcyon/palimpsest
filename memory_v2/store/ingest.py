@@ -69,12 +69,18 @@ def ingest(graph: Graph, data_dir: str, rebuild: bool = False) -> dict:
                 if target:
                     graph.add_edge(event_id, target, "相关")
             for link in call.get("links") or []:
-                reference = str(link.get("event") or "")
+                if isinstance(link, dict):
+                    reference = str(link.get("event") or link.get("id") or "")
+                else:
+                    reference = str(link or "")
                 target = id_map.get(reference) or graph.resolve(reference)
                 if target:
                     graph.add_edge(event_id, target, "相关")
-        for item in turn.get("remember") or []:
-            reference = str(item.get("id") or "")
+        for item in turn.get("recollect") or turn.get("remember") or []:
+            if isinstance(item, dict):
+                reference = str(item.get("id") or item.get("event") or "")
+            else:
+                reference = str(item or "")
             target = id_map.get(reference) or graph.resolve(reference)
             if target and target != event_id:
                 graph.add_edge(event_id, target, "相关")

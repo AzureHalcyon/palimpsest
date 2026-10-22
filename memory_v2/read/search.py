@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from typing import Dict, List
 
 from ..core.text import terms
 from ..store.session import SessionStore
 
 
+@lru_cache(maxsize=128)
+def _cached_turns(path: str, _mtime_ns: int, _size: int) -> Dict[int, dict]:
+    data_dir = os.path.dirname(os.path.dirname(path))
+    session = os.path.basename(path)[:-6]
+    return {int(turn.get("turn")): turn
+            for turn in SessionStore(data_dir, session).turns()}
+
+
 def _session_turns(data_dir: str, session: str) -> Dict[int, dict]:
-    return {int(turn.get("turn")): turn for turn in SessionStore(data_dir, session).turns()}
+    path = SessionStore(data_dir, session).path
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return {}
+    return _cached_turns(path, stat.st_mtime_ns, stat.st_size)
 
 
 def event_segments(graph, data_dir: str, event_id: str,
@@ -43,6 +58,18 @@ def event_segments(graph, data_dir: str, event_id: str,
 def event_text(graph, data_dir: str, event_id: str) -> str:
     return "\n".join("%s\n%s" % (segment["date"], segment["text"])
                      for segment in event_segments(graph, data_dir, event_id))
+
+
+def event_label(graph, event_id: str) -> str:
+    """Model-written identity of a node: its name and its scope.
+
+    Retrieval (vectors and terms alike) is built on this, not on the dialogue
+    transcript.  The transcript is the writing model's raw material only.
+    """
+    event = graph.events.get(event_id) or {}
+    name = str(event.get("name") or "").strip()
+    context = str(event.get("context") or "").strip()
+    return "%s\n%s" % (name, context) if context else name
 
 
 def term_sets(graph, data_dir: str) -> Dict[str, set]:
