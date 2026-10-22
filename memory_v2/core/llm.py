@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from typing import List, Optional
 
+from .think import ThinkFilter, normalize_message
+
 
 class ChatError(RuntimeError):
     pass
@@ -37,6 +39,9 @@ class ChatClient:
             "temperature": self.config.temperature if temperature is None else temperature,
             "max_tokens": self.config.max_tokens,
         }
+        effort = str(getattr(self.config, "reasoning_effort", "") or "").strip()
+        if effort and effort not in ("auto", "default"):
+            body["reasoning_effort"] = effort
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -63,7 +68,8 @@ class ChatClient:
                 with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.last_usage = payload.get("usage") or {}
-                return (payload.get("choices") or [{}])[0].get("message") or {}
+                message = (payload.get("choices") or [{}])[0].get("message") or {}
+                return normalize_message(message)
             except urllib.error.HTTPError as exc:
                 last_error = exc
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self.config.retries - 1:
@@ -107,6 +113,7 @@ class ChatClient:
                         payload = json.loads(response.read().decode("utf-8"))
                         self.last_usage = payload.get("usage") or {}
                         message = (payload.get("choices") or [{}])[0].get("message") or {}
+                        message = normalize_message(message)
                         reasoning = str(message.get("reasoning_content")
                                         or message.get("reasoning") or "")
                         self._emit(on_delta, "reasoning", reasoning)
@@ -136,6 +143,7 @@ class ChatClient:
         calls = {}
         usage = {}
         saw_data = False
+        think = ThinkFilter()
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
@@ -166,8 +174,14 @@ class ChatClient:
                 self._emit(on_delta, "reasoning", str(piece))
             piece = delta.get("content")
             if piece:
-                content.append(str(piece))
-                self._emit(on_delta, "content", str(piece))
+                # 有的网关把思考内联在 content 里（`<think>…</think>`），先在流上分开。
+                for kind, text in think.feed(str(piece)):
+                    if kind == "reasoning":
+                        reasoning.append(text)
+                        self._emit(on_delta, "reasoning", text)
+                    else:
+                        content.append(text)
+                        self._emit(on_delta, "content", text)
             for call in delta.get("tool_calls") or []:
                 index = int(call.get("index") or 0)
                 record = calls.setdefault(index, {
@@ -186,6 +200,13 @@ class ChatClient:
                     record["function"]["arguments"] += str(function["arguments"])
         if not saw_data:
             raise ChatError("流式响应里没有 data 帧")
+        for kind, text in think.flush():
+            if kind == "reasoning":
+                reasoning.append(text)
+                self._emit(on_delta, "reasoning", text)
+            else:
+                content.append(text)
+                self._emit(on_delta, "content", text)
         message = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)

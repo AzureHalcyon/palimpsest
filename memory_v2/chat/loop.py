@@ -2,6 +2,7 @@
 
 事件是一张网络：节点是事情，边是关联。没有父/子、没有栈、没有“回”。
 一轮可以标多个节点；每个节点要么挂到已有节点，要么新建（可选连到 0..N 个已有节点）。
+没值得记的内容就 skip，还看不出是什么事就 hold（最多 MAX_HELD 轮，落盘时一起并进去）。
 """
 
 from __future__ import annotations
@@ -47,6 +48,12 @@ class EventChat:
         self._recollected = 0
         self._turn_events: List[str] = []
         self._turn_new: List[str] = []
+        self._turn_recalled = False
+        self._turn_skipped = False
+        self._turn_held = False
+        self._turn_draft: Dict[str, str] = {}
+        # 挂起是会话状态，不是记忆：从场次记录里恢复，重启后也还在。
+        self._held: List[int] = []
 
         self.messages: List[Dict] = [dict(message) for message in system_messages]
         turns = store.turns()
@@ -62,6 +69,7 @@ class EventChat:
                                           "content": str(turn.get("user") or "")})
                     self.messages.append({"role": "assistant",
                                           "content": str(turn.get("assistant") or "")})
+        self._held = self._held_turns()
 
     def send(self, text: str, on_delta=None) -> str:
         if self.store.is_archived():
@@ -70,6 +78,10 @@ class EventChat:
         self._recollected = 0
         self._turn_events = []
         self._turn_new = []
+        self._turn_recalled = False
+        self._turn_skipped = False
+        self._turn_held = False
+        self._turn_draft = {}
         self._reasoning = ""
         self._usage = {}
         self.messages.append({"role": "user", "content": text})
@@ -99,14 +111,14 @@ class EventChat:
 
                 if not tool_calls:
                     problems = []
-                    if not calls:
+                    if not self._turn_skipped and not self._turn_held and not calls:
                         problems.append("还差 event")
-                    elif not last_event_ok:
+                    elif not self._turn_skipped and not last_event_ok:
                         if tool_order and tool_order[-1] == "event":
                             problems.append("event 没有成功")
                         else:
                             problems.append("event 不是最后一个工具调用")
-                    if not recalled:
+                    if not self._turn_skipped and not recalled:
                         problems.append("还差 recall")
                     if problems and nudges < 2:
                         nudges += 1
@@ -114,13 +126,16 @@ class EventChat:
                             "role": "system",
                             "content": ("这一轮的要求没满足：%s。顺序固定为 recall →"
                                         "（必要时 recollect）→ event → 正文；"
-                                        "event 可以调多次，最后一次之后不要再调工具。"
+                                        "event 可以调多次，最后一次之后不要再调工具；"
+                                        "有内容但还看不出是什么事就 hold=true，"
+                                        "没有值得记的内容就调 event 的 skip=true。"
                                         % "；".join(problems)),
                         })
                         continue
-                    if problems:
+                    if problems and not calls and not self._turn_skipped:
                         raise RuntimeError("这一轮未记录：%s；event 必须是正文前最后一个"
                                            "成功的工具调用。" % "；".join(problems))
+                    # event 已经落盘时，漏了 recall 或后面又跟了工具，不再把整轮丢掉。
                     reply = content
                     self.messages.append({"role": "assistant", "content": reply})
                     break
@@ -139,15 +154,21 @@ class EventChat:
                     result, record = self._dispatch(name, arguments)
                     if record is not None:
                         if name == "event":
-                            if not any(item.get("id") == record.get("id")
-                                       for item in calls):
+                            if record.get("skip"):
+                                self._turn_skipped = True
+                            elif record.get("hold"):
+                                self._turn_held = True
+                            elif not any(item.get("id") == record.get("id")
+                                         for item in calls):
                                 calls.append(record)
                         elif name == "recall":
                             recalled.append(record)
+                            self._turn_recalled = True
                         elif name == "recollect":
                             recollected.append(record)
                     if name == "event":
-                        last_event_ok = record is not None
+                        last_event_ok = (record is not None
+                                         and not (record or {}).get("skip"))
                     else:
                         last_event_ok = False
                     self.messages.append({
@@ -165,6 +186,7 @@ class EventChat:
                 self.graph.remove_event(event_id)
             if self._turn_new:
                 self.graph.save()
+            self._held = self._held_turns()
             raise
 
         for event_id in self._turn_events:
@@ -190,7 +212,10 @@ class EventChat:
             "assistant": reply,
             "event": first.get("name") or None,
             "event_id": first.get("id") or None,
-            "mode": "事件",
+            "mode": ("事件" if events
+                     else "挂起" if self._turn_held
+                     else "无事件" if self._turn_skipped else "事件"),
+            "draft": dict(self._turn_draft) if self._turn_draft else None,
             "events": events,
             "tool_order": tool_order,
             "calls": calls,
@@ -239,6 +264,8 @@ class EventChat:
         return matches[0], ""
 
     def _turn_view(self) -> str:
+        if self._turn_held:
+            return "这一轮：挂起（第 %d 轮）。" % self.turn
         if not self._turn_events:
             return "这一轮：还没标。"
         pieces = []
@@ -255,9 +282,10 @@ class EventChat:
             starts = [int(segment.get("start") or 0) for segment in current]
             ends = [int(segment.get("end") or 0) for segment in current]
             start, end = min(starts), max(ends)
-            return "本场 第%d轮" % start if start == end else "本场 第%d-%d轮" % (start, end)
+            return ("这次聊天 · 第%d轮" % start if start == end
+                    else "这次聊天 · 第%d-%d轮" % (start, end))
         stamp = event_date(self.graph, self.data_dir, event_id)
-        return stamp or "旧场"
+        return ("以前的聊天 · %s" % stamp) if stamp else "以前的聊天"
 
     def _select_segments(self, segments: List[dict], limit: int = 8,
                          chars: int = 2000) -> List[dict]:
@@ -281,11 +309,99 @@ class EventChat:
             total += len(text)
         return chosen
 
+    # ── 挂起 ────────────────────────────────────────────────────────────────
+    def _held_turns(self) -> List[int]:
+        """还没并进任何节点的挂起轮。
+
+        真相在两处：场次记录里带 draft 的轮（模型写过草稿），
+        以及节点段落覆盖到哪。已被段落盖住的就不再算挂起。
+        """
+        covered = set()
+        for event in self.graph.events.values():
+            for segment in event.get("segments") or []:
+                if str(segment.get("session") or "") != self.session_id:
+                    continue
+                try:
+                    start = int(segment.get("start") or 0)
+                    end = int(segment.get("end") or 0)
+                except (TypeError, ValueError):
+                    continue
+                covered.update(range(start, end + 1))
+        held = []
+        for turn in self.store.turns():
+            try:
+                number = int(turn.get("turn") or 0)
+            except (TypeError, ValueError):
+                continue
+            if number and turn.get("draft") and number not in covered:
+                held.append(number)
+        return sorted(set(held))
+
+    @staticmethod
+    def _ranges(turns: List[int]) -> str:
+        numbers = sorted({int(turn) for turn in turns})
+        if not numbers:
+            return "无"
+        parts = []
+        start = previous = numbers[0]
+        for number in numbers[1:]:
+            if number == previous + 1:
+                previous = number
+                continue
+            parts.append(str(start) if start == previous
+                         else "%d–%d" % (start, previous))
+            start = previous = number
+        parts.append(str(start) if start == previous
+                     else "%d–%d" % (start, previous))
+        return "、".join(parts)
+
+    def _pick_held(self, wanted: Optional[List[int]]):
+        """选出这次要并的挂起轮；没写 held 就并全部，写 [] 就一个都不并。"""
+        if wanted is None:
+            return list(self._held), []
+        unknown = [turn for turn in wanted if turn not in self._held]
+        return [turn for turn in wanted if turn in self._held], unknown
+
+    def _absorb_held(self, event_id: str, turns: List[int]) -> str:
+        if not turns:
+            return ""
+        for turn in turns:
+            self.graph.attach(event_id, self.session_id, turn)
+        drop = set(turns)
+        self._held = [turn for turn in self._held if turn not in drop]
+        return "并入挂起的 %d 轮（第 %s 轮）" % (len(turns), self._ranges(turns))
+
     def _handle_event(self, arguments: str):
         try:
             parsed = tools.parse_event_call(arguments)
         except tools.ToolCallError as exc:
             return "not recorded: %s" % exc, None
+
+        if parsed.skip:
+            return "这一轮不建节点（寒暄/流程/没有判断）。", {"skip": True}
+
+        if parsed.hold:
+            if self.turn in self._held:
+                return "这一轮已经挂起了。", {"hold": True}
+            if len(self._held) >= tools.MAX_HELD:
+                return ("挂起已满 %d 轮（第 %s 轮）：先把它们落成一件（new 给名字）"
+                        "或挂到已有节点，再挂新的轮。"
+                        % (tools.MAX_HELD, self._ranges(self._held))), None
+            self._held.append(self.turn)
+            self._turn_draft = {"name": parsed.new}
+            lines = ["已挂起（第 %d 轮）%s" % (
+                self.turn,
+                "：草稿「%s」" % parsed.new if parsed.new else "：先不落，落盘时再起名")]
+            lines.append("挂起 %d/%d 轮（第 %s 轮）；落盘（new 或挂已有）时一起并进去。"
+                         % (len(self._held), tools.MAX_HELD, self._ranges(self._held)))
+            return "\n".join(lines), {"hold": True, "turn": self.turn,
+                                      "name": parsed.new}
+
+        wanted, unknown = self._pick_held(parsed.held)
+        if unknown:
+            return ("这些轮没有挂起：第 %s 轮；现在挂着的是 %s。"
+                    % (self._ranges(unknown),
+                       "第 %s 轮" % self._ranges(self._held) if self._held else "无")), None
 
         if parsed.new:
             name = parsed.new
@@ -299,8 +415,31 @@ class EventChat:
             same = [event_id for event_id, event in self.graph.events.items()
                     if event.get("name") == name]
             if same:
-                return ("已有同名：%s；同一件用 event 挂已有，不同件换个名字。"
-                        % "、".join(sorted(same))), None
+                if len(same) > 1:
+                    return ("有多个同名：%s；用 id 指定要标哪一个。"
+                            % "、".join(sorted(same))), None
+                event_id = same[0]
+                already = event_id in self._turn_events
+                for target in targets:
+                    if target != event_id:
+                        self.graph.add_edge(event_id, target, "关联")
+                if not already:
+                    self._turn_events.append(event_id)
+                merged = self._absorb_held(event_id, wanted)
+                lines = [("已经标过：%s（%s）" if already
+                          else "已有同名，按已有节点标：%s（%s）")
+                         % (name, event_id)]
+                if merged:
+                    lines.append(merged)
+                if targets:
+                    lines.append("连接：" + "、".join(
+                        "%s（%s）" % (self.graph.events.get(target, {}).get("name") or target,
+                                      target) for target in targets))
+                lines.append(self._turn_view())
+                record = {"id": event_id, "name": name, "new": False, "links": targets,
+                          "link_names": [str(self.graph.events.get(target, {}).get("name") or target)
+                                         for target in targets]}
+                return "\n".join(lines), record
             event_id = self.graph.add_event(name)
             self._turn_new.append(event_id)
             for target in targets:
@@ -308,7 +447,12 @@ class EventChat:
                     self.graph.add_edge(event_id, target, "关联")
             if event_id not in self._turn_events:
                 self._turn_events.append(event_id)
+            merged = self._absorb_held(event_id, wanted)
             lines = ["已标：%s（%s，新）" % (name, event_id)]
+            if merged:
+                lines.append(merged)
+            if not self._turn_recalled:
+                lines.append("（提醒：先 recall 再 event；下次先查再标。）")
             if targets:
                 lines.append("连接：" + "、".join(
                     "%s（%s）" % (self.graph.events.get(target, {}).get("name") or target,
@@ -324,6 +468,7 @@ class EventChat:
         event_id, error = self._lookup(parsed.event)
         if error:
             return error, None
+        already = event_id in self._turn_events
         targets = []
         for reference in parsed.links:
             target, error = self._lookup(reference)
@@ -331,12 +476,42 @@ class EventChat:
                 return error, None
             if target != event_id and target not in targets:
                 targets.append(target)
+        unlink_targets = []
+        for reference in parsed.unlink:
+            target, error = self._lookup(reference)
+            if error:
+                return error, None
+            if target != event_id and target not in unlink_targets:
+                unlink_targets.append(target)
+        renamed = {}
+        if parsed.rename:
+            try:
+                old_name = self.graph.rename_event(event_id, parsed.rename)
+            except (KeyError, ValueError) as exc:
+                return "not recorded: 改名失败：%s" % exc, None
+            renamed = {"from": old_name, "to": parsed.rename}
         for target in targets:
             self.graph.add_edge(event_id, target, "关联")
-        if event_id not in self._turn_events:
+        unlinked = []
+        for target in unlink_targets:
+            if self.graph.remove_edge(event_id, target):
+                unlinked.append(target)
+        if not already:
             self._turn_events.append(event_id)
+        merged = self._absorb_held(event_id, wanted)
         name = str(self.graph.events[event_id].get("name") or event_id)
-        lines = ["已标：%s（%s）" % (name, event_id)]
+        lines = [("已经标过：%s（%s）" if already else "已标：%s（%s）")
+                 % (name, event_id)]
+        if merged:
+            lines.append(merged)
+        if not self._turn_recalled:
+            lines.append("（提醒：先 recall 再 event；下次先查再标。）")
+        if renamed:
+            lines.append("已改名：%s → %s" % (renamed["from"], renamed["to"]))
+        if unlinked:
+            lines.append("已断开：" + "、".join(
+                "%s（%s）" % (self.graph.events.get(target, {}).get("name") or target,
+                              target) for target in unlinked))
         if targets:
             lines.append("连接：" + "、".join(
                 "%s（%s）" % (self.graph.events.get(target, {}).get("name") or target,
@@ -344,7 +519,11 @@ class EventChat:
         lines.append(self._turn_view())
         record = {"id": event_id, "name": name, "new": False, "links": targets,
                   "link_names": [str(self.graph.events.get(target, {}).get("name") or target)
-                                 for target in targets]}
+                                 for target in targets],
+                  "rename": renamed,
+                  "unlink": unlinked,
+                  "unlink_names": [str(self.graph.events.get(target, {}).get("name") or target)
+                                   for target in unlinked]}
         return "\n".join(lines), record
 
     def _handle_recall(self, arguments: str):
@@ -390,7 +569,7 @@ class EventChat:
             lines.append("%s %s · %s · 连 %d" % (
                 event_id, item.get("name") or event.get("name") or "",
                 self._where(event_id, event), links))
-        lines.append("要连就把 id 写进 event 的 event/links；本场节点不要 recollect。")
+        lines.append("要连就把 id 写进 event 的 event/links；这次聊天里的节点不要 recollect。")
         return "\n".join(lines), record
 
     def _handle_recollect(self, arguments: str):
@@ -409,9 +588,9 @@ class EventChat:
                 str(segment.get("session") or "") == self.session_id
                 for segment in self.graph.events[event_id].get("segments") or [])
             if has_current:
-                return ("本场节点不用 recollect；原文就在对话里。"
+                return ("这次聊天里的内容就在当前对话里，不在 recollect 的范围。"
                         "要连它就用 event 的 event/links。"), None
-            return "这一件没有原文。", None
+            return "这一件没有可回看的记录。", None
         segments = self._select_segments(segments)
         if not segments:
             return "这一件没有原文。", None

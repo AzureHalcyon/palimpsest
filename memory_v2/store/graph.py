@@ -186,6 +186,34 @@ class Graph:
                 out.append((edge.get("a"), edge))
         return out
 
+    def rename_event(self, event_id: str, name: str) -> str:
+        """Rename an existing node in place; return the old name."""
+        event = self.events.get(event_id)
+        if event is None:
+            raise KeyError(event_id)
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("empty name")
+        for other_id, other in self.events.items():
+            if other_id != event_id and str(other.get("name") or "") == name:
+                raise ValueError("name already used by %s" % other_id)
+        old = str(event.get("name") or "")
+        event["name"] = name
+        event["updated"] = _now()
+        return old
+
+    def remove_edge(self, first: str, second: str, relation: str = "") -> int:
+        """Remove edges between two nodes; return how many were removed."""
+        removed = 0
+        for key, edge in list(self.edges.items()):
+            if {edge.get("a"), edge.get("b")} != {first, second}:
+                continue
+            if relation and str(edge.get("relation") or "") != relation:
+                continue
+            del self.edges[key]
+            removed += 1
+        return removed
+
     def remove_event(self, event_id: str) -> None:
         self.events.pop(event_id, None)
         for key in [key for key, edge in self.edges.items()

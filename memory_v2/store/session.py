@@ -11,6 +11,8 @@ import sys
 import time
 from typing import Any, Dict, List
 
+from ..core.think import normalize_message, normalize_turn
+
 
 _WARNED_BAD_LINES = set()
 
@@ -83,7 +85,9 @@ class SessionStore:
                                                  for item in messages):
             self._quarantine_messages("结构不是 messages 列表")
             return None
-        return messages
+        # 有的网关把思考内联在正文里；读回来时拆开，别让它进正文。
+        return [normalize_message(item) if item.get("role") == "assistant" else item
+                for item in messages]
 
     def _quarantine_messages(self, reason: str) -> None:
         base = self.messages_path + ".corrupt-" + time.strftime("%Y%m%d-%H%M%S")
@@ -119,7 +123,7 @@ class SessionStore:
                 if not line:
                     continue
                 try:
-                    out.append(json.loads(line))
+                    out.append(normalize_turn(json.loads(line)))
                 except json.JSONDecodeError:
                     key = (self.path, number)
                     if key not in _WARNED_BAD_LINES:

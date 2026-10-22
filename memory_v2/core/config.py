@@ -48,6 +48,8 @@ class ChatConfig:
     model: str = "deepseek-flash"
     temperature: float = 0.7
     max_tokens: int = 6000
+    # 有的端点支持这个字段（low/medium/high）；空或 auto 就不发。
+    reasoning_effort: str = ""
     timeout: float = 600.0
     retries: int = 3
     embed_model: str = "qwen3.7-text-embedding"
