@@ -112,22 +112,6 @@ def normalize_turn(record: dict) -> dict:
     return data
 
 
-def normalize_history(item: dict) -> dict:
-    """Clean a controller history item (turn_end replies and text blocks)."""
-    data = dict(item or {})
-    if data.get("type") == "turn_end":
-        text = str(data.get("reply") or "")
-        if has_think(text):
-            inside, visible = split_think(text)
-            data["reply"] = visible
-            if inside:
-                old = str(data.get("reasoning") or "")
-                data["reasoning"] = (old.rstrip() + "\n\n" + inside).strip() if old else inside
-    if isinstance(data.get("timeline"), list):
-        data["timeline"] = _normalize_timeline(data["timeline"])
-    return data
-
-
 class ThinkFilter:
     """Incremental version of `split_think` for streamed deltas."""
 

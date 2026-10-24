@@ -159,6 +159,14 @@ class Graph:
             self.remove_event(event_id)
         return len(expired)
 
+    def archived_expired(self, now_iso: str = "") -> List[str]:
+        """到期待归档的短期事件：过期时间已过。"""
+        now_iso = str(now_iso or _now())
+        return [event_id for event_id, event in self.events.items()
+                if str(event.get("scope") or "long") == "short"
+                and str(event.get("expires_at") or "")
+                and str(event["expires_at"]) <= now_iso]
+
     def resolve(self, reference: str) -> Optional[str]:
         reference = (reference or "").strip()
         if not reference:

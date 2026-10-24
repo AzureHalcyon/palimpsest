@@ -29,3 +29,8 @@ def system_messages() -> List[Dict[str, str]]:
 
 def writer_prompt() -> str:
     return _read("write-memory.txt")
+
+
+def archive_prompt() -> str:
+    """把过期的短期记忆各压成一行。"""
+    return _read("archive.txt")
