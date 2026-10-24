@@ -15,6 +15,7 @@ from typing import Callable, List, Optional
 from memory_v2.core.config import ChatConfig, Credentials
 from memory_v2.core.llm import ChatClient, ChatError
 
+from . import control
 from . import prompt_files
 from .compress import CompressError, Compressor, add_band
 from .context import Context, estimate_tokens
@@ -193,6 +194,9 @@ class Loop:
 
     # ── 一步 ──────────────────────────────────────────────────────────────
     def step(self) -> str:
+        if control.stop_requested():
+            raise control.StopRequested()
+        self._maybe_reload()
         self.turn = self.store.next_turn()
         if hasattr(self.memory, "step"):
             self.memory.step = self.turn
@@ -209,6 +213,7 @@ class Loop:
         self._compress_if_needed()
         tools = self.tools()
         messages = self.context.messages()
+        self.store.set_status("thinking")
         message = self._chat(messages, tools)
         usage = dict(getattr(self.client, "last_usage", None) or {})
         self.last_usage = usage
@@ -238,12 +243,18 @@ class Loop:
                       "prompt_tokens": self.last_prompt_tokens,
                       "cache_hit": int(usage.get("prompt_cache_hit_tokens") or 0),
                       "compressions": self.compressions})
+        if not self.parked:
+            self.store.set_status("idle")
         return kind
 
     def run(self, max_steps: Optional[int] = None) -> int:
         limit = self.config.max_steps if max_steps is None else max_steps
         self._maintain()
-        self._resume_waits()
+        resumed = self._resume_waits()
+        # 刚起来：没挂着的等、也没有人说话，就先等着。不然模型会对着块的最后
+        # 一句再应一遍——每次重启都白说两句，还把记录弄脏。
+        if self.standby and not resumed and not self.store.has_pending():
+            self._park("刚起来，没有动静")
         while not (limit and self.steps >= limit):
             self.step()
             if self.parked:
@@ -268,6 +279,7 @@ class Loop:
                 return self.client.chat(messages, tools=tools or None)
             except ChatError as exc:
                 self.retries += 1
+                self.store.set_status("retry", "%s（第 %d 次）" % (exc, self.retries))
                 self.echo("[重试] 第 %d 次没通（%s），%d 秒后再试"
                           % (self.retries, exc, int(delay)))
                 time.sleep(delay)
@@ -336,9 +348,31 @@ class Loop:
             fixed += estimate_tokens(json.dumps(tools, ensure_ascii=False))
         self.current_real = max(0, self.last_prompt_tokens - fixed)
 
+    def _maybe_reload(self) -> None:
+        """网页刚改过记录（删了一条）：把两块原文按库里的重读一遍。
+
+        不重启也能生效——这正是「删一条消息」该有的代价。
+        """
+        if not control.reload_requested():
+            return
+        control.clear_reload()
+        state = self.store.load_state()
+        self.context.set_state(state["bands"], state["previous"], state["current"])
+        self.previous_id = state["previous_id"]
+        self.current_id = state["current_id"]
+        self.current_real = self.context.current_tokens()
+        self.last_prompt_tokens = 0
+        self.echo("[重读] 记录被改过，已按库里的重来")
+
     def _append(self, message: dict, meta: dict = None):
+        # 思考内容不写进记录（它不进下一轮的上下文），但留在 meta 里：
+        # 网页要把「思考」画成一行可展开的东西，靠的就是它。
+        meta = dict(meta or {})
+        think = str(message.get("reasoning_content") or "").strip()
+        if think:
+            meta["think"] = think
         entry = self.context.append(message, meta)
-        self.store.append_entry(self.current_id, entry)
+        self.store.append_entry(self.current_id, entry, step=self.turn)
         return entry
 
     # ── 工具 ──────────────────────────────────────────────────────────────
@@ -372,6 +406,8 @@ class Loop:
             if name == "wait":
                 return self._wait(arguments)
             return self.memory.call(name, arguments)
+        except control.StopRequested:
+            raise
         except Exception as exc:
             # 工具坏了不能让循环停：把原因写进结果，模型下一步能看到。
             return "工具出错：%s" % exc
@@ -405,17 +441,25 @@ class Loop:
             return str(exc)
 
         started = time.time()
+        self.store.set_status("waiting", spec or "、".join(kinds) or "任何动静")
         while True:
+            if control.stop_requested():
+                # 不再编一句「要重启，先停。」塞进记录：那会让模型以为有人跟它说话，
+                # 于是留下两句道别。直接退，没答完的调用留给下次起来接着等。
+                raise control.StopRequested()
             item = self.store.take(kinds or None)
             if item is not None:
                 self._after_tool.append(_inbox_entry(item))
                 self.since_external = 0
+                self.store.set_status("thinking")
                 return _woke_text(str(item["kind"]), time.time() - started)
             if deadline is not None and time.time() >= deadline:
+                self.store.set_status("thinking")
                 return _timeout_text(spec, time.time() - started)
             if deadline is None and not self.standby:
                 # 没人能把消息送进来：无上界的等没有意义，直接停。
                 self.parked = True
+                self.store.set_status("parked", "没有输入通道")
                 self.echo("[等待] 没有输入通道，先停住")
                 return "没有动静。"
             self._breathe(deadline)
@@ -423,6 +467,7 @@ class Loop:
     def _breathe(self, deadline: Optional[float]) -> None:
         """等的时候顺手做维护：块满了就压，过期的短期记忆归档。"""
         self._maintain()
+        self._maybe_reload()
         span = _POLL_SECONDS
         if deadline is not None:
             span = min(span, max(0.01, deadline - time.time()))
@@ -450,10 +495,14 @@ class Loop:
         except Exception as exc:
             self.log("[清进件失败] %s" % exc)
 
-    def _resume_waits(self) -> None:
-        """上次是在等的时候断的：块里有没有结果的 wait 调用，就接着等。"""
+    def _resume_waits(self) -> bool:
+        """上次是在等的时候断的：块里有没有结果的 wait 调用，就接着等。
+
+        返回 True 表示接过一次——那这一次的记录变了，起来之后该说话，不该干等。
+        """
         if not self.standby:
-            return
+            return False
+        resumed = False
         entries = self.context.current.entries
         answered = {str(entry.message.get("tool_call_id") or "")
                     for entry in entries
@@ -468,6 +517,8 @@ class Loop:
                 self._append({"role": "tool", "tool_call_id": call_id,
                               "content": self._wait(str(function.get("arguments") or "{}"))})
                 self._flush_after_tool()
+                resumed = True
+        return resumed
 
     # ── 压缩 ──────────────────────────────────────────────────────────────
     def _compress_if_needed(self) -> None:
@@ -520,6 +571,7 @@ class Loop:
     def _park(self, note: str) -> None:
         """没有动作：不说了，等有动静。有输入通道就真等，没有就停住。"""
         self.echo("[挂起] %s" % (note or "没有动作"))
+        self.store.set_status("parked", note or "没有动作")
         if self.standby:
             self._wait("{}")
             self._flush_after_tool()

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS entries (
     tool_call_id TEXT NOT NULL DEFAULT '',
     ts TEXT NOT NULL,
     meta TEXT NOT NULL DEFAULT '{}',
+    step INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (block_id, seq)
 );
 CREATE TABLE IF NOT EXISTS state (
@@ -76,6 +77,10 @@ class LoopStore:
         self.path = path
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        # 网页那边另开一条连接读同一个库：WAL 让读不挡写，忙等给并发留余量。
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         self._migrate()
         self.db.commit()
@@ -91,6 +96,10 @@ class LoopStore:
         if "meta" not in entry_columns:
             self.db.execute(
                 "ALTER TABLE entries ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")
+        if "step" not in entry_columns:
+            # 旧库的原文不知道是哪一步写的；补 0，网页上归到「没有步号」那一档。
+            self.db.execute(
+                "ALTER TABLE entries ADD COLUMN step INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.db.close()
@@ -172,7 +181,7 @@ class LoopStore:
                 "INSERT INTO blocks (start_ts, state) VALUES (?, 'open')", (start_ts,))
         return int(cursor.lastrowid)
 
-    def append_entry(self, block_id: int, entry: BlockEntry) -> None:
+    def append_entry(self, block_id: int, entry: BlockEntry, step: int = 0) -> None:
         message = entry.message
         seq = int(self.db.execute(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE block_id = ?",
@@ -180,12 +189,13 @@ class LoopStore:
         with self.db:
             self.db.execute(
                 "INSERT INTO entries (block_id, seq, role, content, tool_calls,"
-                " tool_call_id, ts, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " tool_call_id, ts, meta, step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block_id, seq, str(message.get("role") or ""),
                  str(message.get("content") or ""),
                  json.dumps(list(message.get("tool_calls") or []), ensure_ascii=False),
                  str(message.get("tool_call_id") or ""), entry.ts,
-                 json.dumps(dict(entry.meta or {}), ensure_ascii=False)))
+                 json.dumps(dict(entry.meta or {}), ensure_ascii=False),
+                 int(step or 0)))
 
     def promote_block(self, block_id: int, end_ts: str) -> None:
         with self.db:
@@ -222,6 +232,95 @@ class LoopStore:
             (block_id,)).fetchall()
         return [{"role": str(row["role"]), "content": str(row["content"]),
                  "ts": str(row["ts"])} for row in rows]
+
+    # ── 网页：增量流与状态 ────────────────────────────────────────────────
+    def feed(self, since_block: int = 0, since_seq: int = 0,
+             limit: int = 300) -> List[dict]:
+        """按 (block_id, seq) 增量读原文：网页断线重连靠它补齐，不重不漏。"""
+        rows = self.db.execute(
+            "SELECT block_id, seq, role, content, tool_calls, tool_call_id, ts,"
+            " meta, step FROM entries"
+            " WHERE block_id > ? OR (block_id = ? AND seq > ?)"
+            " ORDER BY block_id, seq LIMIT ?",
+            (int(since_block), int(since_block), int(since_seq),
+             max(1, int(limit)))).fetchall()
+        return [{"block": int(row["block_id"]), "seq": int(row["seq"]),
+                 "role": str(row["role"]), "text": str(row["content"] or ""),
+                 "calls": json.loads(row["tool_calls"] or "[]"),
+                 "call_id": str(row["tool_call_id"] or ""),
+                 "ts": str(row["ts"]), "meta": json.loads(row["meta"] or "{}"),
+                 "step": int(row["step"])} for row in rows]
+
+    def usage_since(self, since_step: int = 0, limit: int = 300) -> List[dict]:
+        rows = self.db.execute(
+            "SELECT step, ts, prompt, completion, cache_hit, cache_miss, reasoning"
+            " FROM usage WHERE step > ? ORDER BY step LIMIT ?",
+            (int(since_step), max(1, int(limit)))).fetchall()
+        return [{"step": int(row["step"]), "ts": str(row["ts"]),
+                 "prompt": int(row["prompt"]), "completion": int(row["completion"]),
+                 "cache_hit": int(row["cache_hit"]),
+                 "cache_miss": int(row["cache_miss"]),
+                 "reasoning": int(row["reasoning"])} for row in rows]
+
+    def set_status(self, kind: str, detail: str = "") -> None:
+        """它现在在干什么：想 / 等 / 挂起 / 重试。网页读这一行，不碰运行时内存。"""
+        value = json.dumps({"kind": str(kind), "detail": str(detail), "ts": now()},
+                           ensure_ascii=False)
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO state (key, value) VALUES ('status', ?)", (value,))
+
+    def status(self) -> dict:
+        row = self.db.execute(
+            "SELECT value FROM state WHERE key = 'status'").fetchone()
+        if row is None:
+            return {"kind": "", "detail": "", "ts": ""}
+        try:
+            data = json.loads(row["value"])
+        except ValueError:
+            return {"kind": "", "detail": "", "ts": ""}
+        return {"kind": str(data.get("kind") or ""),
+                "detail": str(data.get("detail") or ""),
+                "ts": str(data.get("ts") or "")}
+
+    def delete_entry(self, block_id: int, seq: int) -> List[int]:
+        """删一条原文，连它的配对一起删（调用删结果、结果删调用）。
+
+        只允许改 open / previous 两块：已压缩的块，原文和摘要是一份东西，
+        删了原文摘要还在，只会更乱。
+        """
+        row = self.db.execute(
+            "SELECT state FROM blocks WHERE id = ?", (block_id,)).fetchone()
+        if row is None:
+            raise ValueError("没有这一块")
+        if str(row["state"]) == "compressed":
+            raise ValueError("这一块已经压成摘要了，删原文没有意义")
+        target = self.db.execute(
+            "SELECT seq, tool_call_id, tool_calls FROM entries"
+            " WHERE block_id = ? AND seq = ?", (block_id, seq)).fetchone()
+        if target is None:
+            raise ValueError("没有这一条")
+        doomed = {int(seq)}
+        ids = [str(call.get("id") or "")
+               for call in json.loads(target["tool_calls"] or "[]")]
+        if ids:
+            rows = self.db.execute(
+                "SELECT seq FROM entries WHERE block_id = ? AND tool_call_id IN (%s)"
+                % ",".join("?" * len(ids)), (block_id, *ids)).fetchall()
+            doomed.update(int(item["seq"]) for item in rows)
+        call_id = str(target["tool_call_id"] or "")
+        if call_id:
+            for item in self.db.execute(
+                    "SELECT seq, tool_calls FROM entries WHERE block_id = ?",
+                    (block_id,)).fetchall():
+                if any(str(call.get("id") or "") == call_id
+                       for call in json.loads(item["tool_calls"] or "[]")):
+                    doomed.add(int(item["seq"]))
+        with self.db:
+            self.db.execute(
+                "DELETE FROM entries WHERE block_id = ? AND seq IN (%s)"
+                % ",".join("?" * len(doomed)), (block_id, *sorted(doomed)))
+        return sorted(doomed)
 
     # ── 用量 ──────────────────────────────────────────────────────────────
     def add_usage(self, step: int, usage: dict) -> None:
@@ -283,6 +382,16 @@ class LoopStore:
                 "INSERT INTO inbox (ts, kind, text) VALUES (?, ?, ?)",
                 (now(), str(kind or "user"), str(text or "")))
         return int(cursor.lastrowid)
+
+    def has_pending(self, kinds: Optional[List[str]] = None) -> bool:
+        """有没有还没读的进件——启动时用它判断「该不该开口」。"""
+        sql = "SELECT 1 FROM inbox WHERE consumed = 0"
+        args: list = []
+        if kinds:
+            sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+            args = list(kinds)
+        sql += " LIMIT 1"
+        return self.db.execute(sql, args).fetchone() is not None
 
     def take(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
         """取最早一条没读过的，顺手标成已读；kinds 是白名单。"""

@@ -13,10 +13,14 @@ import os
 import shutil
 import sys
 import threading
+import time
 import uuid
 
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
+from . import control
 from . import prompt_files
+from . import settings
+from . import web
 from .cli import _clean_line
 from .config import LoopConfig
 from .context import (Band, Block, BlockEntry, Context, estimate_tokens,
@@ -865,6 +869,259 @@ def check_budget() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def check_web() -> None:
+    """网页面：没令牌就 401；说一句能进 inbox；流与上下文读得出东西。"""
+    import urllib.error
+    import urllib.request
+
+    workdir = _tempdir("loop-web-")
+    httpd = None
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                              data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        httpd = web.serve(config, db_path, "tok", "127.0.0.1", 0)
+        base = "http://127.0.0.1:%d" % httpd.server_address[1]
+
+        def get(path, token="tok"):
+            request = urllib.request.Request(base + path)
+            if token:
+                request.add_header("Authorization", "Bearer " + token)
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+
+        def post(path, payload, token="tok"):
+            data = json.dumps(payload).encode("utf-8")
+            request = urllib.request.Request(base + path, data=data, method="POST")
+            request.add_header("Content-Type", "application/json")
+            if token:
+                request.add_header("Authorization", "Bearer " + token)
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+
+        try:
+            get("/state", token="")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 401, "没令牌该 401，拿到 %d" % exc.code)
+        else:
+            raise AssertionError("没令牌也放过去了")
+
+        status, _ = post("/say", {"text": "在吗"})
+        check(status == 200, "说一句该成功")
+        loop.step()                      # 把 inbox 里那句读进记录
+        _, state = get("/state")
+        check(state["name"] == "自检", "状态里该有名字")
+        check(state["steps"] >= 1, "状态里该有步数：%r" % state["steps"])
+        check(state["block_tokens"] == 100000, "状态里该有块限额")
+        check("kind" in state["status"], "状态里该有它现在在干什么")
+
+        _, feed = get("/feed?since=0:0")
+        check(any("在吗" in item["text"] for item in feed["entries"]),
+              "流里该有刚说的话")
+        check(any(item["step"] >= 1 for item in feed["entries"]),
+              "流里每条要带步号")
+        check(feed["cursor"]["seq"] >= 1, "游标要往前走")
+
+        _, context = get("/context")
+        check(context["current"]["count"] >= 1, "上下文里该有当前块")
+        check(context["sink"]["chars"] > 0, "上下文里该有 sink")
+        check(context["limits"]["block_tokens"] == 100000, "上下文里该有块限额")
+        check("bands" in context and "previous" in context, "上下文里该有旧段与上一块")
+
+        cursor = "%d:%d" % (feed["cursor"]["block"], feed["cursor"]["seq"])
+        _, more = get("/feed?since=" + cursor)
+        check(more["entries"] == [], "游标之后不该重复给同一条")
+        store.close()
+    finally:
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_settings() -> None:
+    """设置页：能读、能写、越界拒绝；改提示词不重启就生效；重启是请求不是硬杀。"""
+    import urllib.error
+    import urllib.request
+
+    workdir = _tempdir("loop-set-")
+    httpd = None
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, data_dir=workdir)
+        LoopStore(db_path).close()
+        prompt_files.use_overrides(workdir)
+        httpd = web.serve(config, db_path, "tok", "127.0.0.1", 0, data_dir=workdir)
+        base = "http://127.0.0.1:%d" % httpd.server_address[1]
+
+        def call(path, payload=None, method="GET"):
+            data = None if payload is None else json.dumps(payload).encode("utf-8")
+            request = urllib.request.Request(base + path, data=data, method=method)
+            request.add_header("Authorization", "Bearer tok")
+            if data is not None:
+                request.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.loads(response.read())
+
+        payload = call("/settings")
+        check(len(payload["fields"]) > 10, "设置里该有旋钮清单")
+        check(payload["values"]["block_tokens"] == 100000, "设置里该有当前值")
+        check(any(item["key"] == "sink" for item in payload["prompts"]),
+              "设置里该有提示词")
+
+        call("/settings", {"values": {"block_tokens": 5000}}, "PUT")
+        check(settings.load(workdir).get("block_tokens") == 5000, "改的值要落盘")
+        check(config.block_tokens == 5000, "存了就该立刻生效，不用等重启")
+
+        try:
+            call("/settings", {"values": {"block_tokens": 1}}, "PUT")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 400, "越界该 400，拿到 %d" % exc.code)
+        else:
+            raise AssertionError("越界的值也存进去了")
+
+        call("/prompts", {"key": "sink", "text": "我是测试。"}, "PUT")
+        check(prompt_files.text("sink") == "我是测试。", "改提示词该立刻生效")
+        call("/prompts", {"key": "sink", "text": ""}, "PUT")
+        check("我是$name" in prompt_files.text("sink"), "清空该回到默认")
+
+        call("/restart", {}, "POST")
+        check(control.stop_requested(), "重启是给循环一个停止请求")
+        control.reset()
+        check(not control.stop_requested(), "重置之后不该还停着")
+    finally:
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+        prompt_files.use_overrides("")
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_boot_idle() -> None:
+    """刚起来没人说话：先等着，不许自己开口；有人说了才走第一步。"""
+    workdir = _tempdir("loop-boot-")
+    timer = None
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                              data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+
+        def push():
+            writer = LoopStore(db_path)
+            writer.push("user", "在吗")
+            writer.close()
+
+        timer = threading.Timer(0.25, push)
+        timer.start()
+        started = time.time()
+        loop.run(max_steps=1)
+        elapsed = time.time() - started
+        timer.join()
+
+        check(loop.steps == 1, "起来之后只该走被叫醒的那一步：%d" % loop.steps)
+        check(elapsed >= 0.2, "该先等到有人说话（等了 %.2f 秒）" % elapsed)
+        check("对方：在吗" in loop.context.current_text(), "叫醒它的那句该进记录")
+        store.close()
+    finally:
+        if timer is not None:
+            timer.cancel()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_delete() -> None:
+    """删一条原文：连它的工具结果一起删；压过的块不给删。"""
+    workdir = _tempdir("loop-del-")
+    try:
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        block_id = store.open_block("2026-01-01 00:00:00")
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "wait", "arguments": "{}"}}
+        store.append_entry(block_id, BlockEntry(
+            {"role": "user", "content": "在吗"}, "2026-01-01 00:00:01"), step=1)
+        store.append_entry(block_id, BlockEntry(
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            "2026-01-01 00:00:02"), step=1)
+        store.append_entry(block_id, BlockEntry(
+            {"role": "tool", "tool_call_id": "c1", "content": "好"},
+            "2026-01-01 00:00:03"), step=1)
+        check(len(store.feed(0, 0)) == 3, "三条都该在")
+
+        removed = store.delete_entry(block_id, 2)
+        check(sorted(removed) == [2, 3], "删调用要连结果一起删：%r" % removed)
+        left = store.feed(0, 0)
+        check(len(left) == 1 and left[0]["text"] == "在吗", "只该剩用户那句")
+
+        with store.db:
+            store.db.execute("UPDATE blocks SET state = 'compressed' WHERE id = ?",
+                             (block_id,))
+        try:
+            store.delete_entry(block_id, 1)
+        except ValueError:
+            check(True, "")
+        else:
+            raise AssertionError("压过的块不该允许删原文")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_stop_raises() -> None:
+    """要重启时直接在等里退出：记录里一个字都不留。"""
+    workdir = _tempdir("loop-stop-")
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                              data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        control.request_stop()
+        try:
+            loop._wait('{"until": "5s"}')
+        except control.StopRequested:
+            check(True, "")
+        else:
+            raise AssertionError("要重启时该直接退出，不该返回一句话")
+        check(loop.context.current.entries == [], "停的时候不该往记录里写东西")
+        control.reset()
+        store.close()
+    finally:
+        control.reset()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_reload() -> None:
+    """网页删了一条：不重启，循环在下个安全点自己重读。"""
+    workdir = _tempdir("loop-reload-")
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        loop.inject_user("在吗")
+        check("在吗" in loop.context.current_text(), "先得有一条")
+        store.delete_entry(loop.current_id, 1)
+        control.request_reload()
+        loop._maybe_reload()
+        check("在吗" not in loop.context.current_text(), "重读之后记录里就不该有它")
+        check(not control.reload_requested(), "重读一次之后开关要复位")
+        store.close()
+    finally:
+        control.clear_reload()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main() -> int:
     check_summary()
     check_compress()
@@ -891,6 +1148,12 @@ def main() -> int:
     check_prompts()
     check_budget()
     check_remember_hidden()
+    check_web()
+    check_settings()
+    check_boot_idle()
+    check_delete()
+    check_stop_raises()
+    check_reload()
     print("ok: %d checks" % CHECKS[0])
     return 0
 

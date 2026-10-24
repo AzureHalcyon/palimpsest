@@ -11,6 +11,8 @@
 | `compress.py` | 压缩：一块一次，调摘要模型（默认 deepseek-flash） |
 | `store.py` | SQLite：`bands` / `blocks` / `entries` / `recall_log` / `usage` |
 | `driver.py` | 步循环：工具、正文、停、攒块、预算 |
+| `web.py` | 网页面与接口：`/say` `/feed` `/context` `/state`（只读库、只写 inbox） |
+| `web/index.html` | 单页界面：思考-调用时间线 + 上下文分块监视 |
 | `memory_bridge.py` | 工具面：remember / recall / recollect |
 | `prompt_files.py` | 读 `prompts/` 下的文本，填 `$占位符` |
 | `prompts/` | 提示词：sink、压缩、工具说明 |
@@ -49,6 +51,32 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --max-steps
 `--stdin` 把标准输入接上：直接打字回车，一行一条消息进 `inbox`，模型用 `wait`
 等的时候会真的等，一有消息就醒。管道输入要 UTF-8（PowerShell 先设
 `$OutputEncoding = [System.Text.Encoding]::UTF8`），BOM 会自动去掉。
+
+## 网页
+
+```powershell
+python -m loop --name 小满 --http 127.0.0.1:8080
+```
+
+开了 `--http` 就等于有输入通道（和 `--stdin` 一样，让 `wait` 真的等）。首页是单文件
+`web/index.html`，不起前端工程、不加依赖。令牌自动生成在 `<data>/web-token`
+（600），也可以 `--token` 指定。**默认只绑 127.0.0.1**：对外要从隧道走，
+不是把端口开到公网。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /say {"text": "…"}` | 写进 `inbox`，和 stdin 同一条路 |
+| `GET /feed?since=<block>:<seq>&step=<n>` | 增量原文 + 增量用量；断线重连带游标补齐 |
+| `GET /context` | sink、四段旧摘要、上一块、当前块的原文与 token |
+| `GET /state` | 在想还是在等、块与上下文占用、今天花了多少 |
+
+★ 网页这一层**只读库、只往 `inbox` 写**，不碰 `blocks` / `entries` / `bands` ——
+单写者仍然是循环那个进程，网页崩了顶多看不见，不会把记录弄坏。每条连接各开一个
+`LoopStore`（SQLite 连接不能跨线程共享），库开了 WAL，读不挡写。
+
+界面上：左边是步的时间线（每步的输入/命中/输出、说的正文、工具调用与结果），
+右边是上下文监视（当前块占多少、上一块、四段旧摘要、sink），断线重连按游标补齐，
+不重不漏。
 
 ## 等
 
@@ -152,3 +180,15 @@ python -m loop.usage --data data/loop --days 7
 ```powershell
 python -m loop.selfcheck
 ```
+## 设置
+
+网页的「设置」页可以直接改旋钮和提示词，不用登服务器。
+
+- **参数**存 `<data>/settings.json`，**只记改过的键**（没改的跟着代码默认走，升级时默认值变了也跟得上）；
+  改完点「保存并重启」。
+- **提示词**写进 `<data>/prompts.json`，每步现读，保存就生效；「恢复默认」就是删掉那条覆盖。
+
+重启不是硬杀：`control.request_stop()` 让循环走到步与步之间自己退出，systemd 的
+`Restart=always` 再把它拉起来——不会留下说了一半的正文或没有结果的调用。
+
+接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`。

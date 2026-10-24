@@ -80,12 +80,45 @@ def text(name: str) -> str:
     override = overrides().get(key)
     if override:
         return override
+    return default_text(key)
+
+
+def default_text(name: str) -> str:
+    """仓库里那份（不含用户覆盖）：界面上「恢复默认」要拿它。"""
+    key = str(name or "")
+    if key.endswith(".txt"):
+        key = key[:-4]
+    if key not in META:
+        raise PromptError("没有登记的提示词：%s" % name)
     path = os.path.join(_DIR, META[key][2])
     try:
         with io.open(path, encoding="utf-8") as handle:
             return handle.read()
     except OSError as exc:
         raise PromptError("提示词读不了：%s" % path) from exc
+
+
+def write_override(data_dir: str, key: str, body: str) -> None:
+    """写一份覆盖；`body` 为空就是删掉这条覆盖、回到默认。
+
+    整份重写而不是追加：`prompts.json` 是给人和网页看的，顺序稳定比较好读。
+    """
+    key = str(key or "")
+    if key not in META:
+        raise PromptError("没有登记的提示词：%s" % key)
+    current = overrides()
+    if str(body or "").strip():
+        current[key] = str(body)
+    else:
+        current.pop(key, None)
+    target = os.path.join(str(data_dir or "."), "prompts.json")
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    with io.open(target, "w", encoding="utf-8") as handle:
+        json.dump(current, handle, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        pass
 
 
 def render(filename: str, **fields) -> str:

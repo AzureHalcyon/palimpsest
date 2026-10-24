@@ -24,8 +24,11 @@ from .config import LoopConfig, LoopConfigError, load_credentials
 from .driver import Loop
 from .memory_bridge import MemoryBridge
 from .store import LoopStore
+from . import control
 from . import logs
 from . import prompt_files
+from . import settings
+from . import web
 
 
 def _k(tokens: int) -> str:
@@ -67,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stdin", action="store_true",
                         help="从标准输入读消息进 inbox，并让 wait 真的等；"
                              "不给就只能等时间，无上界的等会直接停")
+    parser.add_argument("--http", default="",
+                        help="网页与接口：给 host:port（如 127.0.0.1:8080）就开；"
+                             "空=不开。开了就等于有输入通道")
+    parser.add_argument("--token", default="",
+                        help="网页令牌；不给就自动生成并存在 <data>/web-token")
     parser.add_argument("--say", action="append", default=[],
                         help="开场塞进记录的用户消息，可重复")
     return parser
@@ -141,12 +149,14 @@ def main(argv=None) -> int:
                         lexical=args.lexical,
                         recent_steps=args.recent_steps,
                         tool_fold_keep=args.tool_fold_keep,
-                        standby=args.stdin,
+                        standby=bool(args.stdin or args.http),
                         daily_token_cap=args.daily_token_cap,
                         daily_token_warn=args.daily_token_warn,
                         park_seconds=args.park_seconds,
                         max_steps=args.max_steps,
                         data_dir=args.data)
+    # 网页上改过的旋钮存在 <data>/settings.json，盖掉命令行给的值。
+    settings.apply(config, settings.load(config.data_dir))
     store = LoopStore(config.db_path())
     memory = MemoryBridge(args.memory_data, embedder=embedder,
                           lexical=config.lexical,
@@ -194,11 +204,32 @@ def main(argv=None) -> int:
         threading.Thread(target=_stdin_pump, args=(config.db_path(),),
                          daemon=True).start()
 
+    if args.http:
+        host, _, port_text = args.http.rpartition(":")
+        try:
+            port = int(port_text)
+        except ValueError:
+            print("--http 要给 host:port，比如 127.0.0.1:8080", file=sys.stderr)
+            return 1
+        token = args.token or web.make_token(os.path.join(args.data, "web-token"))
+        try:
+            web.serve(config, config.db_path(), token, host or "127.0.0.1", port,
+                  data_dir=config.data_dir, loop=loop)
+        except OSError as exc:
+            print("网页起不来：%s" % exc, file=sys.stderr)
+            return 1
+        print("[网页] http://%s:%d/ · 令牌 %s" % (host or "127.0.0.1", port, token),
+              flush=True)
+
     for text in args.say:
         loop.inject_user(text)
 
     try:
         loop.run()
+    except control.StopRequested:
+        print("[重启] 收到停止请求，退出（记录不受影响）", flush=True)
+        store.close()
+        return 0
     except KeyboardInterrupt:
         print("\n[中断]", flush=True)
     except ChatError as exc:
