@@ -195,6 +195,11 @@ def _cmd_ingest(args) -> int:
 
 
 def _cmd_freeze(args) -> int:
+    graph = Graph.open(os.path.abspath(args.data))
+    removed = graph.purge_expired()
+    if removed:
+        graph.save()
+        print("清掉过期的短记忆：%d 件" % removed)
     path = frozen_store.update_global(args.data)
     print("冻结：%s" % path)
     return 0

@@ -125,12 +125,39 @@ class Graph:
             "seq": self.next_seq(),
             "created": _now(),
             "segments": [],
+            "notes": [],
+            "scope": "long",
+            "expires_at": "",
             "consolidation": 0.0,
             "access": 0.0,
             "access_ts": 0.0,
             "reward": False,
         }
         return event_id
+
+    def add_note(self, event_id: str, text: str, ts: str = "",
+                 scope: str = "", expires_at: str = "") -> dict:
+        """Append model-written material to an event (no dialogue turn needed)."""
+        event = self.events[event_id]
+        notes = event.setdefault("notes", [])
+        notes.append({"ts": str(ts or _now()), "text": str(text)})
+        event["updated"] = _now()
+        if scope:
+            event["scope"] = str(scope)
+        if expires_at:
+            event["expires_at"] = str(expires_at)
+        return event
+
+    def purge_expired(self, now_iso: str = "") -> int:
+        """Drop short-scope events whose expiry has passed."""
+        now_iso = str(now_iso or _now())
+        expired = [event_id for event_id, event in self.events.items()
+                   if str(event.get("scope") or "long") == "short"
+                   and str(event.get("expires_at") or "")
+                   and str(event["expires_at"]) <= now_iso]
+        for event_id in expired:
+            self.remove_event(event_id)
+        return len(expired)
 
     def resolve(self, reference: str) -> Optional[str]:
         reference = (reference or "").strip()

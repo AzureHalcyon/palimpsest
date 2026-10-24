@@ -56,20 +56,33 @@ def event_segments(graph, data_dir: str, event_id: str,
 
 
 def event_text(graph, data_dir: str, event_id: str) -> str:
-    return "\n".join("%s\n%s" % (segment["date"], segment["text"])
-                     for segment in event_segments(graph, data_dir, event_id))
+    event = graph.events.get(event_id) or {}
+    parts = []
+    for note in event.get("notes") or []:
+        stamp = str(note.get("ts") or "")[:10]
+        parts.append("%s\n%s" % (stamp, str(note.get("text") or "")))
+    for segment in event_segments(graph, data_dir, event_id):
+        parts.append("%s\n%s" % (segment["date"], segment["text"]))
+    return "\n".join(parts)
 
 
 def event_label(graph, event_id: str) -> str:
-    """Model-written identity of a node: its name and its scope.
+    """Model-written identity of a node: name, context, and written notes.
 
     Retrieval (vectors and terms alike) is built on this, not on the dialogue
-    transcript.  The transcript is the writing model's raw material only.
+    transcript.  Loop events have no transcript; their notes are the material.
     """
     event = graph.events.get(event_id) or {}
     name = str(event.get("name") or "").strip()
     context = str(event.get("context") or "").strip()
-    return "%s\n%s" % (name, context) if context else name
+    notes = " ".join(str(note.get("text") or "")
+                     for note in event.get("notes") or []).strip()
+    parts = [name]
+    if context:
+        parts.append(context)
+    if notes:
+        parts.append(notes)
+    return "\n".join(part for part in parts if part)
 
 
 def term_sets(graph, data_dir: str) -> Dict[str, set]:
@@ -81,6 +94,11 @@ def term_sets(graph, data_dir: str) -> Dict[str, set]:
 
 def event_date(graph, data_dir: str, event_id: str) -> str:
     event = graph.events.get(event_id) or {}
+    notes = event.get("notes") or []
+    if notes:
+        stamp = str(notes[0].get("ts") or "")
+        if stamp:
+            return stamp[:10]
     segments = event.get("segments") or []
     if segments:
         turns = _session_turns(data_dir, str(segments[0].get("session")))
@@ -92,6 +110,9 @@ def event_date(graph, data_dir: str, event_id: str) -> str:
 
 def event_last_ts(graph, data_dir: str, event_id: str) -> str:
     event = graph.events.get(event_id) or {}
+    notes = event.get("notes") or []
+    if notes:
+        return str(notes[-1].get("ts") or "")[:19]
     segments = event.get("segments") or []
     if not segments:
         return ""

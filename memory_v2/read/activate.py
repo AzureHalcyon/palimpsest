@@ -127,11 +127,12 @@ def _vector_neighbors(ids: list, vectors: dict, limit: int) -> dict:
 
 
 def _neighbor_fingerprint(texts: dict, sets: dict, store, limit: int,
-                          vectors: dict = None) -> str:
+                          vectors: dict = None, lexical: bool = True) -> str:
     digest = hashlib.sha1()
     model = str(getattr(store, "model", "") or "")
     dim = int(getattr(store, "dim", 0) or 0)
-    digest.update(("k=%d|model=%s|dim=%d|" % (limit, model, dim)).encode("utf-8"))
+    digest.update(("k=%d|lex=%d|model=%s|dim=%d|"
+                   % (limit, 1 if lexical else 0, model, dim)).encode("utf-8"))
     for event_id in sorted(texts or {}):
         digest.update(str(event_id).encode("utf-8"))
         digest.update(hashlib.sha1(str(texts[event_id]).encode("utf-8")).digest())
@@ -182,7 +183,8 @@ def _save_neighbor_cache(path: str, fingerprint: str, content: dict) -> None:
 
 
 def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LIMIT,
-                      texts: dict = None, data_dir: str = "", store=None) -> dict:
+                      texts: dict = None, data_dir: str = "", store=None,
+                      lexical: bool = True) -> dict:
     """Top-k content neighbours, computed once per graph/vector version.
 
     The old path compared every node with every event inside the propagation
@@ -191,7 +193,7 @@ def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LI
     available), cached in memory and on disk, and propagation only walks the
     short list.
     """
-    fingerprint = _neighbor_fingerprint(texts or {}, sets, store, limit, vectors)
+    fingerprint = _neighbor_fingerprint(texts or {}, sets, store, limit, vectors, lexical)
     cached = _CONTENT_CACHE.get(fingerprint)
     if cached is not None:
         _CONTENT_CACHE.move_to_end(fingerprint)
@@ -206,7 +208,7 @@ def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LI
 
     ids = [event_id for event_id in graph.events if event_id in sets]
     with_vectors = [event_id for event_id in ids if vectors.get(event_id)]
-    lexical = _lexical_neighbors(ids, sets, limit)
+    lexical_pairs = _lexical_neighbors(ids, sets, limit) if lexical else {}
     if with_vectors:
         try:
             vector = _vector_neighbors(with_vectors, vectors, limit)
@@ -215,7 +217,7 @@ def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LI
         merged = {}
         for event_id in ids:
             candidates = {}
-            for value, other in lexical.get(event_id, ()):
+            for value, other in lexical_pairs.get(event_id, ()):
                 candidates[other] = max(candidates.get(other, 0.0), value)
             for value, other in vector.get(event_id, ()):
                 candidates[other] = max(candidates.get(other, 0.0), value)
@@ -224,7 +226,7 @@ def content_neighbors(graph, sets: dict, vectors: dict, limit: int = NEIGHBOR_LI
                 reverse=True)[:limit]
         content = merged
     else:
-        content = lexical
+        content = lexical_pairs
 
     _CONTENT_CACHE[fingerprint] = content
     while len(_CONTENT_CACHE) > _CONTENT_CACHE_LIMIT:
@@ -254,13 +256,23 @@ def _access(event: dict, now: float) -> float:
 
 def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
              session: str = "", exclude=(), after: str = "", before: str = "",
-             limit: int = 3, vector_store=None) -> dict:
+             limit: int = 3, vector_store=None, lexical: bool = True,
+             recent_steps: int = 0, current_step: int = 0) -> dict:
     excluded = {exclude} if isinstance(exclude, str) else set(exclude or ())
     excluded.discard("")
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
     allowed = set()
     for event_id, event in graph.events.items():
         if event_id in excluded:
             continue
+        if (str(event.get("scope") or "long") == "short"
+                and str(event.get("expires_at") or "")
+                and str(event["expires_at"]) <= now_iso):
+            continue
+        if recent_steps > 0 and current_step > 0:
+            step = int(event.get("step") or 0)
+            if step and step > current_step - recent_steps:
+                continue
         segments = event.get("segments") or []
         if session and not any(str(segment.get("session") or "") != session
                                for segment in segments):
@@ -281,7 +293,7 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
         dim=int(getattr(config, "embed_dim", 0) or 0))
     vectors = event_vectors(graph, data_dir, texts, embedder, store=store)
     content = content_neighbors(graph, sets, vectors, limit=NEIGHBOR_LIMIT, texts=texts,
-                                data_dir=data_dir, store=store)
+                                data_dir=data_dir, store=store, lexical=lexical)
 
     query_terms = set()
     for keyword in keywords:
@@ -294,13 +306,14 @@ def activate(graph, data_dir: str, keywords, embedder=None, prior=None,
 
     query_idf = sum(weights.get(term, 1.0) for term in query_terms)
     term_norms = {}
-    for event_id in allowed:
-        name_terms = terms(str(graph.events[event_id].get("name") or ""))
-        text_idf = sum(weights.get(term, 1.0) for term in query_terms & sets[event_id])
-        name_idf = sum(weights.get(term, 1.0) for term in query_terms & name_terms)
-        if query_idf:
-            term_norms[event_id] = min(
-                1.0, (text_idf + 4.0 * name_idf) / (query_idf * 5.0))
+    if lexical:
+        for event_id in allowed:
+            name_terms = terms(str(graph.events[event_id].get("name") or ""))
+            text_idf = sum(weights.get(term, 1.0) for term in query_terms & sets[event_id])
+            name_idf = sum(weights.get(term, 1.0) for term in query_terms & name_terms)
+            if query_idf:
+                term_norms[event_id] = min(
+                    1.0, (text_idf + 4.0 * name_idf) / (query_idf * 5.0))
 
     sims = {event_id: (cosine(query_vector, vectors.get(event_id) or [])
                        if query_vector else 0.0)
