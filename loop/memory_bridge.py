@@ -14,99 +14,93 @@ from typing import Callable, List, Optional
 
 from memory_v2.core.embed import EmbedError
 from memory_v2.read.activate import activate
+from memory_v2.read.archive import archive_expired
 from memory_v2.read.search import event_date, event_segments
-from memory_v2.read.write import write_memory
 from memory_v2.store.frozen import global_dir
 from memory_v2.store.graph import Graph
 
+from . import prompt_files
 from .context import now
 
 
-REMEMBER_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "remember",
-        "description": (
-            "把这件事写进记忆。name 是以后搜它的键：主语 + 动作 + 结果，6–24 字；"
-            "note 是你自己写的记得的内容，一两段，写结论、数字、待办，不抄过程。"
-            "scope=long 长期保留，short 只留几天（工作用）。"
-            "写进去的内容不会回到当前记录，之后要看就用 recall / recollect。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string",
-                         "description": "新事件的名字；已有同名就挂到那件上。"},
-                "event": {"type": "string",
-                          "description": "可选，挂到已有事件（id 或唯一名字）。"},
-                "note": {"type": "string",
-                         "description": "要记住的内容，一两段。"},
-                "links": {"type": "array", "items": {"type": "string"},
-                          "description": "可选，连到相关的旧事件。"},
-                "scope": {"type": "string", "enum": ["long", "short"],
-                          "description": "long 长期，short 只留几天；默认 long。"},
-                "days": {"type": "integer",
-                         "description": "scope=short 时保留几天，默认 3。"},
+def _remember_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": text["remember"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": text["remember.name"]},
+                    "event": {"type": "string",
+                              "description": text["remember.event"]},
+                    "note": {"type": "string",
+                             "description": text["remember.note"]},
+                    "links": {"type": "array", "items": {"type": "string"},
+                              "description": text["remember.links"]},
+                    "scope": {"type": "string", "enum": ["long", "short"],
+                              "description": text["remember.scope"]},
+                    "days": {"type": "integer",
+                             "description": text["remember.days"]},
+                },
+                "required": ["note"],
             },
-            "required": ["note"],
         },
-    },
-}
+    }
 
 
-RECALL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "recall",
-        "description": (
-            "按关键词联想记忆，返回事件的 id、名字、时间。"
-            "关键词用具体名词：人名、物、地点、事由；一次只问一件事。"
-            "看具体用 recollect；连边用 remember 的 links。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "keywords": {"type": "array", "items": {"type": "string"},
-                             "description": "一到五个具体名词，不要写相对时间。"},
-                "after": {"type": "string",
-                          "description": "可选，只要这一天之后（含当天），YYYY-MM-DD。"},
-                "before": {"type": "string",
-                           "description": "可选，只要这一天之前（含当天），YYYY-MM-DD。"},
-                "exclude": {"type": "array", "items": {"type": "string"},
-                            "description": "可选，不想再看到的 id 或名字。"},
+def _recall_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": text["recall"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keywords": {"type": "array", "items": {"type": "string"},
+                                 "description": text["recall.keywords"]},
+                    "after": {"type": "string",
+                              "description": text["recall.after"]},
+                    "before": {"type": "string",
+                               "description": text["recall.before"]},
+                    "exclude": {"type": "array", "items": {"type": "string"},
+                                "description": text["recall.exclude"]},
+                },
+                "required": ["keywords"],
             },
-            "required": ["keywords"],
         },
-    },
-}
+    }
 
 
-RECOLLECT_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "recollect",
-        "description": (
-            "取一件具体的记忆，由编写模型写成一段第一人称回忆；只有这段回忆进上下文。"
-            "先 recall 再 recollect，不要凭印象拼 id。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event": {"type": "string",
-                          "description": "事件 id，来自 recall 的候选或 remember 的返回。"},
+def _recollect_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "recollect",
+            "description": text["recollect"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event": {"type": "string",
+                              "description": text["recollect.event"]},
+                },
+                "required": ["event"],
             },
-            "required": ["event"],
         },
-    },
-}
+    }
 
 
 class MemoryBridge:
     def __init__(self, data_dir: str = "", writer: Optional[Callable[[str], str]] = None,
                  embedder=None, lexical: bool = False, recent_steps: int = 0,
-                 enabled: bool = True):
+                 enabled: bool = True, archiver=None):
         self.data_dir = str(data_dir or "")
         self.writer = writer
+        self.archiver = archiver      # 过期短期记忆的压缩：material -> {id: 一行}
+        self.on_recall = None         # (问题, 命中的 id) -> None，用来记检索日志
         self.embedder = embedder
         self.lexical = bool(lexical)
         self.recent_steps = int(recent_steps or 0)
@@ -135,7 +129,8 @@ class MemoryBridge:
     def tools(self) -> List[dict]:
         if not self.enabled:
             return []
-        return [REMEMBER_TOOL, RECALL_TOOL, RECOLLECT_TOOL]
+        text = prompt_files.tool_texts()
+        return [_remember_tool(text), _recall_tool(text), _recollect_tool(text)]
 
     def call(self, name: str, arguments: str) -> str:
         if not self.enabled:
@@ -203,6 +198,14 @@ class MemoryBridge:
         return "已记：%s（%s，%s）" % (event.get("name") or event_id, event_id,
                                       event.get("scope") or "long")
 
+    # ── 归档 ──────────────────────────────────────────────────────────────
+    def archive_expired(self) -> int:
+        """到期的短期记忆压成一行搬进 archive.jsonl，图里删掉；返回几件。"""
+        if not self.enabled:
+            return 0
+        return archive_expired(self.graph, compress=self.archiver,
+                               data_dir=self.data_dir)
+
     # ── 读 ────────────────────────────────────────────────────────────────
     def _recall(self, payload: dict) -> str:
         keywords = [str(item).strip() for item in (payload.get("keywords") or [])
@@ -237,6 +240,12 @@ class MemoryBridge:
         items = list(result["candidates"] or [])
         if not items:
             items = list(result.get("near") or [])
+        if self.on_recall is not None:
+            try:
+                self.on_recall(" ".join(keywords),
+                               [str(item["id"]) for item in items])
+            except Exception:
+                pass
         if not items:
             return "没有找到。换个关键词再试。"
         lines = ["找到 %d 件：" % len(items)]

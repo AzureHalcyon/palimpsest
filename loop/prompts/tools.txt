@@ -1,0 +1,52 @@
+# 工具面的说明文字。段落用 `## 键` 开头，键名不能改；正文随便改。
+
+## remember
+把这件事写进记忆。name 是以后搜它的键：主语 + 动作 + 结果，6–24 字；note 是你自己写的记得的内容，一两段，写结论、数字、待办，不抄过程。scope=long 长期保留，short 只留几天（工作用）。写进去的内容不会回到当前记录，之后要看就用 recall / recollect。
+
+## remember.name
+新事件的名字；已有同名就挂到那件上。
+
+## remember.event
+可选，挂到已有事件（id 或唯一名字）。
+
+## remember.note
+要记住的内容，一两段。
+
+## remember.links
+可选，连到相关的旧事件。
+
+## remember.scope
+long 长期，short 只留几天；默认 long。
+
+## remember.days
+scope=short 时保留几天，默认 3。
+
+## recall
+按关键词联想记忆，返回事件的 id、名字、时间。关键词用具体名词：人名、物、地点、事由；一次只问一件事。看具体用 recollect；连边用 remember 的 links。
+
+## recall.keywords
+一到五个具体名词，不要写相对时间。
+
+## recall.after
+可选，只要这一天之后（含当天），YYYY-MM-DD。
+
+## recall.before
+可选，只要这一天之前（含当天），YYYY-MM-DD。
+
+## recall.exclude
+可选，不想再看到的 id 或名字。
+
+## recollect
+取一件具体的记忆，由编写模型写成一段第一人称回忆；只有这段回忆进上下文。先 recall 再 recollect，不要凭印象拼 id。
+
+## recollect.event
+事件 id，来自 recall 的候选或 remember 的返回。
+
+## wait
+不说话，等一会儿：等到有动静（对方说了一句、某个任务回来了），或者到点。想清楚之前、说完之后都可以等；不带 until 就一直在等。等的时候不花调用。一次回复里只能调一个 wait；要同时等几类动静，用 kinds，不要调两个。
+
+## wait.until
+可选，最多等到什么时候：10m / 90s / 2h 这种相对写法，或者 14:30 这种钟点。不给就一直等，直到有动静。
+
+## wait.kinds
+可选，等哪几类动静：user 是对方说话，task 是任务回来。不给就是谁都行。

@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 
 from memory_v2.core.config import ChatConfig as MemoryChatConfig
 from memory_v2.core.config import Credentials as MemoryCredentials
 from memory_v2.core.embed import Embedder
 from memory_v2.core.llm import ChatError
+from memory_v2.read.archive import ask_model
 from memory_v2.read.write import write_memory
 
 from .compress import Compressor
@@ -22,6 +24,8 @@ from .config import LoopConfig, LoopConfigError, load_credentials
 from .driver import Loop
 from .memory_bridge import MemoryBridge
 from .store import LoopStore
+from . import logs
+from . import prompt_files
 
 
 def _k(tokens: int) -> str:
@@ -50,10 +54,19 @@ def build_parser() -> argparse.ArgumentParser:
                         help="打开词面检索；默认只用嵌入")
     parser.add_argument("--recent-steps", type=int, default=0,
                         help="最近 N 步写的事件暂不召回；0=关（默认）")
+    parser.add_argument("--tool-fold-keep", type=int, default=2,
+                        help="每块留最近几条超长工具结果原文；0=关（默认留 2）")
+    parser.add_argument("--daily-token-cap", type=int, default=0,
+                        help="每天 token 上限（输入+输出）；到了就等到第二天，0=不限")
+    parser.add_argument("--daily-token-warn", type=int, default=0,
+                        help="每天 token 提醒线；过了在输出里提一句，0=不提")
     parser.add_argument("--context-budget", type=int, default=80000)
     parser.add_argument("--park-seconds", type=float, default=0.0,
                         help="测试用：挂起后等多少秒再继续；0 表示挂起就停"
                              "（正常运行时等真实事件，不要空转）")
+    parser.add_argument("--stdin", action="store_true",
+                        help="从标准输入读消息进 inbox，并让 wait 真的等；"
+                             "不给就只能等时间，无上界的等会直接停")
     parser.add_argument("--say", action="append", default=[],
                         help="开场塞进记录的用户消息，可重复")
     return parser
@@ -67,6 +80,40 @@ def _utf8_streams() -> None:
                 stream.reconfigure(encoding="utf-8")
             except (OSError, ValueError):
                 pass
+
+
+def _clean_line(line: str) -> str:
+    """管道里可能带 BOM 和回车（PowerShell 的 UTF-8 管道会加 BOM）：只留正文。"""
+    return str(line or "").replace("\ufeff", "").strip()
+
+
+def _stdin_pump(db_path: str) -> None:
+    """标准输入一行一条消息，写进 inbox（另开一条连接，别和主线程抢）。
+
+    管道进来的编码看对方：按 UTF-8 读，读不出来的换成占位字符，别让线程死掉——
+    线程一死，主循环就在 wait 里等一个永远不会来的消息。
+    """
+    try:
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+    store = LoopStore(db_path)
+    try:
+        for line in sys.stdin:
+            text = _clean_line(line)
+            if not text:
+                continue
+            try:
+                store.push("user", text)
+            except Exception as exc:
+                print("[输入出错] %s" % exc, file=sys.stderr, flush=True)
+                continue
+            print("[收到] %s" % text, flush=True)
+    except Exception as exc:
+        print("[输入断了] %s" % exc, file=sys.stderr, flush=True)
+    finally:
+        store.close()
 
 
 def main(argv=None) -> int:
@@ -93,6 +140,10 @@ def main(argv=None) -> int:
                         summary_provider=args.summary_provider,
                         lexical=args.lexical,
                         recent_steps=args.recent_steps,
+                        tool_fold_keep=args.tool_fold_keep,
+                        standby=args.stdin,
+                        daily_token_cap=args.daily_token_cap,
+                        daily_token_warn=args.daily_token_warn,
                         park_seconds=args.park_seconds,
                         max_steps=args.max_steps,
                         data_dir=args.data)
@@ -100,20 +151,35 @@ def main(argv=None) -> int:
     memory = MemoryBridge(args.memory_data, embedder=embedder,
                           lexical=config.lexical,
                           recent_steps=config.recent_steps)
+    logger = logs.setup(config.data_dir)
+    prompt_files.use_overrides(config.data_dir)
 
     def on_speak(text: str) -> None:
         print("[说] %s" % text, flush=True)
+        logger.info("[说] %s" % text)
 
     def on_step(info: dict) -> None:
-        print("[%d] %s · 当前块 %s/%s · 上下文 %s/%s" % (
+        prompt = info["prompt_tokens"]
+        hit = info["cache_hit"]
+        rate = (" · 命中 %.0f%%" % (100.0 * hit / prompt)) if prompt else ""
+        print("[%d] %s · 块 %s/%s · 上下文 %s/%s%s" % (
             info["step"], info["kind"],
             _k(info["current_tokens"]), _k(config.block_tokens),
-            _k(info["prompt_tokens"]), _k(config.context_budget)), flush=True)
+            _k(prompt), _k(config.context_budget), rate), flush=True)
+        logger.info("[步] %d %s 块=%d 上下文=%d 命中=%d" % (
+            info["step"], info["kind"], info["current_tokens"],
+            prompt, hit))
+
+    def log_line(text: str) -> None:
+        logger.info(text)
 
     loop = Loop(config, credentials, store, Compressor(config, credentials), memory,
                 on_speak=on_speak, on_step=on_step,
-                echo=lambda text: print(text, flush=True))
+                echo=lambda text: (print(text, flush=True), logger.info(text)),
+                log=log_line)
     memory.writer = lambda material: write_memory(loop.client, material)
+    memory.archiver = lambda material: ask_model(loop.client, material)
+    memory.on_recall = store.add_recall
 
     print("名字：%s · 模型：%s · 摘要：%s · 嵌入：%s · 词面：%s · 预算 %s · 块 %s · 库 %s · 记忆 %s" % (
         config.name, config.model, config.summary_model,
@@ -121,6 +187,12 @@ def main(argv=None) -> int:
         "开" if config.lexical else "关",
         _k(config.context_budget), _k(config.block_tokens),
         os.path.abspath(config.db_path()), os.path.abspath(args.memory_data)), flush=True)
+
+    if args.stdin:
+        print("[输入] 标准输入已接上：直接打字回车，一行一条消息；Ctrl-C 结束。",
+              flush=True)
+        threading.Thread(target=_stdin_pump, args=(config.db_path(),),
+                         daemon=True).start()
 
     for text in args.say:
         loop.inject_user(text)
@@ -132,6 +204,11 @@ def main(argv=None) -> int:
     except ChatError as exc:
         print("模型调用失败：%s" % exc, file=sys.stderr)
         return 1
-    print("[结束] %d 步，%d 次压缩" % (loop.steps, loop.compressions), flush=True)
+    totals = store.usage_totals()
+    print("[结束] %d 步，%d 次压缩；共 %s token（输入 %s + 输出 %s），"
+          "缓存命中 %.0f%%，最大一次上下文 %s" % (
+              loop.steps, loop.compressions, _k(totals["total"]),
+              _k(totals["prompt"]), _k(totals["completion"]),
+              100.0 * totals["hit_rate"], _k(totals["peak"])), flush=True)
     store.close()
     return 0

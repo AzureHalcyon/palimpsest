@@ -9,10 +9,32 @@
 | `config.py` | 运行参数与凭证（DeepSeek 主模型、百炼摘要） |
 | `context.py` | sink + 旧摘要 + 上一块 + 当前块；system + 一条记录 |
 | `compress.py` | 压缩：一块一次，调摘要模型（默认 deepseek-flash） |
-| `store.py` | SQLite：`bands` / `blocks` / `entries` / `recall_log` |
+| `store.py` | SQLite：`bands` / `blocks` / `entries` / `recall_log` / `usage` |
 | `driver.py` | 步循环：工具、正文、停、攒块、预算 |
 | `memory_bridge.py` | 工具面：remember / recall / recollect |
+| `prompt_files.py` | 读 `prompts/` 下的文本，填 `$占位符` |
+| `prompts/` | 提示词：sink、压缩、工具说明 |
+| `logs.py` | 运行时日志：`data/loop/loop.log`，轮转 5 MB × 5 |
+| `usage.py` | 用量仪表盘：`python -m loop.usage` |
 | `selfcheck.py` | 离线自检：假模型、假数据、临时库 |
+
+## 提示词
+
+提示词是数据，不写在代码里：`prompts/sink.txt`、`compress-system.txt`、
+`compress.txt`、`tools.txt`、`watchdog.txt`。占位符用 `$名字`（和
+`memory_v2/prompts/date.txt` 的 `$today` 一样），因为正文里常有 JSON 花括号。
+每次调用现读文件，改完不用重启。
+
+**分两层，和 App 一样**：仓库里的 `prompts/*.txt` 是默认；用户在运行目录放的
+`prompts.json` 是覆盖，**不改仓库源文件**（升级不会被冲掉）。
+
+```json
+{"sink": "我是$name。……", "tools": "……"}
+```
+
+`prompt_files.META` 是注册表：每份提示词是什么、改坏了会怎样。加新提示词要在
+`META` 里登记，自检会查目录和注册表对不对得上。`tools.txt` 用 `## 键` 分段，
+键名不能改；缺一段就报错，不会静默少一句说明。
 
 ## 跑
 
@@ -24,6 +46,36 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --max-steps
 挂起就停，给了秒数才空转等待。`--say` 塞一条开场用户消息。摘要默认走
 `deepseek-flash`，`--summary-model qwen-plus` 走凭证里的百炼端点。
 
+`--stdin` 把标准输入接上：直接打字回车，一行一条消息进 `inbox`，模型用 `wait`
+等的时候会真的等，一有消息就醒。管道输入要 UTF-8（PowerShell 先设
+`$OutputEncoding = [System.Text.Encoding]::UTF8`），BOM 会自动去掉。
+
+## 等
+
+`wait` 是运行时的动作，不是记忆工具：
+
+```
+wait()                              一直等，直到有动静
+wait(until="10m")                   最多等十分钟
+wait(until="14:30")                 最多等到这个点
+wait(kinds=["task"])                只等某类动静
+```
+
+时间收相对（`10m` / `90s` / `2h`）和钟点（`14:30`）两种写法，回复也各按各的：
+相对写「等了 10 分钟，到点了，没等到。」，钟点写「等到 14:30，到点了，没等到。」
+
+**一个回复里只能调一个 `wait`**。两个 `wait` 不是「或者」，是「等完这个再等那个」，
+会把循环一直挂着；多出来的那条不执行，直接回「一次只能调一个 wait，要同时等几类
+动静就用 kinds」。阻塞类工具都登记在 `driver.py` 的 `_BLOCKING_TOOLS` 里，以后加了
+新的往里放就行。
+
+进来的动静都走 `inbox` 表（`kind` 分 `user` / `task` / …），谁都能往里写：
+CLI 的 stdin、以后的 HTTP、任务跑完自己插一行。醒来写成记录——`user` 是 `对方：…`，
+别的 kind 是 `提醒：…`。空回复等于 `wait()`；重启时块里挂着没有结果的 `wait` 调用，
+就接着等。等的时候顺手压缩（块满就地压）。
+
+没有输入通道（不加 `--stdin`）时，无上界的等会直接停住——本地调试不会挂着不走。
+
 ## 现在的边界
 
 - 记忆已接：`remember` 写 note（不进上下文）、`recall` 联想（默认只用百炼嵌入，
@@ -32,6 +84,68 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --max-steps
 - 冻结 / 重放只留 `python -m memory_v2 freeze/replay` 手工命令，不作为模型工具；
 - 两块原文与旧摘要都落盘，重启能接上；
 - 预算按两块原文 40k + 旧摘要 30k 估，默认 80k。
+
+## 用量
+
+真实用量读服务端 `usage`，每步落一行到 `usage` 表（prompt / completion /
+cache_hit / cache_miss / reasoning）。跑完打一行合计；要按天看就用仪表盘：
+
+```powershell
+python -m loop.usage --data data/loop --days 7
+```
+
+```
+日期         步数     输入      输出    命中率   最大一次
+2026-10-25      2      2.5k       201      78%      1.2k
+合计              2      2.5k       201      78%      1.2k
+```
+
+运行时日志在 `data/loop/loop.log`（轮转 5 MB × 5）：收消息、说、调用、结果、压缩、
+等待、重试、每步一行。对白和工具结果的全文在 `entries` 表里，日志不重复存正文。
+控制台只留「说」和每步一行。
+
+**成本上限**是两个旋钮，按天算真数（输入 + 输出）：
+
+```powershell
+--daily-token-cap 2000000    # 到了就等到第二天零点，期间消息照收、不发请求
+--daily-token-warn 1500000   # 过了只在输出里提一句
+```
+
+到上限会往记录里留一条提醒（「今天的额度用完了」），第二天接着跑。`0` 都是不限。
+
+**块满用真数判断**：上一次请求的 `prompt_tokens` 减去固定部分（sink、旧段、
+工具 schema）就是当前块的真实大小。固定部分在两次压缩之间不变，所以减完误差是
+常数，不累积。只有刚重启、刚压完、还没有真数时，才用估算顶一步。估算常数是按
+实测校准的（汉字 0.76 token/字，其余 4.11 字符/token），只在那一处兜底。
+
+**工具结果有保留模板**：同一个结果，越旧留得越少。
+
+| 新旧 | 留下什么 |
+|---|---|
+| 最新 `tool_fold_keep`（默认 2）条 | 全文，含写给模型的提示语 |
+| 更早的 | 去掉提示语——「看具体用 recollect…」「换个关键词再试」是对当时那一步说的，在历史里只是噪声 |
+| 更早的 `recall` | 再压成一行，id、名字、日期留着 |
+| 更早的 `recollect` | 不压：那是交给编写模型现写的记忆，重取要再花一次调用 |
+
+```
+结果：找到 3 件（已折叠）：ev12 预算二十八万（10-24）、ev07 预算核对（10-23）
+结果：没有找到。
+```
+
+调用行一律不动，所以还看得出问的是什么。压缩读的是原文。`--tool-fold-keep 0` 关掉。
+规则在 `context.py` 的 `_HINT_LINES` / `_HINT_INLINE` / `_FOLDABLE_TOOLS` 三张表里。
+
+## 兜底
+
+- **调不通就一直试**：`ChatClient` 自己重试完还失败，就退避（5 秒起、翻倍、封顶
+  五分钟）一直试到通，不会因为一次抖动把循环打死。
+- **连着几步没外界动静就报警，不硬停**：外部输入只有 `inbox` 进来的东西，工具返回
+  不算——所以联网、查资料这种多步任务也会触发。连续 `watchdog_idle`（默认 6）步没有
+  外部输入，就往记录里塞一句「还在做事吗」（`prompts/watchdog.txt`）：模型回一句就
+  接着做，真没事它会自己 `wait`。**提醒只留最近两条**在上下文里，更早的不再渲染。
+- **过期的短期记忆搬出图**：`short` 到期先压成一行（模型压；压不动取最后一条 note 的
+  第一句），写进 `memory/archive.jsonl`，再从图里删掉——检索、激活、注意力都不再包含
+  它。作废就是搬走，不是留在图里降级。
 
 ## 测试
 

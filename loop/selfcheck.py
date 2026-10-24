@@ -12,15 +12,20 @@ import json
 import os
 import shutil
 import sys
+import threading
 import uuid
 
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
+from . import prompt_files
+from .cli import _clean_line
 from .config import LoopConfig
 from .context import (Band, Block, BlockEntry, Context, estimate_tokens,
                       serialize_entries, time_range)
-from .driver import Loop
+from .driver import Loop, _timeout_text, _woke_text, parse_until
 from .memory_bridge import MemoryBridge
 from .store import LoopStore
+from .usage import collect, render
+from memory_v2.core.llm import ChatError
 
 CHECKS = [0]
 
@@ -43,6 +48,12 @@ def _tempdir(prefix: str) -> str:
     return path
 
 
+def _loop_config(**kwargs) -> LoopConfig:
+    """自检默认不打盹：这些用例没有外部输入，打盹会把它们提前停掉。"""
+    kwargs.setdefault("watchdog_idle", 0)
+    return LoopConfig(**kwargs)
+
+
 class FakeClient:
     """一次说一句、一次调工具、一次空回复；usage 按消息内容估。"""
 
@@ -57,7 +68,11 @@ class FakeClient:
         number = self.calls
         self.calls += 1
         content, calls = self._reply(number)
-        self.last_usage = {"prompt_tokens": estimate_tokens(prompt),
+        # 与真端点一样：工具 schema 也算进 prompt_tokens。
+        sent = estimate_tokens(prompt)
+        if tools:
+            sent += estimate_tokens(json.dumps(tools, ensure_ascii=False))
+        self.last_usage = {"prompt_tokens": sent,
                            "completion_tokens": estimate_tokens(content)}
         message = {"role": "assistant", "content": content}
         if calls:
@@ -76,6 +91,18 @@ class FakeClient:
         if slot == 2:
             return "", None
         return "第 %d 步：再说一句。" % number, None
+
+
+class BothClient(FakeClient):
+    """一条回复里既有正文又有工具调用——原生 tool_calls 允许这样。"""
+
+    @staticmethod
+    def _reply(number: int):
+        if number == 0:
+            return "我先查一下。", [{"id": "both-1", "type": "function",
+                                     "function": {"name": "recall",
+                                                  "arguments": "{\"keywords\": [\"预算\"]}"}}]
+        return "", None
 
 
 def fake_summarizer(prompt: str) -> dict:
@@ -103,7 +130,7 @@ def check_summary() -> None:
 
 
 def check_compress() -> None:
-    config = LoopConfig(name="自检", band_chars=(100, 200, 400, 800), band_decay=0.8)
+    config = _loop_config(name="自检", band_chars=(100, 200, 400, 800), band_decay=0.8)
     bands = []
     for index in range(5):
         bands = add_band(bands, "摘要" * 200,
@@ -133,7 +160,7 @@ def check_compress() -> None:
 
 
 def check_context_limits() -> None:
-    config = LoopConfig(name="自检", band_chars=(100, 200, 400, 800), band_budget=400)
+    config = _loop_config(name="自检", band_chars=(100, 200, 400, 800), band_budget=400)
     context = Context(config)
     context.set_bands([Band(0, "a" * 400, "2026-10-24 09:00:00", "2026-10-24 10:00:00"),
                       Band(1, "b" * 400, "2026-10-24 10:00:00", "2026-10-24 11:00:00"),
@@ -151,7 +178,7 @@ def check_context_limits() -> None:
 def check_two_blocks() -> None:
     workdir = _tempdir("loop-two-")
     try:
-        config = LoopConfig(name="自检", block_tokens=50, max_steps=8,
+        config = _loop_config(name="自检", block_tokens=50, max_steps=8,
                             park_seconds=0.001)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         loop = Loop(config, credentials=None, store=store,
@@ -173,7 +200,7 @@ def check_two_blocks() -> None:
 def check_loop() -> None:
     workdir = _tempdir("loop-selfcheck-")
     try:
-        config = LoopConfig(name="自检", block_tokens=50, context_budget=80000,
+        config = _loop_config(name="自检", block_tokens=50, context_budget=80000,
                             band_budget=3000, band_chars=(300, 600, 1200, 2400),
                             park_seconds=0.001, max_steps=24)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
@@ -225,7 +252,7 @@ def check_loop() -> None:
 def check_compress_failure() -> None:
     workdir = _tempdir("loop-failure-")
     try:
-        config = LoopConfig(name="自检", block_tokens=30, max_steps=12,
+        config = _loop_config(name="自检", block_tokens=30, max_steps=12,
                             park_seconds=0.001)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         logs = []
@@ -245,7 +272,7 @@ def check_compress_failure() -> None:
 def check_tools() -> None:
     workdir = _tempdir("loop-tools-")
     try:
-        config = LoopConfig(name="自检", block_tokens=100000, max_steps=4,
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=4,
                             park_seconds=0.001)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         loop = Loop(config, credentials=None, store=store,
@@ -318,6 +345,39 @@ def check_memory() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def check_usage() -> None:
+    workdir = _tempdir("loop-usage-")
+    try:
+        config = _loop_config(name="自检", block_tokens=50, max_steps=10,
+                            park_seconds=0.001)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        loop.run()
+
+        rows = store.usages()
+        check(len(rows) == loop.steps,
+              "用量应按步落盘：%d 行对 %d 步" % (len(rows), loop.steps))
+        check(all(row["prompt"] > 0 for row in rows), "每步都应有真实 prompt_tokens")
+        totals = store.usage_totals()
+        check(totals["steps"] == loop.steps, "用量合计的步数应一致")
+        check(totals["peak"] > 0, "应记下最大一次上下文")
+
+        # 真数减掉固定部分，应该和当前块的估算同量级（差一步：测的是发请求前那块）。
+        check(loop.context.current_tokens() - 60
+              <= loop.current_real <= loop.context.current_tokens() + 60,
+              "当前块的真数应贴着估算：%d 对 %d"
+              % (loop.current_real, loop.context.current_tokens()))
+        # 估算常数按实测校准：100 个汉字约 76 token。
+        check(abs(estimate_tokens("中" * 100) - 76) <= 2,
+              "汉字估算应接近 0.76 token/字：%d" % estimate_tokens("中" * 100))
+
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def check_remember_hidden() -> None:
     entry = BlockEntry({
         "role": "assistant", "content": "",
@@ -330,6 +390,481 @@ def check_remember_hidden() -> None:
     check("写下了记忆：甲" in text, "记录只留名字")
 
 
+def check_tool_fold() -> None:
+    """工具是持续调的：只折能重取的（recall），记忆本身（recollect）不折。"""
+    recall_result = "找到 3 件：\n" + "\n".join(
+        ["ev%d 某件旧事 · 2026-10-2%d" % (index, index) for index in range(3)]) + \
+        "\n看具体用 recollect；连边用 remember 的 links。"
+    memory_text = "我记得" + "那天很晚，" * 40
+
+    def entries(count: int, tool: str, result: str) -> list:
+        items = []
+        for index in range(count):
+            items.append(BlockEntry({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "c%d" % index, "type": "function",
+                                "function": {"name": tool,
+                                             "arguments": "{\"keywords\": [\"旧事\"]}"}}],
+            }, "2026-10-25 00:00:0%d" % (index % 10)))
+            items.append(BlockEntry(
+                {"role": "tool", "tool_call_id": "c%d" % index, "content": result},
+                "2026-10-25 00:00:0%d" % (index % 10)))
+        return items
+
+    items = entries(5, "recall", recall_result)
+    raw = serialize_entries(items)
+    folded = serialize_entries(items, fold_keep=2)
+    check(len(folded) < len(raw), "折叠后记录应更短")
+    check(folded.count("（已折叠）") == 3, "5 条里应折 3 条，实际 %d"
+          % folded.count("（已折叠）"))
+    check(folded.count("找到 3 件：\n") == 2, "最近两条原文该留着")
+    # 折了也要留下「哪几件、什么时候」：id、名字、日期。
+    check("ev0 某件旧事（10-20）、ev1 某件旧事（10-21）、ev2 某件旧事（10-22）" in folded,
+          "折起来的那行要留着 id、名字和日期：%s" % folded[:100])
+    check(folded.count("调用 recall") == 5, "调用行不能被折：当时问的还在")
+    # 写给模型的提示语只留最新两条，历史里的去掉。
+    check(folded.count("看具体用 recollect") == 2, "提示语只该留最新两条，实际 %d"
+          % folded.count("看具体用 recollect"))
+    check(serialize_entries(items, fold_keep=0) == raw, "fold_keep=0 就是不折")
+
+    # 短结果也该按新旧去提示语：「没找到」留着，后半句去掉。
+    empty = "没有找到。换个关键词再试。"
+    misses = entries(3, "recall", empty)
+    miss_text = serialize_entries(misses, fold_keep=1)
+    check("没有找到。" in miss_text, "没找到这件事要留着")
+    check(miss_text.count("换个关键词再试") == 1, "换关键词那句只该留最新一条")
+
+    # recollect 是记忆本身：一次都不折。
+    memories = entries(5, "recollect", memory_text)
+    check(serialize_entries(memories, fold_keep=1).count("（已折叠）") == 0,
+          "recollect 的结果不该折")
+    check(memory_text in serialize_entries(memories, fold_keep=1),
+          "recollect 的结果要原样留着")
+
+    short = entries(4, "remember", "已记：某事（ev1，long）")
+    check(serialize_entries(short, fold_keep=1).count("（已折叠）") == 0,
+          "短结果（回执、报错）不该折")
+
+    # 压缩读的是原文，不受折叠影响。
+    block = Block(entries(3, "recall", recall_result),
+                  "2026-10-25 00:00:00", "2026-10-25 00:10:00")
+    result = Compressor(_loop_config(name="自检"),
+                        summarizer=fake_summarizer).compress_block(block)
+    check(result["summary"] == "现在：在自检。", "压缩仍应正常工作")
+
+    # 挂到上下文上：渲染时折叠，估算也跟着变小。
+    config = _loop_config(name="自检", tool_fold_keep=1)
+    context = Context(config)
+    context.current.entries = entries(4, "recall", recall_result)
+    check(context.current_text().count("（已折叠）") == 3, "上下文渲染应按设置折叠")
+    plain = Context(_loop_config(name="自检", tool_fold_keep=0))
+    plain.current.entries = entries(4, "recall", recall_result)
+    check("（已折叠）" not in plain.current_text(), "关掉就不折")
+    check(context.current_tokens() < plain.current_tokens(), "折了之后该更省")
+
+
+def check_speak_with_calls() -> None:
+    """有工具调用的那条回复里，正文也得投递——不然模型以为说了，人没听到。"""
+    workdir = _tempdir("loop-both-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=1,
+                            park_seconds=0.001)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=BothClient())
+        spoken = []
+        loop.on_speak = spoken.append
+        loop.run()
+        check(spoken == ["我先查一下。"], "带工具调用的正文也要投递：%r" % spoken)
+        text = loop.context.block_text()
+        check("我先查一下。" in text, "正文该进记录")
+        check("调用 recall" in text, "调用也该进记录")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_wait_text() -> None:
+    """时间写法两种：相对用「等了多久」回，钟点用钟点回。"""
+    moment = 1_000_000.0
+    check(abs(parse_until("90s", moment) - (moment + 90)) < 0.01, "90s 应是 90 秒后")
+    check(abs(parse_until("2h", moment) - (moment + 7200)) < 0.01, "2h 应是两小时后")
+    check(abs(parse_until("10", moment) - (moment + 10)) < 0.01, "光数字按秒")
+    check(parse_until("", moment) is None, "空串是无上界")
+    for bad in ("明天", "10x", "25:00"):
+        try:
+            parse_until(bad, moment)
+        except ValueError:
+            continue
+        raise AssertionError("看不懂的时间应报错：%r" % bad)
+
+    clock = parse_until("14:30", moment)
+    check(clock > moment, "钟点该落在将来")
+    check(clock - moment <= 86400 + 1, "钟点最晚一天之内")
+
+    check(_timeout_text("10m", 600) == "等了 10 分钟，到点了，没等到。",
+          "相对写法回「等了多久」")
+    check(_timeout_text("14:30", 600) == "等到 14:30，到点了，没等到。",
+          "钟点写法回钟点")
+    check(_woke_text("user", 3) == "等了 3 秒，对方说话了。", "被消息叫醒的写法")
+    check(_woke_text("task", 90) == "等了 2 分钟，task 回来了。", "被任务叫醒的写法")
+
+
+def check_wait_runtime() -> None:
+    """真等：消息先到就醒，到点就报没等到。"""
+    workdir = _tempdir("loop-wait-")
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                            data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+
+        def push():
+            # 另开一条连接，像别的进程往 inbox 里写。
+            writer = LoopStore(db_path)
+            writer.push("user", "在吗")
+            writer.close()
+
+        timer = threading.Timer(0.05, push)
+        timer.start()
+        text = loop._wait('{"until": "5s"}')
+        timer.join()
+        check("对方说话了" in text, "该被消息叫醒：%r" % text)
+        check(len(loop._after_tool) == 1, "醒来的消息要补在结果后面")
+        loop._flush_after_tool()
+        check("对方：在吗" in loop.context.current_text(), "消息该写成 `对方：`")
+
+        timeout = loop._wait('{"until": "0s"}')
+        check("到点了" in timeout, "到点要报没等到：%r" % timeout)
+
+        kinds = [tool["function"]["name"] for tool in loop.tools()]
+        check("wait" in kinds, "工具面里该有 wait：%r" % kinds)
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_wait_resume() -> None:
+    """重启时块里挂着没结果的 wait：接着等，醒了补上结果。"""
+    workdir = _tempdir("loop-resume-")
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                            data_dir=workdir)
+        store = LoopStore(db_path)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        loop._append({"role": "assistant", "content": "",
+                      "tool_calls": [{"id": "w1", "type": "function",
+                                      "function": {"name": "wait",
+                                                   "arguments": "{\"until\": \"5s\"}"}}]})
+        store.push("user", "还在吗")
+
+        loop._resume_waits()
+        text = loop.context.current_text()
+        check("结果：等了" in text, "重启该补上等待结果：%s" % text)
+        check("对方：还在吗" in text, "醒来的消息要进记录：%s" % text)
+
+        # 已经有过结果的 wait 不该重跑。
+        loop._resume_waits()
+        check(loop.context.current_text().count("结果：等了") == 1,
+              "有结果的 wait 不该重跑")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+class TwoWaitsClient(FakeClient):
+    """一个回复里调两次 wait：第二个不该执行，否则就一直挂着了。"""
+
+    @staticmethod
+    def _reply(number: int):
+        if number == 0:
+            return "", [
+                {"id": "w1", "type": "function",
+                 "function": {"name": "wait", "arguments": "{\"until\": \"5s\"}"}},
+                {"id": "w2", "type": "function",
+                 "function": {"name": "wait", "arguments": "{\"until\": \"5s\"}"}},
+            ]
+        return "", None
+
+
+def check_one_blocking_call() -> None:
+    """阻塞的工具一个回复只能调一个；多出来的拒掉，并说清怎么办。"""
+    workdir = _tempdir("loop-blocking-")
+    try:
+        db_path = os.path.join(workdir, "loop.sqlite3")
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                            max_steps=1, data_dir=workdir)
+        store = LoopStore(db_path)
+        store.push("user", "在吗")
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=TwoWaitsClient())
+        loop.on_speak = lambda text: None
+        loop.run()
+        results = [entry.message.get("content") for entry in loop.context.current.entries
+                   if str(entry.message.get("role") or "") == "tool"]
+        check(any(str(text).startswith("等了") for text in results),
+              "第一个 wait 该执行：%r" % results)
+        check(any("一次只能调一个 wait" in str(text) for text in results),
+              "第二个 wait 该被拒：%r" % results)
+        check(sum(1 for text in results if "一次只能调一个" in str(text)) == 1,
+              "只该拒一次：%r" % results)
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_input_line() -> None:
+    """管道里的 BOM、回车要去掉：PowerShell 的 UTF-8 管道会加 BOM。"""
+    check(_clean_line("\ufeff第一条\r\n") == "第一条", "BOM 和回车要去掉")
+    check(_clean_line("  \t") == "", "空白行不算消息")
+    check(_clean_line(None) == "", "空值不炸")
+
+
+class FlakyClient(FakeClient):
+    """前几次连不上，之后正常：长跑里不该因此死掉。"""
+
+    def __init__(self, fail_times: int = 1):
+        super().__init__()
+        self.fail_times = fail_times
+
+    def chat(self, messages, tools=None, on_delta=None):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise ChatError("连不上")
+        return super().chat(messages, tools, on_delta)
+
+
+def check_retry() -> None:
+    """模型调不通就一直试，循环不能因此停。"""
+    workdir = _tempdir("loop-retry-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=1,
+                              retry_delay=0.01)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FlakyClient(1))
+        logs = []
+        loop.echo = logs.append
+        loop.on_speak = lambda text: None
+        loop.run()
+        check(loop.steps == 1, "重试之后该跑完这一步：%d" % loop.steps)
+        check(loop.retries == 1, "该记一次重试：%d" % loop.retries)
+        check(any("重试" in line for line in logs), "重试要报到运行时输出")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_watchdog() -> None:
+    """连着几步没有外界动静：问一句「还在做事吗」，不硬停；提醒只留最近两条。"""
+    workdir = _tempdir("loop-watchdog-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, watchdog_idle=2,
+                              max_steps=5, park_seconds=0.001)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        logs = []
+        loop.echo = logs.append
+        loop.on_speak = lambda text: None
+        loop.run()
+        check(loop.steps == 5, "报警不该把循环停掉：%d 步" % loop.steps)
+        check(any("提醒" in line for line in logs), "报警要报到输出")
+        alarms = [entry for entry in loop.context.current.entries
+                  if entry.meta.get("kind") == "watchdog"]
+        check(len(alarms) >= 1, "报警要落成提醒记录")
+        rendered = loop.context.current_text()
+        check(rendered.count("没有外界的动静") <= 2,
+              "提醒最多留两条在上下文里：%d" % rendered.count("没有外界的动静"))
+
+        loop.since_external = 5
+        loop.inject_user("在吗")
+        check(loop.since_external == 0, "外部消息要把计数清零")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_archive() -> None:
+    """短期记忆过期：压成一行搬进 archive.jsonl，图里删掉、召回不到。"""
+    workdir = _tempdir("loop-archive-")
+    try:
+        data_dir = os.path.join(workdir, "memory")
+        bridge = MemoryBridge(data_dir, lexical=True)
+        bridge.call("remember", json.dumps(
+            {"name": "过期的短事", "note": "这件事只留一天。后一句不该留。",
+             "scope": "short", "days": -1}, ensure_ascii=False))
+        event_id = next(iter(bridge.graph.events))
+
+        bridge.archiver = lambda material: {event_id: "压成一行了。"}
+        check(bridge.archive_expired() == 1, "该归档一件")
+        check(event_id not in bridge.graph.events, "归档之后图里不该再有它")
+        gone = bridge.call("recall", json.dumps(
+            {"keywords": ["过期的短事"]}, ensure_ascii=False))
+        check("过期的短事" not in gone, "归档之后不该再召回：%s" % gone)
+        check(bridge.archive_expired() == 0, "归档要幂等")
+
+        archive = os.path.join(data_dir, "archive.jsonl")
+        check(os.path.exists(archive), "要写出 archive.jsonl")
+        with open(archive, encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+        check(len(lines) == 1, "归档文件该有一行：%r" % lines)
+        check(json.loads(lines[0])["text"] == "压成一行了。", "归档要留压好的那一行")
+
+        # 压不动的时候用规则压缩：留第一句，别丢。
+        bridge.call("remember", json.dumps(
+            {"name": "另一件短事", "note": "结论是二十八万。第二句不要。",
+             "scope": "short", "days": -1}, ensure_ascii=False))
+        bridge.archiver = None
+        check(bridge.archive_expired() == 1, "第二件也该归档")
+        with open(archive, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        check(rows[-1]["text"] == "结论是二十八万",
+              "规则压缩留第一句：%r" % rows[-1]["text"])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_usage_report() -> None:
+    """仪表盘：按天汇总、命中率、合计。"""
+    rows = [
+        {"ts": "2026-10-24 10:00:00", "prompt": 1000, "completion": 100, "cache_hit": 800},
+        {"ts": "2026-10-24 10:05:00", "prompt": 1200, "completion": 200, "cache_hit": 900},
+        {"ts": "2026-10-25 09:00:00", "prompt": 2000, "completion": 300, "cache_hit": 1500},
+    ]
+    days = collect(rows)
+    check(sorted(days) == ["2026-10-24", "2026-10-25"], "该按天分组：%r" % sorted(days))
+    check(days["2026-10-24"]["steps"] == 2, "24 号两步")
+    check(days["2026-10-24"]["prompt"] == 2200, "24 号输入要累加")
+    check(days["2026-10-24"]["peak"] == 1200, "峰值取当天最大")
+    check(abs(days["2026-10-25"]["hit_rate"] - 0.75) < 0.001, "命中率按输入算")
+
+    text = render(days)
+    check("2026-10-24" in text and "合计" in text, "表格要有日期和合计")
+    check("75%" in text, "命中率要显示成百分比：%s" % text)
+    check(render({}) == "还没有用量：库是空的。", "空库要有话说")
+    check(render(days, limit=1).count("2026-10-24") == 0, "limit 只留最近几天")
+
+
+def check_recall_log() -> None:
+    """每次 recall 记一行：以后调检索质量要用。"""
+    workdir = _tempdir("loop-recalllog-")
+    try:
+        seen = []
+        bridge = MemoryBridge(os.path.join(workdir, "memory"), lexical=True)
+        bridge.on_recall = lambda question, ids: seen.append((question, ids))
+        bridge.call("remember", json.dumps(
+            {"name": "预算二十八万", "note": "定下了。"}, ensure_ascii=False))
+        bridge.call("recall", json.dumps({"keywords": ["预算"]}, ensure_ascii=False))
+        check(len(seen) == 1, "recall 该回调一次：%r" % seen)
+        check(seen[0][0] == "预算", "问题要记下：%r" % (seen[0],))
+        check(len(seen[0][1]) >= 1, "命中的 id 要记下：%r" % (seen[0],))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_inbox_trim() -> None:
+    """进件表只留最近几条已读的，别一直涨。"""
+    workdir = _tempdir("loop-inbox-")
+    try:
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        for index in range(5):
+            store.push("user", "第 %d 条" % index)
+            store.take()
+        removed = store.trim_inbox(keep=1)
+        check(removed == 4, "该删掉 4 条已读：%d" % removed)
+        check(store.take() is None, "已读的都被删掉了，取不到东西")
+        store.push("user", "还没读")
+        store.trim_inbox(keep=0)
+        item = store.take()
+        check(item is not None and item["text"] == "还没读", "没读的要留着")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_prompts() -> None:
+    """提示词：注册表要覆盖所有文件；覆盖文件优先于仓库默认。"""
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+    on_disk = sorted(name[:-4] for name in os.listdir(folder) if name.endswith(".txt"))
+    check(sorted(prompt_files.META) == on_disk,
+          "prompts/ 和注册表要对得上：目录 %r，注册表 %r"
+          % (on_disk, sorted(prompt_files.META)))
+    for key in prompt_files.META:
+        check(prompt_files.text(key).strip(), "每份提示词都要有内容：%s" % key)
+
+    workdir = _tempdir("loop-prompts-")
+    try:
+        path = os.path.join(workdir, "prompts.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"sink": "我是$name。覆盖版。"}, handle, ensure_ascii=False)
+        prompt_files.use_overrides(workdir)
+        check(prompt_files.text("sink") == "我是$name。覆盖版。", "覆盖要优先")
+        check(prompt_files.render("sink", name="自检") == "我是自检。覆盖版。",
+              "覆盖版也要能填占位符")
+        check(prompt_files.text("compress").strip(), "没覆盖的仍读仓库默认")
+        unknown = os.path.join(workdir, "prompts.json")
+        with open(unknown, "w", encoding="utf-8") as handle:
+            json.dump({"没有这个键": "xxx"}, handle, ensure_ascii=False)
+        prompt_files.use_overrides(workdir)
+        check(prompt_files.overrides() == {}, "不认识的键要忽略")
+    finally:
+        prompt_files.use_overrides("")
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_budget() -> None:
+    """成本上限：撞到上限就停（没有输入通道时），撞到提醒线只提一句。"""
+    workdir = _tempdir("loop-budget-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=5,
+                              park_seconds=0.001, daily_token_cap=1)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        logs = []
+        loop.echo = logs.append
+        loop.on_speak = lambda text: None
+        loop.run()
+        check(loop.steps == 1, "第一步之后就该撞上限：%d 步" % loop.steps)
+        check(any("上限" in line for line in logs), "撞上限要报到输出")
+        check(loop.parked, "没有输入通道时撞上限就停住")
+        used = store.usage_today()
+        check(used["total"] > 0, "今天的用量要算得出来：%r" % used)
+
+        warn_dir = _tempdir("loop-warn-")
+        try:
+            config2 = _loop_config(name="自检", block_tokens=100000, max_steps=2,
+                                   park_seconds=0.001, daily_token_warn=1)
+            store2 = LoopStore(os.path.join(warn_dir, "loop.sqlite3"))
+            loop2 = Loop(config2, credentials=None, store=store2,
+                         compressor=Compressor(config2, summarizer=fake_summarizer),
+                         memory=MemoryBridge.disabled(), client=FakeClient())
+            logs2 = []
+            loop2.echo = logs2.append
+            loop2.on_speak = lambda text: None
+            loop2.run()
+            check(loop2.steps == 2, "提醒线不该停循环：%d 步" % loop2.steps)
+            check(any("提醒线" in line for line in logs2), "过提醒线要提一句")
+            store2.close()
+        finally:
+            shutil.rmtree(warn_dir, ignore_errors=True)
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main() -> int:
     check_summary()
     check_compress()
@@ -339,6 +874,22 @@ def main() -> int:
     check_compress_failure()
     check_tools()
     check_memory()
+    check_usage()
+    check_tool_fold()
+    check_speak_with_calls()
+    check_wait_text()
+    check_wait_runtime()
+    check_wait_resume()
+    check_one_blocking_call()
+    check_input_line()
+    check_retry()
+    check_watchdog()
+    check_archive()
+    check_usage_report()
+    check_recall_log()
+    check_inbox_trim()
+    check_prompts()
+    check_budget()
     check_remember_hidden()
     print("ok: %d checks" % CHECKS[0])
     return 0

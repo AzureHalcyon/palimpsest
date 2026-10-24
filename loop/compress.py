@@ -13,15 +13,12 @@ from typing import Callable, List, Optional
 from memory_v2.core.config import ChatConfig, Credentials
 from memory_v2.core.llm import ChatClient, ChatError
 
-from .context import Band, Block, now, serialize_entries, time_range
+from . import prompt_files
+from .context import Band, Block, now, serialize_entries
 
 
 class CompressError(RuntimeError):
     """摘要不可用；调用方应保留原文，不要假装压过。"""
-
-
-SYSTEM_PROMPT = ("你是记录压缩器。只输出一个 JSON 对象，从 { 开始、到 } 结束；"
-                 "不要解释、不要 markdown、不要代码围栏。")
 
 
 def truncate(text: str, limit: int) -> str:
@@ -34,22 +31,10 @@ def truncate(text: str, limit: int) -> str:
 
 
 def build_prompt(text: str, start: str, end: str) -> str:
-    lines = [
-        "你在整理刚结束的一段记录，用来替代原文留在历史里。",
-        "",
-        "要求：",
-        "1. 越早的部分越略，越靠近结尾越具体；结尾写“现在到哪了”。",
-        "2. 保留专名、数字、决定、未完成；不编造。",
-        "3. 时间在段头，正文里不必再写日期。",
-        "4. 不要写“压缩”“摘要”这类过程词。",
-        "",
-        "记录（%s–%s）：" % (start[5:16], end[11:16]),
-        str(text or "").strip() or "（空）",
-        "",
-        "只输出 JSON（不要代码围栏）：",
-        '{"summary": "...", "keywords": ["..."], "unfinished": "..."}',
-    ]
-    return "\n".join(lines)
+    """整段提示在 prompts/compress.txt；这里只给时间和原文。"""
+    return prompt_files.render("compress.txt",
+                               start=start[5:16], end=end[11:16],
+                               text=str(text or "").strip() or "（空）")
 
 
 def parse_summary(text: str) -> dict:
@@ -131,8 +116,10 @@ class Compressor:
 
         def call(prompt: str) -> dict:
             try:
-                message = client.chat([{"role": "system", "content": SYSTEM_PROMPT},
-                                       {"role": "user", "content": prompt}])
+                message = client.chat(
+                    [{"role": "system",
+                      "content": prompt_files.text("compress-system.txt")},
+                     {"role": "user", "content": prompt}])
             except ChatError as exc:
                 raise CompressError("摘要调用失败：%s" % exc) from exc
             return parse_summary(str(message.get("content") or ""))

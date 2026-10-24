@@ -84,13 +84,23 @@ class LoopConfig:
     # 往老一格至少缩到这个比例，保证分辨率从后往前单调下降。
     band_decay: float = 0.8
 
-    watchdog_idle: int = 6            # 连续几步没有动作就提醒
-    max_nudges: int = 2
+    # 每块留最近几条超长工具结果原文，更早的折成一行；<=0 关。工具是持续调的，
+    # 结果不折会把块塞满，把对白挤出去。
+    tool_fold_keep: int = 2
+
+    watchdog_idle: int = 6            # 连续几步没有外部输入就问一句「还在做事吗」（0=关）
+    retry_delay: float = 5.0          # 模型调不通时的退避起点（秒），之后翻倍
     park_seconds: float = 0.0         # >0 才空转等待；0 表示挂起就停
+    standby: bool = False             # 有输入通道（inbox 有人往里写）才真等
     max_steps: int = 0                # 0 表示不设上限，由调用方控制
 
     data_dir: str = "data/loop"
     db_name: str = "loop.sqlite3"
+
+    # 成本上限：按天算真实 usage（输入 + 输出）。0 = 不限。
+    # 到 cap 就等到第二天零点，期间消息照收、不发新请求；到 warn 只在输出里提一句。
+    daily_token_cap: int = 0
+    daily_token_warn: int = 0
 
     def db_path(self) -> str:
         return os.path.join(self.data_dir, self.db_name)
