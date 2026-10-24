@@ -27,7 +27,21 @@
 
 ## 一轮里都发生什么
 
-### 测试时
+### 持续循环的一步（`loop/`）
+
+```
+拼上下文（sink + 四档旧摘要 + 上一块 + 当前块）
+  ↓
+主模型：说一句（正文）+ 调工具（remember / recall / recollect / wait）
+  ↓
+工具结果写回当前块；说出去的话就是投递
+  ↓
+块满了：把“上一块”压成一段摘要，当前块升成上一块
+  ↓
+没事可做：空回复 = wait，等人的消息或任务结果
+```
+
+### 旧入口的一轮（`memory_v2 chat`）
 
 ```
 用户消息
@@ -99,6 +113,17 @@ refs:
   ALIYUN_MAAS_API_KEY: "你的嵌入 key"
 ```
 
+### 持续循环（当前主线）
+
+```powershell
+python -m loop --name Rin --data data/loop --memory-data data/memory --stdin
+```
+
+`--stdin` 接上标准输入：直接打字回车就是一句话，模型用 `wait` 等的时候会真等。
+`python -m loop.usage` 看用量；设计见 [`docs/持续在场-API实现.md`](docs/持续在场-API实现.md)。
+
+### 旧入口（App 与外部程序还在用）
+
 聊一场：
 
 ```powershell
@@ -115,6 +140,7 @@ python -m memory_v2 replay --session first --credentials .local/credentials.yaml
 
 ```powershell
 python memory_v2/tests/check.py
+python -m loop.selfcheck
 ```
 
 给外部程序用，一句一发：
