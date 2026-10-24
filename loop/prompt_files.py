@@ -156,6 +156,8 @@ TOOL_KEYS = (
     "recall", "recall.keywords", "recall.after", "recall.before", "recall.exclude",
     "recollect", "recollect.event",
     "wait", "wait.until", "wait.kinds",
+    "fetch", "fetch.url", "fetch.offset",
+    "search", "search.query",
 )
 
 

@@ -185,10 +185,46 @@ python -m loop.selfcheck
 网页的「设置」页可以直接改旋钮和提示词，不用登服务器。
 
 - **参数**存 `<data>/settings.json`，**只记改过的键**（没改的跟着代码默认走，升级时默认值变了也跟得上）；
-  改完点「保存并重启」。
+  保存就生效，因为这些都是每步现读的。
 - **提示词**写进 `<data>/prompts.json`，每步现读，保存就生效；「恢复默认」就是删掉那条覆盖。
+- **删记录**也不用重启：网页只举一个 `request_reload` 旗子，循环在下一个安全点
+  （步首，或等待里每秒那次维护）按库重读两块原文。
 
-重启不是硬杀：`control.request_stop()` 让循环走到步与步之间自己退出，systemd 的
-`Restart=always` 再把它拉起来——不会留下说了一半的正文或没有结果的调用。
+只有改过**代码**才需要「重启进程」：`control.request_stop()` 让循环走到步与步之间
+自己退出，systemd 的 `Restart=always` 再拉起来——不会留下说了一半的正文或没有结果的调用。
 
-接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`。
+接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`、`DELETE /entries`。
+
+## 上网
+
+两个工具，都零配置：
+
+| 工具 | 做什么 |
+|---|---|
+| `fetch(url, offset)` | 读一个公开网页的正文；默认给 3000 字，`offset` 续读 |
+| `search(query)` | 搜一下，返回标题、链接、摘要 |
+
+**抓取分两级**：先自己抓（免费、SSRF 闸门、正文抽取）；抽出来不到 300 字，
+或者根本连不上（超时、反爬），再走 DeepSeek 的 `/v1/tools/fetch`——它能把 JS
+页面渲染成 Markdown，按成功请求计费，所以只在必要时花。
+
+**搜索分三级**：
+
+1. DeepSeek `/v1/tools/search`（同一个 `DEEPSEEK_API_KEY`）：带 `rerank_score`，
+   **低于 1.0 的直接丢掉**（全是低分才退回全部），摘要用它给的 `summary`；
+2. Tavily（配了 `TAVILY_API_KEY` 才走）；
+3. Bing 的 RSS 端点（免费兜底）。
+
+免费那几条实测记录：百度跳图形验证码、搜狗给 IP 限制页、360 能给结果但链接是
+会话绑定的（打开跳回它自己的导航页）；Bing 的 RSS 偶尔**整段跑题**——问
+「阿里云 学生机 价格」会返回一堆 OPPO 手机的问题。所以免费源只当兜底，
+平时走 DeepSeek。
+
+闸门（`web_access.py`）：只允许 http/https、只走 80/443、域名必须解析到**公网**
+地址、每一跳重定向重新校验、拒绝 `localhost` / `.local` / `.internal` / 云元数据。
+抓回来的网页是**数据不是指令**，工具说明里写了这一句。
+
+正文抽取：装了 `trafilatura` 就用它，没装退回标准库那把（`HTMLParser` 扔脚本样式、
+按块级标签断行）。所以 `requirements.txt` 不必加东西。
+
+同一个链接五分钟内不重复抓（进程内缓存）。

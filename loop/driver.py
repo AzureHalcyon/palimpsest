@@ -17,6 +17,7 @@ from memory_v2.core.llm import ChatClient, ChatError
 
 from . import control
 from . import prompt_files
+from . import webtools
 from .compress import CompressError, Compressor, add_band
 from .context import Context, estimate_tokens
 from .store import LoopStore
@@ -189,7 +190,9 @@ class Loop:
     # ── 工具面 ────────────────────────────────────────────────────────────
     def tools(self) -> List[dict]:
         tools = list(self.memory.tools())
-        tools.append(_wait_tool(prompt_files.tool_texts()))
+        text = prompt_files.tool_texts()
+        tools.append(_wait_tool(text))
+        tools.extend(webtools.tools())
         return tools
 
     # ── 一步 ──────────────────────────────────────────────────────────────
@@ -405,6 +408,8 @@ class Loop:
         try:
             if name == "wait":
                 return self._wait(arguments)
+            if name in webtools.NAMES:
+                return webtools.call(name, arguments)
             return self.memory.call(name, arguments)
         except control.StopRequested:
             raise

@@ -30,6 +30,8 @@ class LoopCredentials:
     summary_key: str = ""
     summary_url: str = ""
     summary_model: str = DEFAULT_SUMMARY_MODEL
+    # 搜索用的 key（Tavily）；没有就用免费的 Bing RSS，质量差一截。
+    tavily_key: str = ""
 
     def can_summarize(self) -> bool:
         return bool(self.summary_key and self.summary_url)
@@ -54,6 +56,7 @@ def load_credentials(path: str = "") -> LoopCredentials:
         summary_key=str(refs.get("ALIYUN_MAAS_API_KEY") or ""),
         summary_url=(base + "/chat/completions") if base else "",
         summary_model=str(refs.get("LOOP_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL),
+        tavily_key=str(refs.get("TAVILY_API_KEY") or ""),
     )
 
 

@@ -19,6 +19,8 @@ import uuid
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
 from . import control
 from . import prompt_files
+from . import web_access
+from . import webtools
 from . import settings
 from . import web
 from .cli import _clean_line
@@ -1122,6 +1124,69 @@ def check_reload() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def check_web_tools() -> None:
+    """上网工具：闸门、解析、分页；真抓网络留给服务器上验。"""
+    bad = ("file:///etc/passwd", "http://127.0.0.1/", "http://10.0.0.1/",
+           "http://localhost:80/", "http://example.com:8080/",
+           "http://user:pass@example.com/", "ftp://example.com/")
+    for url in bad:
+        try:
+            web_access.validate_url(url)
+        except web_access.WebAccessError:
+            check(True, "")
+        else:
+            raise AssertionError("该拒绝的没拒绝：%s" % url)
+
+    check(web_access.validate_url("http://93.184.216.34/a?b=1").endswith("?b=1"),
+          "公开地址该放行，并保留查询串")
+
+    rss = (b'<?xml version="1.0"?><rss><channel><item><title>A &amp; B</title>'
+           b'<link>https://example.com/1</link><description>x</description></item>'
+           b'<item><link>https://example.com/2</link></item></channel></rss>')
+    hits = web_access.parse_bing_rss(rss)
+    check(len(hits) == 2 and hits[0]["title"] == "A & B", "搜索 RSS 要解析得出来")
+    check(hits[1]["title"] == "https://example.com/2", "没标题就拿链接顶上")
+
+    page = web_access.extract_page(
+        "<html><head><title>标题</title><style>x{}</style></head>"
+        "<body><script>bad()</script><p>正文一</p><p>正文二</p></body></html>")
+    check(page["title"] == "标题", "标题该抽出来：%r" % page["title"])
+    check("正文一" in page["text"] and "bad()" not in page["text"],
+          "正文要有、脚本要没：%r" % page["text"])
+
+    body = "字" * 500
+    part, total, more = web_access._slice(body, 0, 400)
+    check(len(part) == 400 and total == 500 and more, "分页该按字切")
+    tail, _, rest = web_access._slice(body, 400, 400)
+    check(len(tail) == 100 and not rest, "末尾之后不该还有")
+
+    check(web_access.needs_upgrade("短"), "抽出来太短就该走抓取接口")
+    check(not web_access.needs_upgrade("字" * 400), "够长就不该花那个钱")
+
+    ds = {"results": [
+        {"title": "好", "url": "https://a.com", "summary": "摘要一", "rerank_score": 2.4},
+        {"title": "差", "url": "https://b.com", "summary": "摘要二", "rerank_score": 0.2}]}
+    ds_hits = web_access.parse_deepseek(ds)
+    check(len(ds_hits) == 1 and ds_hits[0]["title"] == "好", "低分结果要被筛掉")
+    check(len(web_access.parse_deepseek(
+        {"results": [{"title": "差", "url": "https://b.com", "rerank_score": 0.2}]})) == 1,
+        "全是低分时不要假装没搜到")
+    check(ds_hits[0]["snippet"] == "摘要一", "摘要优先用 summary")
+
+    tavily = {"results": [
+        {"title": "备案须知", "url": "https://help.aliyun.com/x", "content": "需要申请备案"},
+        {"title": "坏的", "url": "ftp://nope", "content": "x"}]}
+    hits = web_access.parse_tavily(tavily)
+    check(len(hits) == 1 and hits[0]["title"] == "备案须知", "Tavily 结果要解析得出来")
+    check(hits[0]["snippet"] == "需要申请备案", "Tavily 片段要带上")
+
+    check("上网失败" in webtools.call("fetch", '{"url": "http://127.0.0.1/"}'),
+          "被拒的地址要变成一句给模型看的话")
+    check(webtools.NAMES == ("fetch", "search"), "工具名别改")
+    names = [tool["function"]["name"] for tool in webtools.tools()]
+    check("fetch" in names and "search" in names, "工具面里该有这两个")
+
+
 def main() -> int:
     check_summary()
     check_compress()
@@ -1154,6 +1219,7 @@ def main() -> int:
     check_delete()
     check_stop_raises()
     check_reload()
+    check_web_tools()
     print("ok: %d checks" % CHECKS[0])
     return 0
 

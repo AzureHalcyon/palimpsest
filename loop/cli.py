@@ -29,6 +29,7 @@ from . import logs
 from . import prompt_files
 from . import settings
 from . import web
+from . import web_access
 
 
 def _k(tokens: int) -> str:
@@ -133,6 +134,8 @@ def main(argv=None) -> int:
         print("凭证不可用：%s" % exc, file=sys.stderr)
         return 1
 
+    web_access.set_tavily_key(credentials.tavily_key)
+    web_access.set_deepseek_key(credentials.chat_key)
     try:
         memory_credentials = MemoryCredentials.load(args.credentials)
         embedder = Embedder(MemoryChatConfig(), memory_credentials)
