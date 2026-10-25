@@ -1,6 +1,6 @@
 """在宿主机上跑一条命令：关进 Landlock 的"只能写工作区"里，不维护程序白名单。
 
-说明文字在 `prompts/tools.txt` 的 `## run` 段里，这里只管闸门和执行。
+说明文字在 `prompts/tools/run.txt` 里，这里只管闸门和执行。
 
 ★ 边界是**内核**，不是程序名单：整台机器都能读、能执行，只有 `<data>/workspace`
   能写（建/删/改/截断/改名）。`loop/landlock.py` 装规则，装不上就 fail-closed——

@@ -214,7 +214,10 @@ def check_clock() -> None:
     check(text == "（现在 10-25 周日 15:42；距上次对方说话 1 小时 30 分；"
                   "距我上次开口 6 分钟）", "墙钟写得不对：%s" % text)
     check("现在" not in context.block_text(), "墙钟不该进记录")
-    check("现在 10-25" in context.messages()[-1]["content"], "墙钟该在最后一条输入里")
+    # 这里走的是真时钟，日期得跟着今天走——写死 10-25 过一晚就红
+    today = datetime.now().strftime("%m-%d")
+    check("现在 %s" % today in context.messages()[-1]["content"],
+          "墙钟该在最后一条输入里（今天 %s）" % today)
 
     # 不带墙钟的那些步：末尾只放一句边界，不念时间也不催
     context.show_clock = False
@@ -464,8 +467,9 @@ def check_user_name() -> None:
 def check_tool_fold() -> None:
     """工具是持续调的：只折能重取的（recall），记忆本身（recollect）不折。"""
     recall_result = "找到 3 件：\n" + "\n".join(
-        ["ev%d 某件旧事 · 2026-10-2%d" % (index, index) for index in range(3)]) + \
-        "\n看具体用 recollect；连边用 remember 的 links。"
+        ["ev%d 某件旧事 · 2026-10-2%d · %d 字" % (index, index, index * 10)
+         for index in range(3)]) + \
+        "\n看具体用 recollect；连关系用 link。"
     memory_text = "我记得" + "那天很晚，" * 40
 
     def entries(count: int, tool: str, result: str) -> list:
@@ -874,14 +878,40 @@ def check_inbox_trim() -> None:
 
 
 def check_prompts() -> None:
-    """提示词：注册表要覆盖所有文件；覆盖文件优先于仓库默认。"""
+    """提示词：注册表要覆盖所有文件；覆盖文件优先于仓库默认。
+
+    工具说明一份一个文件（`prompts/tools/<工具>.txt`）：目录里的文件名就是键，
+    多个文件少一个、多一个都要当场看出来。
+    """
     folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
-    on_disk = sorted(name[:-4] for name in os.listdir(folder) if name.endswith(".txt"))
+    found = [name[:-4] for name in os.listdir(folder) if name.endswith(".txt")]
+    tools_dir = os.path.join(folder, "tools")
+    if os.path.isdir(tools_dir):
+        found += [name[:-4] for name in os.listdir(tools_dir) if name.endswith(".txt")]
+    on_disk = sorted(found)
     check(sorted(prompt_files.META) == on_disk,
           "prompts/ 和注册表要对得上：目录 %r，注册表 %r"
           % (on_disk, sorted(prompt_files.META)))
     for key in prompt_files.META:
         check(prompt_files.text(key).strip(), "每份提示词都要有内容：%s" % key)
+    texts = prompt_files.tool_texts()      # 缺段、多段、重复段都在这里报
+    check(sorted(texts) == sorted(prompt_files.TOOL_KEYS),
+          "工具面要正好覆盖 schema 用到的那些键")
+
+    # 同一份里两次出现 `## 键`：后一段会静默盖掉前一段（run.command 就这么写过，
+    # 结果模型拿到的是"第一段必须是白名单里的程序名"那版过期说明）。
+    for key in prompt_files.META:
+        body = prompt_files.default_text(key)
+        heads = prompt_files._SECTION.findall(body)
+        repeated = sorted({head for head in heads if heads.count(head) > 1})
+        check(not repeated, "%s 里有重复的段落：%s" % (key, "、".join(repeated)))
+    for tool in prompt_files.tool_names():
+        check("白名单" not in prompt_files.default_text(tool),
+              "run 已经不用程序白名单了（走 Landlock），%s 的说明里别再写白名单" % tool)
+    # 每个工具文件开头那段就是工具描述：不能只剩一堆 `## 参数`
+    for tool in prompt_files.tool_names():
+        head, _parts = prompt_files.file_parts(tool)
+        check(len(head) >= 10, "%s 开头要有工具描述：%r" % (tool, head))
 
     workdir = tempdir("loop-prompts-")
     try:
@@ -1074,6 +1104,13 @@ def check_settings() -> None:
         check(payload["values"]["block_tokens"] == 100000, "设置里该有当前值")
         check(any(item["key"] == "sink" for item in payload["prompts"]),
               "设置里该有提示词")
+        # 工具说明一个工具一份：设置面板要能一份一份地改，而不是一整块两千字
+        files = {item["key"]: item["file"] for item in payload["prompts"]}
+        for tool in prompt_files.tool_names():
+            check(files.get(tool) == "tools/%s.txt" % tool,
+                  "设置里该有 %s 那一份：%r" % (tool, files.get(tool)))
+        check(len(payload["prompts"]) == len(prompt_files.META),
+              "每份提示词都要出现在设置里")
 
         fields = {item["key"]: item for item in payload["fields"]}
         check("embed_model" in fields and fields["embed_model"]["group"] == "记忆",
@@ -1419,7 +1456,8 @@ def check_record_marks() -> None:
     joined = "\n".join(str(m["content"]) for m in messages[1:])
     check("我：" not in joined and "对方：" not in joined,
           "原生消息里不该有前缀：%r" % joined[:80])
-    check(messages[-1]["role"] == "user" and "现在 10-25" in messages[-1]["content"],
+    check(messages[-1]["role"] == "user"
+          and "现在 %s" % datetime.now().strftime("%m-%d") in messages[-1]["content"],
           "墙钟是末尾单独那一帧（带 tools 时端点不接受末尾 system）")
     check(messages[-1]["content"].startswith("<system-reminder>"),
           "末尾那帧也要套标签：%r" % messages[-1]["content"])
@@ -1430,6 +1468,40 @@ def check_record_marks() -> None:
     check("对方：在吗" in text and "我：在。" in text, "纯文本要标两边：%r" % text)
     check("提醒：" in text, "纯文本要标系统提醒：%r" % text)
     check("\n\n" not in text, "纯文本里一条话不留空行，免得下一段像别人接的")
+
+    check_note_fade()
+
+
+def check_note_fade() -> None:
+    """remember 的 note 在记录里留十来步：太早摘掉她会怀疑"note 没传、是系统补的"。"""
+    def build(steps: int):
+        rows = [BlockEntry({"role": "user", "content": "记一下"}, "2026-10-25 15:00:00"),
+                BlockEntry({"role": "assistant", "content": "",
+                            "tool_calls": [{"id": "c1", "type": "function",
+                                            "function": {
+                                                "name": "remember",
+                                                "arguments": json.dumps(
+                                                    {"name": "丙 记了一件事",
+                                                     "note": "这一条本来写的是什么"},
+                                                    ensure_ascii=False)}}]},
+                           "2026-10-25 15:00:01"),
+                BlockEntry({"role": "tool", "tool_call_id": "c1",
+                            "content": "已记（新建）：丙 记了一件事（e-1，long，9 字）"},
+                           "2026-10-25 15:00:02")]
+        for index in range(steps):
+            rows.append(BlockEntry({"role": "assistant", "content": "第 %d 步" % index},
+                                   "2026-10-25 15:00:0%d" % (index % 10)))
+        context = Context(_loop_config(name="自检"))
+        context.current = Block(rows, "2026-10-25 15:00:00", "2026-10-25 15:01:00")
+        return json.dumps(context.messages(), ensure_ascii=False)
+
+    fresh = build(0)
+    check("这一条本来写的是什么" in fresh, "刚写完的 note 要看得见：%r" % fresh[-200:])
+    stale = build(12)
+    check("这一条本来写的是什么" not in stale,
+          "过了 %d 步就不该再占上下文" % 12)
+    check("已写进记忆" in stale, "摘掉后要留一句占位：%r" % stale[-200:])
+
 
 
 def check_memory_tools() -> None:
@@ -1449,7 +1521,59 @@ def check_memory_tools() -> None:
         check("没再写" in again, "一字不差别再写：%r" % again)
         added = bridge.call("remember", json.dumps({"name": "甲 记下了一件事",
                                                     "note": "结论二"}))
-        check("已更新" in added, "同名补内容要说更新：%r" % added)
+        check("已更新" in added, "同名再记要说更新：%r" % added)
+        # 一件事一条笔记：再记是改这条，不是另加一条
+        kept = [item["text"] for item in
+                bridge.graph.events[bridge.graph.resolve("甲 记下了一件事")]["notes"]]
+        check(kept == ["结论二"], "再记要换掉原来那条，不追加：%r" % kept)
+        check("原来那句是「结论一」" in added, "改了要说清原来是什么：%r" % added)
+
+        # 老数据（以前是追加）挂着好几条：下一次写要收回一条
+        event_id = bridge.graph.resolve("甲 记下了一件事")
+        bridge.graph.events[event_id]["notes"].append(
+            {"ts": "2026-10-25T00:00:00", "text": "旧的一条"})
+        bridge.graph.save()
+        merged = bridge.call("remember", json.dumps({"name": "甲 记下了一件事",
+                                                     "note": "合成这一条"}))
+        check(len(bridge.graph.events[event_id]["notes"]) == 1,
+              "老的多条笔记要合成一条：%r" % bridge.graph.events[event_id]["notes"])
+        check("5 字" in merged, "返回要报这条几个字：%r" % merged)
+
+        # 少参数时要说清"这次什么都没写"：含糊的一句会让它反复重调
+        no_note = bridge.call("remember", json.dumps({"name": "丙 记了半句"}))
+        check("需要 note" in no_note and "什么都没写" in no_note,
+              "缺 note 要说清没写进去：%r" % no_note)
+        no_name = bridge.call("remember", json.dumps({"note": "半句话"}))
+        check("name 或 event" in no_name and "什么都没写" in no_name,
+              "缺 name 也要说清：%r" % no_name)
+        # id 当名字：真发生过一次，建出一件叫 e-xxxx 的空壳
+        id_as_name = bridge.call("remember", json.dumps({
+            "name": "e-dcb934cc25b3", "note": "内容"}))
+        check("看着像 id" in id_as_name and "event" in id_as_name,
+              "id 当名字要指路 event：%r" % id_as_name)
+        check("e-dcb934cc25b3" not in [event.get("name") for event in
+                                       bridge.graph.events.values()],
+              "id 不该真的变成一件记忆")
+
+        # 关系是单独的工具：先建再连，不动内容
+        bridge.call("remember", json.dumps({"name": "戊 说了一件事", "note": "原来的说法"}))
+        old_id = bridge.graph.resolve("戊 说了一件事")
+        bridge.call("remember", json.dumps({"name": "戊 又补了一句", "note": "补的那一句"}))
+        new_id = bridge.graph.resolve("戊 又补了一句")
+        linked = bridge.call("link", json.dumps({"a": new_id, "b": old_id}))
+        check("连上了" in linked and "戊 说了一件事" in linked,
+              "连上要说连了谁：%r" % linked)
+        edges = [edge for edge in bridge.graph.edges.values()
+                 if {edge.get("a"), edge.get("b")} == {old_id, new_id}]
+        check(len(edges) == 1, "两件之间要有一条边：%r" % bridge.graph.edges)
+        check("本来就连着" in bridge.call("link", json.dumps({"a": old_id, "b": new_id})),
+              "重连要说本来就连着，别加第二条")
+        keep = [item["text"] for item in bridge.graph.events[new_id]["notes"]]
+        check(keep == ["补的那一句"], "连边不该动内容：%r" % keep)
+        check("没找到" in bridge.call("link", json.dumps({"a": new_id, "b": "没有这件"})),
+              "连不上要说清哪头没找到")
+        check("同一件" in bridge.call("link", json.dumps({"a": new_id, "b": new_id})),
+              "自己连自己要拒")
 
         blocked = bridge.call("rename", json.dumps({"event": "乙 记下了另一件",
                                                     "name": "甲 记下了一件事"}))
@@ -1461,6 +1585,10 @@ def check_memory_tools() -> None:
 
         found = bridge.call("recall", json.dumps({"keywords": ["甲"]}))
         check("甲 记下了一件事" in found, "recall 该能找到：%r" % found)
+        # 只给指针也要给够判断的信息：字数，以及下一步该用哪个工具
+        check("字" in found, "recall 每条该带字数：%r" % found)
+        check("连关系用 link" in found and "remember 的 links" not in found,
+              "提示语要指向现在的 link 工具：%r" % found)
         gone = bridge.call("forget", json.dumps({"event": "乙 改了名"}))
         check("忘了" in gone, "forget 该成功：%r" % gone)
         missing = bridge.call("recollect", json.dumps({"event": "乙 改了名"}))
@@ -1508,9 +1636,15 @@ def check_call_cap() -> None:
         loop._dispatch_calls(calls)
         texts = [entry.message.get("content") for entry in loop.context.current.entries
                  if entry.message.get("role") == "tool"]
-        blocked = [t for t in texts if "先停一下" in str(t)]
+        blocked = [t for t in texts if "这次没执行" in str(t)]
         check(len(blocked) == 2, "第 4、5 次该被挡：%r" % texts)
         check(loop._turn_calls["remember"] == 5, "计数要照常累加")
+
+        # 对方说话之后计数清零：人叫她重试一次，不能还拿上一轮的次数挡回去。
+        loop.store.push("user", "你试一次")
+        check(loop._wait('{"kinds": ["user"]}') != "", "等到人的话要有个结果")
+        loop._flush_after_tool()
+        check(loop._turn_calls == {}, "对方说话后计数要清零：%r" % loop._turn_calls)
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1908,6 +2042,33 @@ def check_web_tools() -> None:
 
     check("上网失败" in webtools.call("fetch", '{"url": "http://127.0.0.1/"}'),
           "被拒的地址要变成一句给模型看的话")
+
+    # 两路都失败时，自己抓为什么失败也要说出来：只留"抓取接口返回 HTTP 401"
+    # 模型分不清是站点挡了还是 key 坏了，只能干看着（服务器上真发生过）。
+    fetcher = web_access.WebAccess()
+    saved = (web_access._fetch, web_access._DEEPSEEK_KEY, web_access.WebAccess._ds_read)
+    web_access._DEEPSEEK_KEY = "k"
+
+    def boom(*args, **kwargs):
+        raise web_access.WebAccessError("自己抓取被挡了（HTTP 403）")
+
+    def boom2(*args, **kwargs):
+        raise web_access.WebAccessError("抓取接口返回 HTTP 401")
+
+    web_access._fetch = boom
+    web_access.WebAccess._ds_read = boom2
+    try:
+        try:
+            fetcher.read("http://93.184.216.34/x")
+        except web_access.WebAccessError as exc:
+            message = str(exc)
+        else:
+            message = ""
+        check("HTTP 403" in message and "HTTP 401" in message,
+              "两路都失败要带上两条原因：%r" % message)
+    finally:
+        web_access._fetch, web_access._DEEPSEEK_KEY, web_access.WebAccess._ds_read = saved
+
     check(webtools.NAMES == ("fetch", "search"), "工具名别改")
     names = [tool["function"]["name"] for tool in webtools.tools()]
     check("fetch" in names and "search" in names, "工具面里该有这两个")

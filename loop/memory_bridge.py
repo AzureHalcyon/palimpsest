@@ -38,14 +38,30 @@ def _remember_tool(text: dict) -> dict:
                               "description": text["remember.event"]},
                     "note": {"type": "string",
                              "description": text["remember.note"]},
-                    "links": {"type": "array", "items": {"type": "string"},
-                              "description": text["remember.links"]},
                     "scope": {"type": "string", "enum": ["long", "short"],
                               "description": text["remember.scope"]},
-                    "days": {"type": "integer",
-                             "description": text["remember.days"]},
                 },
                 "required": ["note"],
+            },
+        },
+    }
+
+
+def _link_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "link",
+            "description": text["link"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string", "description": text["link.a"]},
+                    "b": {"type": "string", "description": text["link.b"]},
+                    "relation": {"type": "string",
+                                 "description": text["link.relation"]},
+                },
+                "required": ["a", "b"],
             },
         },
     }
@@ -131,6 +147,28 @@ def _rename_tool(text: dict) -> dict:
     }
 
 
+def _head(text: str, limit: int = 28) -> str:
+    """一句话的头：返回里带一下，才看得出这次写进去的是不是想写的那条。"""
+    line = " ".join(str(text or "").split())
+    return line[:limit] + ("…" if len(line) > limit else "")
+
+
+def _looks_like_id(name: str) -> bool:
+    """`e-` 加一串十六进制：那是事件 id，不是名字（真发生过：id 当名字建了个空壳）。"""
+    body = str(name or "").strip()
+    if not body.startswith("e-"):
+        return False
+    rest = body[2:]
+    return len(rest) >= 6 and all(char in "0123456789abcdef" for char in rest.lower())
+
+
+def _size_hint(graph, event_id: str) -> str:
+    """这一件有多少字：recall 只给指针，字数帮着判断要不要深挖（正文仍然不给）。"""
+    notes = graph.events.get(event_id, {}).get("notes") or []
+    chars = sum(len(str(note.get("text") or "")) for note in notes)
+    return " · %d 字" % chars if chars else ""
+
+
 class MemoryBridge:
     def __init__(self, data_dir: str = "", writer: Optional[Callable[[str], str]] = None,
                  embedder=None, lexical: bool = False, recent_steps: int = 0,
@@ -168,8 +206,8 @@ class MemoryBridge:
         if not self.enabled:
             return []
         text = prompt_files.tool_texts()
-        return [_remember_tool(text), _recall_tool(text), _recollect_tool(text),
-                _forget_tool(text), _rename_tool(text)]
+        return [_remember_tool(text), _link_tool(text), _recall_tool(text),
+                _recollect_tool(text), _forget_tool(text), _rename_tool(text)]
 
     def call(self, name: str, arguments: str) -> str:
         if not self.enabled:
@@ -180,6 +218,8 @@ class MemoryBridge:
             return "%s 的参数不是 JSON。" % name
         if name == "remember":
             return self._remember(payload)
+        if name == "link":
+            return self._link(payload)
         if name == "recall":
             return self._recall(payload)
         if name == "recollect":
@@ -194,9 +234,13 @@ class MemoryBridge:
     def _remember(self, payload: dict) -> str:
         note = str(payload.get("note") or "").strip()
         if not note:
-            return "remember 需要 note。"
+            return ("remember 需要 note：这次什么都没写。把要记的内容放进 note 再调一次"
+                    "（name 或 event 一起给，才知道记到哪一件上）。只加关系用 link。")
         name = str(payload.get("name") or "").strip()
         reference = str(payload.get("event") or "").strip()
+        if not reference and _looks_like_id(name):
+            return ("name 看着像 id（%s）：要改那件就把 id 放进 event，别当新名字用"
+                    "（不然会建出一件叫这个名字的空壳）。这次什么都没写。" % name)
 
         event_id = ""
         if reference:
@@ -212,7 +256,8 @@ class MemoryBridge:
         created = not event_id
         if created:
             if not name:
-                return "remember 需要 name 或 event。"
+                return ("remember 需要 name 或 event：没有说记到哪一件上，这次什么都没写。"
+                        "新开一件就给 name；改旧的那件就给 event（id 或名字）。")
             event_id = self.graph.add_event(name)
 
         scope = str(payload.get("scope") or "long").strip().lower()
@@ -227,30 +272,67 @@ class MemoryBridge:
             expires_at = (datetime.now() + timedelta(days=max(0, days))).strftime(
                 "%Y-%m-%dT%H:%M:%S")
 
-        # 一字不差的笔记不再写：它一旦以为"没写进去"就会反复调同一个 remember
+        # 一件事只有一条笔记：再记就是改这条，不是另加一条。
+        # 以前是追加，结果同一件事攒了三条几乎一样的笔记，她自己都分不清哪条算数。
         event = self.graph.events[event_id]
-        already = [str(item.get("text") or "") for item in event.get("notes") or []]
-        if note in already:
-            return ("这条和「%s」里已有的笔记一字不差，没再写。"
-                    "要补别的就换个说法；不想留着就 forget 掉。"
+        notes = event.get("notes") or []
+        stamp = now().replace(" ", "T")
+        before = _head(str((notes[0].get("text") if notes else "") or ""))
+        if before and str(notes[0].get("text") or "") == note:
+            return ("这条和「%s」里已经记的一字不差，没再写。要改就换个说法。"
                     % (event.get("name") or event_id))
 
-        self.graph.add_note(event_id, note, now().replace(" ", "T"),
-                            scope=(scope if created else ""),
-                            expires_at=(expires_at if created else ""))
+        if created or not notes:
+            self.graph.add_note(event_id, note, stamp,
+                                scope=(scope if created else ""),
+                                expires_at=(expires_at if created else ""))
+        else:
+            # 老数据可能还挂着几条：合成这一条
+            notes[0]["text"] = note
+            notes[0]["edited"] = stamp
+            del notes[1:]
+            event["updated"] = stamp
+            if scope == "short":
+                event["scope"] = scope
+                event["expires_at"] = expires_at
         self.graph.events[event_id]["step"] = int(self.step or 0)
-        for reference in payload.get("links") or []:
-            target = self.graph.resolve(str(reference))
-            if target and target != event_id:
-                self.graph.add_edge(event_id, target, "关联")
         self.graph.save()
 
         event = self.graph.events[event_id]
-        head = ("已记（新建）" if created
-                else "已更新（同名那件还在，这次追加一条笔记）")
-        return "%s：%s（%s，%s，现在 %d 条笔记）" % (
-            head, event.get("name") or event_id, event_id,
-            event.get("scope") or "long", len(event.get("notes") or []))
+        # 只说"新建/改了"，不回显正文：note 本身在记录里留十来步，够它回头确认；
+        # 再久就该用 recollect 取（note 不进上下文，记录里也不重复）。
+        if created:
+            return "已记（新建）：%s（%s，%s，%d 字）" % (
+                event.get("name") or event_id, event_id,
+                event.get("scope") or "long", len(note))
+        return "已更新：%s（%s）——换成了新的这 %d 字%s" % (
+            event.get("name") or event_id, event_id, len(note),
+            ("，原来那句是「%s」" % before) if before else "")
+
+    def _link(self, payload: dict) -> str:
+        """把两件事连起来，不动任何一边的内容。"""
+        left = str(payload.get("a") or "").strip()
+        right = str(payload.get("b") or "").strip()
+        if not left or not right:
+            return "link 需要 a 和 b（各给一个 id 或名字，先用 recall 拿）。"
+        first = self.graph.resolve(left)
+        second = self.graph.resolve(right)
+        missing = [name for name, event_id in ((left, first), (right, second))
+                   if not event_id]
+        if missing:
+            return ("没找到%s（用 recall 返回的 id，别凭印象写）。这次没连。"
+                    % "".join("「%s」" % name for name in missing))
+        if first == second:
+            return "a 和 b 是同一件，不用连。"
+        for edge in self.graph.edges.values():
+            if {edge.get("a"), edge.get("b")} == {first, second}:
+                return "这两件本来就连着，没再连。"
+        relation = str(payload.get("relation") or "").strip() or "关联"
+        self.graph.add_edge(first, second, relation)
+        self.graph.save()
+        return "连上了：%s — %s（%s）" % (
+            self.graph.events[first].get("name") or first,
+            self.graph.events[second].get("name") or second, relation)
 
     def _forget(self, payload: dict) -> str:
         """删掉一件记忆（连同它的连接）。先 recall 拿 id，别凭印象删。"""
@@ -339,9 +421,10 @@ class MemoryBridge:
         if not embedded:
             lines.append("（嵌入服务不可用，只按词面找）")
         for item in items[:5]:
-            lines.append("%s %s · %s" % (item["id"], item.get("name") or "",
-                                         item.get("date") or ""))
-        lines.append("看具体用 recollect；连边用 remember 的 links。")
+            lines.append("%s %s · %s%s" % (
+                item["id"], item.get("name") or "", item.get("date") or "",
+                _size_hint(self.graph, item["id"])))
+        lines.append("看具体用 recollect；连关系用 link。")
         return "\n".join(lines)
 
     def _recollect(self, payload: dict) -> str:

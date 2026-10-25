@@ -16,3 +16,7 @@ numpy>=2.0
 # 看图（python -m memory_v2 view）：力导向的社区划分用它；没装也能画，只是少团间排斥。
 # 出 PNG 快照还要 matplotlib，那也只是可选项。
 networkx>=3.2
+
+# 网页正文抽取：`fetch` 用它剥掉导航栏和页脚。没装也能跑，退回标准库那把，
+# 代价是正文里混进一堆菜单字——模型读到的三千字里一半是 "Skip to content"。
+trafilatura>=2.0

@@ -1,6 +1,6 @@
 """上网的两个工具：fetch（读一个链接）和 search（搜一下）。
 
-说明文字在 `prompts/tools.txt` 的 `## fetch` / `## search` 段里，这里只管 schema
+说明文字在 `prompts/tools/fetch.txt`、`prompts/tools/search.txt` 里，这里只管 schema
 和分派。和记忆工具一样，出错不是抛给循环，而是写进工具结果——模型下一步能看见
 「这个链接被拒了」或者「没搜到」，而不是整步挂掉。
 """

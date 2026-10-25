@@ -288,6 +288,12 @@ function nodeRadius(node) {
   return 3.2 + Math.sqrt(node.d + 1) * 2.0 + Math.min(0.6, node.c) * 6;
 }
 
+/* 画和点、标签都按这个半径来：孤立事件（d=0）只有 5 个单位，缩到整屏就剩一两个像素，
+   刚记下来的事在图上看不见——给一个屏幕上的最小半径。 */
+function drawRadius(node) {
+  return Math.max(nodeRadius(node), 3.4 / S.view.scale);
+}
+
 function shortSession(name) {
   return String(name || "").replace(/^\d{4}-/, "");
 }
@@ -1002,7 +1008,7 @@ function drawNodes() {
   for (let i = 0; i < S.nodes.length; i++) {
     const node = S.nodes[i];
     const x = node.px, y = node.py;
-    const r = nodeRadius(node);
+    const r = drawRadius(node);
     const lonely = node.d === 0;
     const dim = (S.filter && !matches(node)) || (S.isoOn && !lonely);
     const active = S.actMap.get(i);
@@ -1095,7 +1101,7 @@ function drawLabels() {
   ctx.font = '11px "Microsoft YaHei", system-ui, sans-serif';
   ctx.textAlign = "center";
   ctx.textBaseline = "bottom";
-  const showAll = S.view.scale > 1.9;
+  const showAll = S.view.scale > 1.9 || S.nodes.length <= 40;
   const topActive = new Set();
   if (S.act) {
     S.act.entries.slice(0, 4).forEach((entry) => topActive.add(entry.i));
@@ -1117,7 +1123,7 @@ function drawLabels() {
 
   const placed = [];
   for (const item of candidates) {
-    const offset = (nodeRadius(item.node) * S.view.scale) + 5;
+    const offset = (drawRadius(item.node) * S.view.scale) + 5;
     const width = ctx.measureText(item.text).width + 12;
     const top = item.sy - offset - 14;
     const box = [item.sx - width / 2, top - 2, item.sx + width / 2, top + 16];
@@ -1147,7 +1153,7 @@ function pick(wx, wy) {
     const distance = Math.hypot(dx, dy);
     // 容差按"屏幕上的像素"算：手指点不准，给 18 像素；鼠标给 9 像素。
     const tolerance = (S.touch ? 18 : 9) / S.view.scale;
-    const radius = nodeRadius(node) + tolerance;
+    const radius = drawRadius(node) + tolerance;
     if (distance < radius && distance < bestDistance) {
       best = i;
       bestDistance = distance;

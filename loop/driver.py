@@ -482,8 +482,9 @@ class Loop:
             # 挡一下并把话说明白，别让它一直写同一段记忆（服务器上真发生过，7 步）。
             self._turn_calls[name] = self._turn_calls.get(name, 0) + 1
             if self._turn_calls[name] > _TURN_CALL_CAP:
-                content = ("（%s 这一轮已经调了 %d 次，先停一下：同一条事不用反复记，"
-                           "要说就说，要等就 wait）" % (name, _TURN_CALL_CAP))
+                content = ("（%s 这一轮已经调了 %d 次，这次没执行。同一条事不用反复记："
+                           "要说就说，要等就 wait；对方再说话之后计数清零，那时再调。）"
+                           % (name, _TURN_CALL_CAP))
             if name in _BLOCKING_TOOLS:
                 if name in used:
                     content = ("一次只能调一个 %s：这个回复里已经调过了，这条没执行。"
@@ -500,11 +501,15 @@ class Loop:
         """等在工具调用之后才补的记录（醒来的那句话、回来的结果）。
 
         写完才把对应进件标已读：反过来的话，中途重启就会"人说了话但记录里没有"。
+
+        对方说话也算这一轮到此为止：调用计数跟着清零。否则"等对方说话"是常态，
+        计数永远清不掉——人叫她重试一次，工具还会拿上一轮的次数挡回去。
         """
         for entry in self._after_tool:
             self._append(entry["message"], meta=entry.get("meta") or {})
             if entry.get("inbox_id"):
                 self.store.consume(int(entry["inbox_id"]))
+                self._turn_calls = {}
         self._after_tool = []
 
     def _call_tool(self, name: str, arguments: str) -> str:

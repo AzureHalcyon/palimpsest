@@ -1,5 +1,7 @@
+import io
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -18,6 +20,7 @@ from memory_v2.read.search import expand
 from memory_v2.store.graph import Graph, GraphError
 from memory_v2.store.session import SessionStore, SessionSealed
 from memory_v2.store.vectors import VectorStore
+from memory_v2 import view
 from testsupport import tempdir
 
 
@@ -340,5 +343,33 @@ again = edits.apply(graph3, edits.load(ops_file)["ops"])
 assert again["changed"] == 0 and again["skipped"], again
 assert graph3.events[third3]["name"] == "丙", graph3.events[third3]
 shutil.rmtree(data3, ignore_errors=True)
+
+# ── 记忆图：刚记下来的孤立事件也要看得见 ────────────────────────
+# 没有一条边的节点半径只有 5 个单位，缩到整屏剩一两个像素；标签原来只在
+# 度数 ≥7 或选中/悬停或放大到 1.9 倍时才画，于是"记了但图上找不到"。
+data4 = tempdir("mem-view-")
+graph4 = Graph(os.path.join(data4, "graph.json"))
+for position, name in enumerate(("新记的一件", "更早的一件", "第三件")):
+    event_id = graph4.new_event_id()
+    graph4.events[event_id] = {"name": name, "segments": [], "seq": 1,
+                               "created": "2026-10-25T23:5%d:11" % position,
+                               "notes": [{"text": "记下来的内容",
+                                          "at": "2026-10-25T23:51:11"}]}
+graph4.save()
+page = view.render_page(data4, "自检")
+found = re.search(r'<script id="payload" type="application/json">(.*?)</script>',
+                  page, re.S)
+assert found, "页面里要内嵌数据"
+payload = json.loads(found.group(1))
+ai = payload["ais"][0]
+assert len(ai["nodes"]) == 3, ai["nodes"]
+assert len({(node["x"], node["y"]) for node in ai["nodes"]}) == 3, ai["nodes"]
+template = io.open(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "view_template.html"), encoding="utf-8").read()
+assert "S.nodes.length <= 40" in template, "节点少的时候要全标名字"
+assert "function drawRadius(" in template, "孤立节点要有屏幕上的最小半径"
+shutil.rmtree(data4, ignore_errors=True)
+
 
 print("OK")

@@ -27,6 +27,11 @@ from . import prompt_files
 _FOLD_MIN_CHARS = 60
 _FOLDABLE_TOOLS = ("recall",)
 _KEEP_FULL_TOOLS = ("recollect",)
+
+# remember 写进去的 note 在记录里留多少步：刚写完那几步要能回头看见自己写了什么，
+# 再往后换成一句占位（note 本身从记忆里取，不靠记录重复）。
+NOTE_KEEP_STEPS = 10
+_NOTE_STUB = "（已写进记忆；要看内容用 recollect）"
 _HINT_LINES = ("看具体用", "先 recall 再 recollect", "（嵌入")
 _HINT_INLINE = ("换个关键词再试",)
 
@@ -497,7 +502,9 @@ class Context:
           她把调用和结果当正文手打出来（没有 tool 记录，等于什么都没做）。
         ★ 没有结果的调用（正等着的 wait、旧数据里断掉的调用）不放进 `tool_calls`，
           因为端点不接受"悬空调用"；那种情况写一行文字说明。
-        ★ `remember` 的参数里有 note，按设计 note 不进记录，渲染时把它摘掉。
+        ★ `remember` 的 note 只留 `NOTE_KEEP_STEPS` 步：刚写完那几步她要能回头看见
+          自己写了什么（不然它会怀疑"note 没传/内容是系统补的"），之后换成一句占位，
+          免得同一段话在记录里躺到底、还跟"note 不进上下文"的规矩自相矛盾。
         """
         fold_keep = int(getattr(self.config, "tool_fold_keep", 0) or 0)
         entries = list(self.previous.entries) + list(self.current.entries)
@@ -525,6 +532,14 @@ class Context:
 
         used = set()
         turns: List[dict] = []
+
+        # 每个位置后面还剩几步（一条 assistant 消息 = 一步）：note 的保质期按这个算
+        steps_after = [0] * len(entries)
+        behind = 0
+        for index in range(len(entries) - 1, -1, -1):
+            steps_after[index] = behind
+            if str(entries[index].message.get("role") or "") == "assistant":
+                behind += 1
 
         def push(role: str, text: str) -> None:
             body = str(text or "").strip()
@@ -572,11 +587,11 @@ class Context:
                 for call, _target in live:
                     function = dict(call.get("function") or {})
                     name = str(function.get("name") or "")
-                    if name == "remember":
+                    if name == "remember" and steps_after[index] >= NOTE_KEEP_STEPS:
                         function["arguments"] = json.dumps(
                             {"name": _remember_name(
-                                str(function.get("arguments") or "{}"))},
-                            ensure_ascii=False)
+                                str(function.get("arguments") or "{}")),
+                             "note": _NOTE_STUB}, ensure_ascii=False)
                     payload.append({"id": str(call.get("id") or ""),
                                     "type": "function", "function": function})
                 # 上一条也是它自己、而且这条没有正文：把调用并进去——

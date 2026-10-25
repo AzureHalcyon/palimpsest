@@ -30,10 +30,6 @@ META = {
     "compress": ("压缩 · 正文",
                  "一块记录怎么压成一段摘要：越早越略、保留专名数字、结尾写“现在到哪了”。",
                  "compress.txt"),
-    "tools": ("工具说明",
-              "工具面的说明文字（`## 键` 分段，键名不能改）：remember / recall / recollect /"
-              " wait / fetch / search / run / write。",
-              "tools.txt"),
     "watchdog": ("心跳提醒",
                  "连着几步没有外界动静时问的那一句。改的是语气，不是逻辑。",
                  "watchdog.txt"),
@@ -44,6 +40,30 @@ META = {
             "上一轮说了话、没调工具时，在记录末尾挂一句问它要不要继续。要中性，别引导。",
             "ask.txt"),
 }
+
+# 工具说明一份一个文件（`prompts/tools/<工具>.txt`）：开头那段是工具描述，
+# `## 参数名` 段落是 schema 里的参数说明。
+# 以前十个工具挤在一个 `tools.txt` 里用 `## remember.name` 这样的键分，结果：
+# ① 同一个键写两遍，后一段静默盖掉前一段（run.command 就被过期那段盖过）；
+# ② 想改一个工具得在两千字里翻，改错一个字整个工具面都歪。
+_TOOL_FILES = {
+    "remember": "把一件事写进记忆：name 是以后搜它的键，note 是记得的内容。",
+    "recall": "按关键词联想记忆，返回 id、名字、时间。",
+    "recollect": "把某一件写成一段第一人称回忆，只有这段回忆进上下文。",
+    "forget": "删掉一件记忆（连同它的连接）。",
+    "rename": "给一件记忆改名。",
+    "wait": "停在这儿等对方的动静，或者等到某个时间点。",
+    "link": "把两件事连起来，不动内容。",
+    "fetch": "打开一个公开网页读正文。",
+    "search": "搜一下网上的东西，返回标题、链接、一小段摘要。",
+    "run": "在跑自己的那台机器上跑一条命令（沙箱里，只有工作区能写）。",
+    "write": "往工作区里写一个文件。",
+}
+for _tool_name, _tool_hint in _TOOL_FILES.items():
+    META[_tool_name] = ("工具 · %s" % _tool_name,
+                        _tool_hint + "开头那段是工具描述，`## 参数名` 段落是参数说明，键名不能改。",
+                        "tools/%s.txt" % _tool_name)
+del _tool_name, _tool_hint
 
 _PLACEHOLDER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _OVERRIDES_DIR = ""
@@ -144,22 +164,37 @@ def render(filename: str, **fields) -> str:
 _SECTION = re.compile(r"^## +(\S+)[ \t]*$", re.M)
 
 
-def sections(name: str) -> Dict[str, str]:
-    """按 `## 键` 切段，每段取到下一个 `##` 为止。"""
+def file_parts(name: str):
+    """切成 (开头那段, {`## 键`: 正文})；同一份里重复的键当场报错。
+
+    重复是有过事故的：`tools.txt` 里 `## run.command` 写了两遍，后一段静默盖掉
+    前一段，模型照着过期的那段理解工具。
+    """
     raw = text(name)
     marks = list(_SECTION.finditer(raw))
+    head = raw[:marks[0].start()] if marks else raw
     parts: Dict[str, str] = {}
     for index, mark in enumerate(marks):
         start = mark.end()
         end = marks[index + 1].start() if index + 1 < len(marks) else len(raw)
-        parts[mark.group(1)] = raw[start:end].strip()
-    return parts
+        key = mark.group(1)
+        if key in parts:
+            raise PromptError("%s 里有两段 `## %s`：后一段会盖掉前一段" % (name, key))
+        parts[key] = raw[start:end].strip()
+    return head.strip(), parts
 
 
-# 工具面要的每一段文字。缺一段就报错：宁可起不来，也不要静默少一句说明。
+def sections(name: str) -> Dict[str, str]:
+    """按 `## 键` 切段，每段取到下一个 `##` 为止。"""
+    return file_parts(name)[1]
+
+
+# 工具面要的每一段文字：`remember` 是工具名，`remember.note` 是它那个参数。
+# 缺一段、多一段都报错：宁可起不来，也不要静默少一句说明或者多一段没人用的。
 TOOL_KEYS = (
     "remember", "remember.name", "remember.event", "remember.note",
-    "remember.links", "remember.scope", "remember.days",
+    "remember.scope",
+    "link", "link.a", "link.b", "link.relation",
     "recall", "recall.keywords", "recall.after", "recall.before", "recall.exclude",
     "recollect", "recollect.event",
     "wait", "wait.until", "wait.kinds",
@@ -172,9 +207,30 @@ TOOL_KEYS = (
 )
 
 
+def tool_names() -> list:
+    """工具名（`remember`、`wait`…）：TOOL_KEYS 里不带点的那几个。"""
+    return [key for key in TOOL_KEYS if "." not in key]
+
+
 def tool_texts() -> Dict[str, str]:
-    parts = sections("tools.txt")
-    missing = [key for key in TOOL_KEYS if not str(parts.get(key) or "").strip()]
-    if missing:
-        raise PromptError("tools.txt 缺这些段：%s" % "、".join(missing))
-    return parts
+    """一个工具一份文件：开头那段是描述，`## 参数名` 是参数说明。"""
+    out: Dict[str, str] = {}
+    for tool in tool_names():
+        head, parts = file_parts(tool)
+        if not head:
+            raise PromptError("%s 开头要有工具描述（第一个 `## ` 之前那段）" % tool)
+        out[tool] = head
+        wanted = {key.split(".", 1)[1] for key in TOOL_KEYS
+                  if key.startswith(tool + ".")}
+        extra = sorted(set(parts) - wanted)
+        if extra:
+            raise PromptError("%s 里多了一段 `## %s`：schema 里没有这个参数"
+                              % (tool, "`、`## ".join(extra)))
+        missing = sorted(wanted - set(parts))
+        if missing:
+            raise PromptError("%s 少了 `## %s`" % (tool, "`、`## ".join(missing)))
+        for key, body in parts.items():
+            if not body:
+                raise PromptError("%s 的 `## %s` 是空的" % (tool, key))
+            out[tool + "." + key] = body
+    return out

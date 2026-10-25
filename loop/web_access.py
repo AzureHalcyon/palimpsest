@@ -375,11 +375,17 @@ class WebAccess:
 
         try:
             final, content_type, charset, body, truncated = _fetch(target)
-        except WebAccessError:
+        except WebAccessError as first:
             if not _DEEPSEEK_KEY:
                 raise
             # 我们连不上（超时、被墙、反爬）——让它替我们抓一次。
-            payload = self._ds_read(target)
+            try:
+                payload = self._ds_read(target)
+            except WebAccessError as second:
+                # 两路都没成：自己抓为什么失败也得说出来，别只留下兜底那一句 401
+                raise WebAccessError(
+                    "这一页没抓到：自己抓取失败（%s），兜底抓取接口也不行（%s）。"
+                    "换个链接，或者过一会儿再试。" % (first, second)) from second
             self._store(key, payload)
             return payload
 
