@@ -112,7 +112,10 @@ def semantic_layout(vectors: dict, ids: list, span: float):
     还没有向量的节点（刚建、没嵌过）放在原点；只要有两个以上有向量的节点就出结果，
     不要因为一个缺向量就整张退回力导向——那会让两种布局长得一模一样。
     """
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        return None          # 没 numpy 就没有语义投影，只剩链接布局
 
     known = [event_id for event_id in ids if vectors.get(event_id)]
     if len(known) < 2:
@@ -135,8 +138,14 @@ def semantic_layout(vectors: dict, ids: list, span: float):
 
 
 def communities(graph, ids: list, index: dict) -> list:
-    """关系边上的社区划分（Louvain）；用来把“一伙的”事件拉到一起。"""
-    import networkx as nx
+    """关系边上的社区划分（Louvain）；用来把“一伙的”事件拉到一起。
+
+    没装 `networkx` 就全当一个社区：画还是画得出来，只是少了团与团之间的排斥。
+    """
+    try:
+        import networkx as nx
+    except ImportError:
+        return [0] * len(ids)
 
     network = nx.Graph()
     network.add_nodes_from(range(len(ids)))
@@ -160,7 +169,12 @@ def force_layout(count: int, links: list, content: list, groups: list, span: flo
     的节点被拉向自己的中心，不同社区的中心互相推开。这样有关系的点会抱成一团，
     团与团之间留出空隙，而不是铺成一张均匀的网。
     """
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        step = (2 * math.pi / max(1, count))
+        return ([(math.cos(step * i) * span * 0.4, math.sin(step * i) * span * 0.4)
+                 for i in range(count)], [])
 
     charge = 200.0
     group_charge = 16000.0
@@ -566,14 +580,30 @@ def render_png(ai: dict, path: str, seed: int | None = None) -> str:
 TEMPLATE = os.path.join(HERE, "view_template.html")
 
 
-def build_html(payload: dict, out_path: str) -> str:
+def page_html(payload: dict) -> str:
+    """把 payload 塞进模板，返回整页 HTML（不落盘——网页那层直接吐给浏览器）。"""
     with open(TEMPLATE, encoding="utf-8") as handle:
         template = handle.read()
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     data = data.replace("</", "<\\/")
     if "__PAYLOAD__" not in template:
         raise SystemExit("模板里没有 __PAYLOAD__ 占位符")
-    page = template.replace("__PAYLOAD__", data)
+    return template.replace("__PAYLOAD__", data)
+
+
+def render_page(data_dir: str, label: str = "", span: float = 620.0) -> str:
+    """一个记忆目录 → 整页 HTML。网页的 `/graph` 与 `python -m memory_v2 view` 都走这里。"""
+    folder = os.path.abspath(data_dir)
+    if not os.path.isdir(folder):
+        raise FileNotFoundError("没有这个目录：%s" % folder)
+    label = label or os.path.basename(folder.rstrip("\\/")) or "memory"
+    payload = {"generated": time.strftime("%Y-%m-%d %H:%M"),
+               "ais": [build_ai(folder, label, span, label=label)]}
+    return page_html(payload)
+
+
+def build_html(payload: dict, out_path: str) -> str:
+    page = page_html(payload)
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(page)
     return out_path

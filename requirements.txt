@@ -12,3 +12,7 @@
 #    pip 有时只装进后者而 `site` 只报前者。⇒ 用 `PYTHONPATH` 指一下即可，⛔ 把路径写进代码。
 PyYAML>=6.0
 numpy>=2.0
+
+# 看图（python -m memory_v2 view）：力导向的社区划分用它；没装也能画，只是少团间排斥。
+# 出 PNG 快照还要 matplotlib，那也只是可选项。
+networkx>=3.2

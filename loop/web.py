@@ -3,6 +3,8 @@
     POST /say       {"text": "..."}       → 进 inbox，立刻返回
     GET  /feed?since=3:12&step=40         → 增量原文 + 增量用量
     GET  /context                         → 当前上下文（sink / 旧段 / 两块原文）
+    GET  /graph                           → 事件图（一页 HTML，数据内嵌）
+    POST /edits                           → 把页面攒的编辑清单存到 <data>/edits/
     GET  /state                           → 它现在在干什么、今天用了多少
     GET  /                                → 单页界面
 
@@ -128,6 +130,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, self._models(parse_qs(route.query)))
             if route.path == "/feed":
                 return self._send(200, self._feed(parse_qs(route.query)))
+            if route.path == "/graph":
+                body = self._graph(parse_qs(route.query))
+                return self._send(200, body.encode("utf-8"),
+                                  "text/html; charset=utf-8")
         except Exception as exc:                     # 页面不该因为一条查询挂掉
             return self._send(500, {"error": "内部出错：%s" % exc})
         return self._send(404, {"error": "没有这个地址"})
@@ -139,6 +145,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if route.path == "/say":
                 return self._say()
+            if route.path == "/edits":
+                return self._save_edits()
             if route.path == "/restart":
                 return self._restart()
         except Exception as exc:
@@ -429,6 +437,42 @@ class _Handler(BaseHTTPRequestHandler):
                            "band_count": len(getattr(config, "band_chars", ()) or ()),
                            "tool_fold_keep": fold_keep}}
 
+    def _graph(self, query: dict) -> str:
+        """事件图：直接借 memory_v2 的查看器把 `<data>/memory` 渲染成一页。
+
+        画不出来（没有记忆目录、图坏了）也回一页 HTML 说清原因——iframe 里至少看得见字。
+        """
+        from memory_v2 import view as graph_view
+
+        folder = getattr(self.server, "memory_dir", "") or self.server.data_dir
+        label = str((query.get("label") or [""])[0] or
+                    getattr(self.server.config, "name", "") or "")
+        try:
+            # 记忆目录还没建（它一次 remember 都没调过）：建个空的，画一张空图，
+            # 总比在 iframe 里显示一段报错好。
+            os.makedirs(folder, exist_ok=True)
+            return graph_view.render_page(folder, label)
+        except Exception as exc:                     # 没目录、图坏了都走这里
+            return ("<!doctype html><meta charset=\"utf-8\">"
+                    "<body style=\"background:#0a0d13;color:#cfd3d6;font:14px sans-serif;"
+                    "padding:24px\"><b>画不出来</b><pre>%s\n\n%s</pre></body>"
+                    % (folder, exc))
+
+    def _save_edits(self) -> None:
+        """页面里攒的改名/删除/剪边清单：存成文件，等人工 apply（不直接写图）。"""
+        payload = self._body()
+        ops = payload.get("ops")
+        if not isinstance(ops, list) or not ops:
+            return self._send(400, {"error": "清单里没有 ops"})
+        folder = os.path.join(os.path.abspath(self.server.data_dir), "edits")
+        os.makedirs(folder, exist_ok=True)
+        name = "edits-%s.json" % time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(folder, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"data": self.server.memory_dir, "ops": ops},
+                      handle, ensure_ascii=False, indent=2)
+        return self._send(200, {"ok": True, "path": path, "count": len(ops)})
+
     def _feed(self, query: dict) -> dict:
         store = _store_of(self.server)
         since = str((query.get("since") or ["0:0"])[0])
@@ -469,7 +513,7 @@ def _short_error(exc) -> str:
 
 def serve(config, path: str, token: str = "",
           host: str = "127.0.0.1", port: int = 8080,
-          data_dir: str = "", loop=None, credentials=None,
+          data_dir: str = "", memory_dir: str = "", loop=None, credentials=None,
           embed_factory=None) -> ThreadingHTTPServer:
     """起一个后台线程；返回的 httpd 交给调用方（自检里用来取端口）。"""
     httpd = _Server((host, int(port)), _Handler)
@@ -477,6 +521,7 @@ def serve(config, path: str, token: str = "",
     httpd.db_path = path
     httpd.token = token
     httpd.data_dir = data_dir or os.path.dirname(os.path.abspath(path))
+    httpd.memory_dir = memory_dir or os.path.join(httpd.data_dir, "memory")
     httpd.loop = loop
     httpd.credentials = credentials
     httpd.embed_factory = embed_factory

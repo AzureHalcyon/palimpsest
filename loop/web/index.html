@@ -265,6 +265,16 @@ details.frow>summary:hover{color:var(--fg2)}
   border:1px solid var(--line2);border-radius:8px;padding:10px;resize:vertical;
   font:12px/1.65 var(--mono);outline:none}
 .pblock .acts{display:flex;gap:8px;margin-top:8px;align-items:center}
+/* 事件图：独立的整页，里面那页自带数据，不需要再来取接口 */
+#graphview{position:fixed;inset:0;background:var(--bg);z-index:9;display:none;
+  flex-direction:column}
+#graphview.open{display:flex}
+#graphview .ghead{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  border-bottom:1px solid var(--line);font-size:13px}
+#graphview .ghead button{background:transparent;border:1px solid var(--line2);
+  color:var(--dim);border-radius:8px;padding:4px 11px;font:12px var(--sans);cursor:pointer}
+#graphview .ghead button:hover{color:var(--fg);border-color:var(--line3)}
+#graphview iframe{flex:1;width:100%;border:0;background:#0a0d13}
 #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);
   background:var(--field);border:1px solid var(--line2);color:var(--fg);
   padding:8px 16px;border-radius:10px;font-size:12.5px;opacity:0;pointer-events:none;
@@ -368,7 +378,7 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
 
 <div id="main">
   <div id="top">
-    <div class="tabs"><span class="on" id="tab-chat">对话</span><span id="tab-ctx">上下文</span><span id="tab-set">设置</span></div>
+    <div class="tabs"><span class="on" id="tab-chat">对话</span><span id="tab-ctx">上下文</span><span id="tab-graph">图</span><span id="tab-set">设置</span></div>
     <div class="right">
       <span class="pill"><span class="dot" id="h-dot"></span> <span id="h-status">—</span></span>
       <span class="pill" id="h-detail"></span>
@@ -427,6 +437,15 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
     <button id="set-close">收起</button>
   </div>
   <div class="sbody"><div class="sinner" id="set-body"></div></div>
+</div>
+<div id="graphview">
+  <div class="ghead">
+    <b>事件图</b><span id="g-sub" style="color:var(--faint);font-size:11.5px"></span>
+    <span style="flex:1"></span>
+    <button id="g-reload">重画</button>
+    <button id="g-close">收起</button>
+  </div>
+  <iframe id="g-frame" title="事件图"></iframe>
 </div>
 <div id="toast"></div>
 <div id="login"><div class="box">
@@ -644,6 +663,7 @@ function addEntry(item) {
 function item(title, tag, meta, text) {
   const d = document.createElement("details");
   d.className = "item";
+  d.dataset.key = "item:" + title;
   d.innerHTML = '<summary><span class="tag">' + esc(title) + "</span>" +
     (tag ? '<span class="meta">' + esc(tag) + "</span>" : "") +
     (meta ? '<span class="meta">' + esc(meta) + "</span>" : "") +
@@ -654,6 +674,13 @@ function item(title, tag, meta, text) {
 function renderContext(c) {
   S.cache = c;
   const box = $("d-body");
+  // 抽屉每 2.5 秒重画一次：先把哪些块是展开的、滚到哪儿记下来，画完再恢复，
+  // 否则点开「系统提示」几秒后自己就收起来了。
+  const opened = new Set();
+  box.querySelectorAll("details").forEach((node) => {
+    if (node.open) opened.add(node.dataset.key || "");
+  });
+  const scroll = box.scrollTop;
   box.innerHTML = "";
   $("d-sub").textContent = "整次请求 " + k(c.context_tokens);
 
@@ -695,6 +722,7 @@ function renderContext(c) {
     }
     const d = document.createElement("details");
     d.className = "item"; d.open = !!opened;
+    d.dataset.key = "block:" + title;
     d.innerHTML = '<summary><span class="tag">' + data.count + " 条</span>" +
       '<span class="meta">' + k(data.tokens) + " token</span></summary>" +
       '<div class="body"></div>';
@@ -723,6 +751,11 @@ function renderContext(c) {
   s3.innerHTML = "<h3>sink</h3>";
   s3.appendChild(item("系统提示", "", c.sink.chars + " 字", c.sink.text));
   box.appendChild(s3);
+
+  box.querySelectorAll("details").forEach((node) => {
+    if (opened.has(node.dataset.key || "")) node.open = true;
+  });
+  box.scrollTop = scroll;
 }
 
 /* ── 轮询 ─────────────────────────────────────────────────────────────── */
@@ -871,6 +904,26 @@ $("new-ctx").onclick = async () => {
 };
 $("close-ctx").onclick = () => toggleDrawer(false);
 $("tab-ctx").onclick = $("new-ctx").onclick;
+
+async function openGraph() {
+  $("graphview").classList.add("open");
+  $("g-sub").textContent = "正在画…";
+  try {
+    const res = await fetch("/graph", {headers: {"Authorization": "Bearer " + S.token}});
+    if (res.status === 401) { $("login").style.display = "flex"; return; }
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const html = await res.text();
+    // 图这页是独立的（iframe srcdoc），主题得显式给它：跟着网页这一侧走。
+    const now = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    $("g-frame").srcdoc = html.replace("<html", '<html data-theme="' + now + '"');
+    $("g-sub").textContent = "（" + Math.round(html.length / 1024) + " KB，数据已经带在这页里）";
+  } catch (e) {
+    $("g-sub").textContent = "画不出来：" + e.message;
+  }
+}
+$("tab-graph").onclick = openGraph;
+$("g-close").onclick = () => $("graphview").classList.remove("open");
+$("g-reload").onclick = openGraph;
 $("scrim").onclick = () => toggleDrawer(false);
 $("into").onclick = () => {
   S.token = $("token").value.trim();
@@ -1202,9 +1255,20 @@ $("set-restart").onclick = async () => {
   if (!confirm("重启进程？约 3 秒，记录不受影响。只有改过代码才需要它。")) return;
   try {
     await api("/restart", {method: "POST"});
-    toast("正在重启…");
-    setTimeout(() => location.reload(), 3000);
-  } catch (e) { toast("重启失败：" + e.message); }
+  } catch (e) { toast("重启失败：" + e.message); return; }
+  // 等服务真回来再刷新：固定等 3 秒不够，进程可能还在起。
+  toast("正在重启，回来自动刷新…");
+  const started = Date.now();
+  const wait = async () => {
+    try {
+      await api("/state");
+      location.reload();
+    } catch (e) {
+      if (Date.now() - started > 60000) { toast("还没回来，稍后手动刷新"); return; }
+      setTimeout(wait, 800);
+    }
+  };
+  setTimeout(wait, 1200);
 };
 $("tab-set").onclick = openSettings;
 if (!S.token) $("login").style.display = "flex";

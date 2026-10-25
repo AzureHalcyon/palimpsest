@@ -235,8 +235,8 @@ def main(argv=None) -> int:
         token = args.token or web.make_token(os.path.join(args.data, "web-token"))
         try:
             web.serve(config, config.db_path(), token, host or "127.0.0.1", port,
-                      data_dir=config.data_dir, loop=loop, credentials=credentials,
-                      embed_factory=make_embedder)
+                      data_dir=config.data_dir, memory_dir=os.path.abspath(args.memory_data),
+                      loop=loop, credentials=credentials, embed_factory=make_embedder)
         except OSError as exc:
             print("网页起不来：%s" % exc, file=sys.stderr)
             return 1
