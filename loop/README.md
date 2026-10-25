@@ -73,7 +73,7 @@ python -m loop --name 小满 --http 127.0.0.1:8080
 | `GET/PUT /settings` | 旋钮清单、当前值、改动记录；PUT 保存并当场生效 |
 | `PUT /prompts` | 改一份提示词（空 = 恢复默认） |
 | `DELETE /entries?block=&seq=` | 删一条记录（成对删工具结果）；只举 `request_reload` 旗子，不重启 |
-| `POST /restart` | 请求循环走到步与步之间退出，交给 systemd 拉起 |
+| `POST /restart` | 请求循环走到步与步之间退出，交回给外面的进程管理器拉起 |
 
 ★ 网页这一层**只读库、只往 `inbox` 写**，不碰 `blocks` / `entries` / `bands` ——
 单写者仍然是循环那个进程，网页崩了顶多看不见，不会把记录弄坏。每条连接各开一个
@@ -216,9 +216,9 @@ python -m loop.selfcheck
   它写进记忆的笔记、已经压进旧段的摘要、用量和步数都不会跟着撤回（旧段整体只读）。
 
 只有改过**代码**才需要「重启进程」：`control.request_stop()` 让循环走到步与步之间
-自己退出，systemd 的 `Restart=always` 再拉起来——不会留下说了一半的正文或没有结果的调用。
+自己退出，再由外面的进程管理器拉起来——不会留下说了一半的正文或没有结果的调用。
 
-接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`、`DELETE /entries`。
+接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`、`DELETE /entries`、`GET /models`。
 
 ## 上网
 

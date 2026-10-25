@@ -2,7 +2,7 @@
 
 > 记忆层。上一代在 [`../archive/v1/`](../archive/v1/README.md)（格 / 件 / 组 / 势），冻结但可运行。
 > 持续在线的循环在 [`../loop/`](../loop/README.md)：它用这里的 `read/write.py`（编写）、
-> `read/activate.py`（检索）、`read/archive.py`（短期记忆到期归档）。
+> `read/activate.py`（检索）、`read/archive.py`（短期记忆到期归档），网页控制台也在那边。
 > `chat/` 是旧的“一轮一回复”入口，App（`app/app/src/main/python/host_glue_v2.py`）与
 > `serve.py` 还在用它。
 > 设计与理由见 [`../docs/事件状态与读取.md`](../docs/事件状态与读取.md)；
@@ -103,6 +103,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8765/send' `
 ```powershell
 python memory_v2/tests/check.py
 python memory_v2/tests/replay_check.py
+python -m loop.selfcheck      # 循环那层的 227 项（不联网、不用凭证）
 python tools/文档/check_docs.py
 ```
 
@@ -115,6 +116,7 @@ python tools/文档/check_docs.py
 
 - 实聊验证过两场：38 轮（林晚，装修）和 32 轮（周岚，工作/生活）；都是在场、一次一句、读回复再往下说；
 - 跨会话问 10 题，两场都是 10/10，0 编造；假前提、未定项、具体日期都守住了；
-- App 已接（走 `chat/` 旧入口）；`loop/` 这条新路径还没做长时间（跨多天）验证；
-  读取参数（网络赢家门槛、扩散权重）还是探针上定的；
+- App 已接（走 `chat/` 旧入口）；`loop/` 现在是网页控制台那条路（设置 / 提示词 / 模型 / 主题
+  都能在线改，上网工具已接），**跨多天连续跑还没做**；读取参数（网络赢家门槛、扩散权重）
+  还是探针上定的；
 - 单场小图重放长不出关联主干，这是种子密度的边界，不是读取坏了。

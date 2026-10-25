@@ -32,13 +32,15 @@
 ```
 拼上下文（sink + 四档旧摘要 + 上一块 + 当前块）
   ↓
-主模型：说一句（正文）+ 调工具（remember / recall / recollect / wait）
+主模型：说一句（正文）+ 调工具（remember / recall / recollect / wait / fetch / search）
   ↓
 工具结果写回当前块；说出去的话就是投递
   ↓
 块满了：把“上一块”压成一段摘要，当前块升成上一块
   ↓
 没事可做：空回复 = wait，等人的消息或任务结果
+  ↓
+有人说话：网页 / 标准输入 / 以后的任务结果，都写进同一个 inbox
 ```
 
 ### 旧入口的一轮（`memory_v2 chat`）
@@ -78,8 +80,9 @@ recollect：按顺序重建，写成一段第一人称回忆
 
 | 目录                                    | 是什么                   |
 | ------------------------------------- | --------------------- |
-| [`memory_v2/`](memory_v2/README.md)   | 当前记忆层：事件网络、读取、重放、实时入口 |
-| [`loop/`](loop/README.md)             | 持续在线的循环运行时：两块原文 + 运行时压缩 + 记忆工具面 |
+| [`memory_v2/`](memory_v2/README.md)   | 记忆层：事件网络、读取、重放、实时入口 |
+| [`loop/`](loop/README.md)             | 持续在线的循环运行时：两块原文 + 运行时压缩 + 记忆工具面 + 网页控制台 + 上网工具 |
+| [`app/`](app/)                        | Android 客户端（Compose）：uikit、插件骨架；Python 侧走 `memory_v2` 的旧入口 |
 | [`archive/v1/`](archive/v1/README.md) | 上一代实现，冻结但可运行          |
 | [`tools/`](tools/README.md)           | 离线工具                  |
 | `docs/`                               | 设计、参数、决策记录            |
@@ -88,6 +91,7 @@ recollect：按顺序重建，写成一段第一人称回忆
 
 | 想看什么                | 去哪                                   |
 | ------------------- | ------------------------------------ |
+| 循环怎么跑、网页和接口、设置、上网工具 | [`loop/README.md`](loop/README.md)     |
 | 设计、读取、归档，以及和大脑结构的对照 | [`docs/事件状态与读取.md`](docs/事件状态与读取.md) |
 | 参数和出处               | [`docs/参数.md`](docs/参数.md)           |
 | 定下来的决定              | [`docs/决策记录.md`](docs/决策记录.md)       |
@@ -98,7 +102,7 @@ recollect：按顺序重建，写成一段第一人称回忆
 
 ## 快速开始
 
-需要 Python 3.13，以及一个对话模型和一个嵌入模型的调用方式。
+需要 Python 3.13+，以及一个对话模型和一个嵌入模型的调用方式。
 
 ```powershell
 pip install pyyaml
@@ -122,6 +126,22 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --stdin
 `--stdin` 接上标准输入：直接打字回车就是一句话，模型用 `wait` 等的时候会真等。
 `python -m loop.usage` 看用量；设计见 [`docs/持续在场-API实现.md`](docs/持续在场-API实现.md)。
 
+### 网页控制台
+
+```powershell
+python -m loop --name Rin --data data/loop --memory-data data/memory --http 127.0.0.1:8080
+```
+
+浏览器打开 `http://127.0.0.1:8080/`，第一次要贴令牌（自动生成在 `<data>/web-token`，
+600 权限）。界面是一个单文件、零依赖的页面：
+
+- **对话**：按步分组的时间线，每步的输入/命中/输出、正文、工具调用与结果、思考；
+- **上下文**：当前块 / 上一块 / 四档旧段 / sink 的原文与占用；
+- **设置**：旋钮、提示词、三处模型（主 / 摘要 / 嵌入，都能从端点的 `/models` 里挑）、
+  深浅主题。参数、提示词、模型都是改完即生效；只有改过**代码**才点「重启进程」。
+
+默认只绑 `127.0.0.1`，不直接对外；要远程看，自己架一条隧道。
+
 ### 旧入口（App 与外部程序还在用）
 
 聊一场：
@@ -140,7 +160,7 @@ python -m memory_v2 replay --session first --credentials .local/credentials.yaml
 
 ```powershell
 python memory_v2/tests/check.py
-python -m loop.selfcheck
+python -m loop.selfcheck          # 227 项：上下文、压缩、等待、网页、设置、上网、删改
 ```
 
 给外部程序用，一句一发：
