@@ -11,11 +11,13 @@
   --bg:#151517;                        /* alias-bg-base   = bluish-950 */
   --panel:#1b1b1c;                     /* specific-sidebar-fill = bluish-900 */
   --field:#2c2c2e;                     /* specific-bubble / input-major = bluish-850 */
+  --bubble:#2c2c2e;                    /* 用户气泡（浅色下是 deepseek-50） */
   --raise:#232324;                     /* alias-bg-layer-1 = bluish-875 */
   --hover:rgba(255,255,255,.08);       /* alias-interactive-bg-hover */
   --line:rgba(255,255,255,.06);        /* alias-border-l1 */
   --line2:rgba(255,255,255,.12);       /* alias-border-l2 */
   --line3:rgba(255,255,255,.16);       /* alias-border-l3 */
+  --track:rgba(255,255,255,.08);       /* 进度条底 */
   --fg:#f9fafb;                        /* alias-label-primary  = bluish-50 */
   --fg2:#cfd3d6;                       /* alias-label-secondary = bluish-300 */
   --dim:#adb2b8;                       /* alias-label-tertiary = bluish-400 */
@@ -31,6 +33,32 @@
   --sans:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB',
     'Microsoft YaHei','Helvetica Neue',Helvetica,Arial,sans-serif;
 }
+/* 浅色：同一套语义变量换取值，组件代码不认主题 —— 数值取自 DSH 的 light 主题
+   （label 用 bluish-1000/700/600/400，气泡是 deepseek-50，边框是黑 4%/10%/12%）。 */
+html[data-theme="light"]{
+  color-scheme:light;
+  --bg:#ffffff;
+  --panel:#f9fafb;                    /* specific-sidebar-fill = bluish-50 */
+  --field:#ffffff;                    /* specific-input-major */
+  --bubble:#edf3fe;                   /* specific-bubble = deepseek-50 */
+  --raise:#f5f6f8;
+  --hover:rgba(38,49,72,.06);
+  --line:rgba(0,0,0,.05);
+  --line2:rgba(0,0,0,.10);
+  --line3:rgba(0,0,0,.14);
+  --track:rgba(0,0,0,.06);
+  --fg:#0f1115;                       /* bluish-1000 */
+  --fg2:#61666b;                      /* bluish-700 */
+  --dim:#81858c;                      /* bluish-600 */
+  --faint:#a7acb2;                    /* bluish-400 */
+  --ghost:#c2c6ca;
+  --you:#4176e6;                      /* alias-link = deepseek-500 */
+  --tool:#4868b2;                     /* deepseek-600 */
+  --warn:#dd8629;                     /* amber-600 */
+  --ok:#22c55e;
+  --bad:#ec1313;                      /* red-600 */
+}
+html{color-scheme:dark}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
   font:14.5px/1.72 var(--sans);-webkit-font-smoothing:antialiased}
@@ -56,7 +84,7 @@ body{display:flex;min-height:100vh}
 .stat{display:flex;justify-content:space-between;padding:4px 8px;font-size:12px;
   color:var(--faint);font-family:var(--mono)}
 .stat b{color:var(--fg2);font-weight:500}
-.meter{height:4px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;margin:2px 8px 9px}
+.meter{height:4px;border-radius:3px;background:var(--track);overflow:hidden;margin:2px 8px 9px}
 .meter i{display:block;height:100%;background:var(--faint)}
 .meter.hot i{background:var(--warn)}
 
@@ -96,7 +124,7 @@ body{display:flex;min-height:100vh}
 
 .row{display:flex;margin:10px 0}
 .row.user{justify-content:flex-end}
-.row.user .body{background:var(--field);border-radius:14px;padding:8px 14px;
+.row.user .body{background:var(--bubble);border-radius:14px;padding:8px 14px;
   max-width:78%;white-space:pre-wrap;word-break:break-word;color:var(--fg2)}
 .row.assistant .body{white-space:pre-wrap;word-break:break-word;color:var(--fg)}
 
@@ -124,23 +152,78 @@ details.frow>summary:hover{color:var(--fg2)}
 .empty{color:var(--ghost);font-size:13px;text-align:center;padding:60px 0}
 
 /* ── 输入 ─────────────────────────────────────────────────────────────── */
+/* 照 APP 的 composer（app/…/ui/ChatComposer.kt）搬过来的：12–14 圆角、单行总高
+   48、多行向上长到 5 行后整块滚、左边一行号槽（26 + 10 间隔）、回车只换行、
+   发送是**外面独立的 36 圆钮**。常数也照抄：行高 22、最多 5 行、动画 120ms。
+   行号按**逻辑行**编（折行的续行留空），跟编辑器一样。 */
 #bottom{padding:0 24px 10px}
-.composer{max-width:760px;margin:0 auto;border:1px solid var(--line2);border-radius:16px;
-  background:var(--field);padding:8px 8px 8px 14px;display:flex;gap:8px;align-items:flex-end}
+.composer{max-width:760px;margin:0 auto;border:1px solid var(--line2);
+  border-radius:14px;background:var(--field);padding:13px 9px 13px 10px;
+  display:flex;gap:8px;align-items:flex-start}
 .composer:focus-within{border-color:var(--line3)}
-.composer textarea{flex:1;background:transparent;border:0;outline:none;color:var(--fg);
-  font:14px/1.65 var(--sans);resize:none;max-height:150px;padding:4px 0}
-.composer .send{width:34px;height:34px;border-radius:50%;border:0;background:var(--fg);
-  color:var(--bg);font-size:15px;cursor:pointer;display:grid;place-items:center}
-.composer .send:disabled{opacity:.35;cursor:default}
+.gwrap{flex:1;min-width:0;display:flex;align-items:flex-start}
+.gutter{flex:none;width:36px;height:22px;padding-right:10px;overflow:hidden;
+  position:relative;transition:height .12s ease}
+.gutter .gin{position:absolute;top:0;left:0;right:10px;will-change:transform}
+.gutter .n{height:22px;line-height:22px;text-align:right;font:12px/22px var(--mono);
+  color:var(--faint);user-select:none}
+#mirror{position:absolute;left:-99999px;top:0;visibility:hidden;pointer-events:none;
+  white-space:pre-wrap;overflow-wrap:break-word;word-break:break-word;
+  font:14.5px/22px var(--sans)}
+.composer textarea{flex:1;min-width:0;display:block;background:transparent;border:0;
+  outline:none;color:var(--fg);font:14.5px/22px var(--sans);resize:none;height:22px;
+  padding:0;overflow-y:auto;white-space:pre-wrap;overflow-wrap:break-word;
+  word-break:break-word;transition:height .12s ease;
+  /* 滚动条一出现就会吃掉宽度 ⇒ 折行跟着变、行号和文字错位。行号槽本身就是
+     位置提示，滚轮照常滚，条子不看也罢。 */
+  scrollbar-width:none}
+.composer textarea::-webkit-scrollbar{width:0;height:0}
+.composer textarea::placeholder{color:var(--faint)}
+.composer .send{flex:none;width:36px;height:36px;border-radius:50%;border:0;padding:0;
+  background:var(--fg);color:var(--bg);cursor:pointer;display:grid;place-items:center;
+  transition:opacity .12s,transform .12s}
+.composer .send:disabled{opacity:.3;cursor:default}
+.composer .send:active:not(:disabled){transform:scale(.94)}
+.composer .send svg{width:18px;height:18px;display:block}
+.spinner{width:15px;height:15px;border-radius:50%;border:2px solid var(--bg);
+  border-top-color:transparent;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 #statusline{max-width:760px;margin:7px auto 0;display:flex;gap:6px;align-items:center;
   font-size:11.5px;color:var(--faint);font-family:var(--mono)}
 #statusline .spacer{flex:1}
 #statusline .sep{color:var(--ghost)}
 .spin{font-variant-numeric:tabular-nums}
 .mpill{flex:none;font-size:11px;color:var(--faint);border:1px solid var(--line2);
-  border-radius:8px;padding:1px 7px;font-family:var(--mono);margin-bottom:4px;
-  white-space:nowrap}
+  border-radius:8px;padding:1px 7px;font-family:var(--mono);white-space:nowrap}
+.pill.mbtn{background:transparent;cursor:pointer;font-family:var(--mono)}
+.pill.mbtn:hover{color:var(--fg);border-color:var(--line3);background:var(--hover)}
+.iconbtn{width:26px;height:26px;border-radius:8px;border:1px solid var(--line2);
+  background:transparent;color:var(--dim);cursor:pointer;display:grid;place-items:center;
+  font-size:13px;padding:0;line-height:1}
+.iconbtn:hover{color:var(--fg);border-color:var(--line3);background:var(--hover)}
+
+/* ── 选模型 ───────────────────────────────────────────────────────────── */
+#picker{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;z-index:14;
+  align-items:flex-start;justify-content:center;padding-top:13vh}
+#picker.open{display:flex}
+#picker .pbox{width:min(520px,92vw);max-height:70vh;display:flex;flex-direction:column;
+  background:var(--panel);border:1px solid var(--line2);border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 48px rgba(0,0,0,.35)}
+#picker .phead{display:flex;align-items:center;gap:10px;padding:12px 14px;
+  border-bottom:1px solid var(--line);font-size:13px}
+#picker .phead #p-note{color:var(--faint);font-size:11.5px;font-family:var(--mono)}
+#picker .phead button{background:transparent;border:1px solid var(--line2);color:var(--dim);
+  border-radius:8px;padding:4px 10px;font:12px var(--sans);cursor:pointer}
+#picker .phead button:hover{color:var(--fg);border-color:var(--line3)}
+#picker .pbody{overflow-y:auto;padding:6px 8px 10px}
+#picker .mrow{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;
+  cursor:pointer;font:12.5px var(--mono);color:var(--fg2)}
+#picker .mrow:hover{background:var(--hover);color:var(--fg)}
+#picker .mrow .tag{margin-left:auto;font-size:11px;color:var(--faint)}
+#picker .mrow.on{background:var(--hover)}
+#picker .mrow.on .tag{color:var(--ok)}
+#picker .perr{color:var(--warn);font-size:12px;padding:8px 10px;font-family:var(--mono)}
+#picker .perr.quiet{color:var(--faint);word-break:break-all}
 
 /* ── 设置 ─────────────────────────────────────────────────────────────── */
 #settings{position:fixed;inset:0;background:var(--bg);z-index:8;display:none;
@@ -157,10 +240,16 @@ details.frow>summary:hover{color:var(--fg2)}
   align-items:flex-start}
 .forg .lab{flex:0 0 132px;font-size:13px;color:var(--fg2);padding-top:2px}
 .forg .ctl{flex:1;min-width:0}
-.forg input[type=text],.forg input[type=number]{width:100%;max-width:240px;
+.forg input[type=text],.forg input[type=number],.forg select{width:100%;max-width:240px;
   background:var(--field);border:1px solid var(--line2);color:var(--fg);
   border-radius:8px;padding:6px 9px;font:12.5px var(--mono);outline:none}
-.forg input:focus{border-color:var(--line3)}
+.forg select{max-width:150px;padding:6px 6px}
+.forg input:focus,.forg select:focus{border-color:var(--line3)}
+.forg .rowline{display:flex;gap:6px;align-items:center}
+.forg .pick{flex:none;background:transparent;border:1px solid var(--line2);
+  color:var(--dim);border-radius:8px;padding:5px 9px;font:12px var(--sans);
+  cursor:pointer;white-space:nowrap}
+.forg .pick:hover{color:var(--fg);border-color:var(--line3);background:var(--hover)}
 .forg .hint{color:var(--faint);font-size:11.5px;margin-top:3px;line-height:1.5}
 .pblock{border:1px solid var(--line);border-radius:10px;margin:10px 0;
   background:var(--panel);overflow:hidden}
@@ -227,6 +316,7 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
   color:var(--faint);padding:4px 0;border-bottom:1px solid var(--line)}
 .hist b{color:var(--fg2);font-weight:500}
 .hist span:first-child{color:var(--ghost);flex:0 0 128px}
+.hint{color:var(--faint);font-size:11.5px;line-height:1.5}
 #scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;
   transition:opacity .18s;z-index:4}
 #scrim.on{opacity:1;pointer-events:auto}
@@ -265,7 +355,8 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
     <div class="right">
       <span class="pill"><span class="dot" id="h-dot"></span> <span id="h-status">—</span></span>
       <span class="pill" id="h-detail"></span>
-      <span class="pill" id="h-model"></span>
+      <button class="pill mbtn" id="h-model" title="换模型">—</button>
+      <button class="iconbtn" id="theme" title="切换深色/浅色">☾</button>
     </div>
   </div>
 
@@ -273,16 +364,32 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
 
   <div id="bottom">
     <div class="composer">
-      <textarea id="say" rows="1" placeholder="说一句…（回车发送，Shift+回车换行）"></textarea>
-      <span class="mpill" id="c-model">—</span>
-      <button class="send" id="send">↑</button>
+      <div class="gwrap">
+        <div class="gutter" id="gutter"><div class="gin" id="gutter-in"><div class="n">1</div></div></div>
+        <textarea id="say" rows="1" placeholder="说点什么…"></textarea>
+      </div>
+      <button class="send" id="send" title="发送" aria-label="发送">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/>
+          <path d="m5 12 7-7 7 7"/></svg>
+      </button>
     </div>
     <div id="statusline">
+      <span class="mpill" id="c-model">—</span>
       <span id="st-hint"></span><span class="spacer"></span>
       <span class="spin" id="st-steps"></span><span class="sep">·</span>
       <span class="spin" id="st-tokens"></span><span class="sep">·</span>
       <span class="spin" id="st-hit"></span>
     </div>
+  </div>
+</div>
+<div id="mirror" aria-hidden="true"></div>
+
+<div id="picker">
+  <div class="pbox">
+    <div class="phead"><b id="p-title">选模型</b><span id="p-note"></span>
+      <span style="flex:1"></span><button id="p-close">关</button></div>
+    <div class="pbody" id="p-body"></div>
   </div>
 </div>
 
@@ -317,7 +424,7 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
 "use strict";
 const $ = (id) => document.getElementById(id);
 const S = {token: localStorage.getItem("palimpsest.token") || "",
-  since: "0:0", step: 0, lastStep: -1, pinned: true,
+  since: "0:0", step: 0, lastStep: -1, pinned: true, sending: false, models: null,
   usage: new Map(), calls: new Map(), ctxAt: 0, cache: null};
 
 const esc = (s) => String(s == null ? "" : s)
@@ -330,6 +437,35 @@ function k(n) {
   return (n / 1e6).toFixed(2) + "M";
 }
 const hhmmss = (ts) => String(ts || "").slice(11, 19);
+
+/* ── 主题 ─────────────────────────────────────────────────────────────── */
+/* 存在 localStorage：跟着系统（auto）或钉死浅/深。切换只改 <html data-theme>，
+   CSS 那边整套变量换一遍，别处不用知道。 */
+const THEME_KEY = "palimpsest.theme";
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+const themeMode = () => localStorage.getItem(THEME_KEY) || "auto";
+function isDark() {
+  const mode = themeMode();
+  return mode === "dark" || (mode === "auto" && darkQuery.matches);
+}
+function applyTheme() {
+  const dark = isDark();
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  const btn = $("theme");
+  if (btn) {
+    btn.textContent = dark ? "☀" : "☾";
+    btn.title = dark ? "切到浅色" : "切到深色";
+  }
+}
+function setTheme(mode) {
+  if (mode === "auto") localStorage.removeItem(THEME_KEY);
+  else localStorage.setItem(THEME_KEY, mode);
+  applyTheme();
+  if (SET_DATA && $("settings").classList.contains("open")) renderSettings(SET_DATA);
+}
+darkQuery.addEventListener("change", applyTheme);
+applyTheme();
+$("theme").onclick = () => setTheme(isDark() ? "light" : "dark");
 
 async function api(path, opts) {
   opts = opts || {};
@@ -360,11 +496,16 @@ function delBtn(item) {
   const b = document.createElement("button");
   b.className = "del";
   b.textContent = "✕";
-  b.title = "删掉这条（连它的工具结果一起，改完自动重启一次）";
+  b.title = "删掉这条（连它的工具结果一起）；只删记录，不撤回别的";
   b.onclick = async (ev) => {
     ev.stopPropagation();
     ev.preventDefault();
-    if (!confirm("删掉这条？会连它的工具结果一起删，然后重启进程（约 3 秒）。")) return;
+    if (!confirm("删掉这一条记录？\n\n" +
+      "只删对话里的这一行（连它的工具结果一起）：\n" +
+      "· 它当时写进记忆的笔记还在；\n" +
+      "· 已经压进旧段的摘要改不了（那些块整体是只读的）；\n" +
+      "· 用量和步数不会退回去。\n\n" +
+      "下一步起它就不再看到这条。")) return;
     try {
       await api("/entries?block=" + item.block + "&seq=" + item.seq,
         {method: "DELETE"});
@@ -547,6 +688,7 @@ function paint(st) {
   $("h-status").textContent = kinds[st.status.kind] || "—";
   $("h-detail").textContent = st.status.detail || "";
   $("h-model").textContent = st.model || "";
+  S.models = st.models || S.models;
   $("h-dot").className = "dot " + (st.status.kind || "");
 
   $("s-today").textContent = k(st.today.total);
@@ -559,6 +701,10 @@ function paint(st) {
     Math.min(100, 100 * st.context_tokens / (st.context_budget || 1)) + "%";
   $("s-foot").textContent = "压缩 " + st.compressions + " 次";
   $("c-model").textContent = st.model || "—";
+  const mm = st.models || {};
+  $("c-model").title = "对话 " + (mm.chat || "—") +
+    " · 摘要 " + (mm.summary || "—") +
+    " · 嵌入 " + (mm.embed || "—") + (mm.embed_ok ? "" : "（不可用）");
   $("st-steps").textContent = st.steps + " 步";
   $("st-tokens").textContent = k(st.today.total) + " tok";
   $("st-hit").textContent = "命中 " +
@@ -586,30 +732,84 @@ async function poll() {
 }
 
 /* ── 发送 ─────────────────────────────────────────────────────────────── */
+/* 输入框学 APP 的 ChatComposer：行号按逻辑行编、回车只换行、只有按钮能发。
+   行数靠一面镜像墙量（textarea 自己不告诉你有几行）：把同样的文本塞进
+   同样宽/同样字体的隐藏 div，逐段量 span 的 offsetTop 就知道哪个视觉行是
+   某个逻辑行的开头 —— 折行的续行留空号，和编辑器一致。 */
+const LINE_H = 22, MAX_LINES = 5, MAX_TEXT_H = LINE_H * MAX_LINES;
+const ta = $("say"), gutter = $("gutter"), gin = $("gutter-in"), mirror = $("mirror");
+let drawnLines = 0;
+
+function refreshSend() {
+  $("send").disabled = S.sending || !ta.value.trim();
+}
+
+function syncGutter() {
+  gin.style.transform = "translateY(" + (-ta.scrollTop) + "px)";
+}
+
+function measureComposer() {
+  if (!ta.clientWidth) return;
+  const logical = ta.value.split("\n");
+  mirror.style.width = ta.clientWidth + "px";
+  mirror.textContent = "";
+  logical.forEach((line, index) => {
+    const span = document.createElement("span");
+    span.textContent = line || "\u200b";
+    mirror.appendChild(span);
+    if (index < logical.length - 1) mirror.appendChild(document.createTextNode("\n"));
+  });
+  const total = Math.max(1, Math.round(mirror.scrollHeight / LINE_H));
+  if (total !== drawnLines) {
+    drawnLines = total;
+    const starts = new Set();
+    for (const span of mirror.children) {
+      if (span.tagName === "SPAN") starts.add(Math.round(span.offsetTop / LINE_H));
+    }
+    let n = 0, html = "";
+    for (let i = 0; i < total; i += 1) {
+      if (starts.has(i)) { n += 1; html += '<div class="n">' + n + "</div>"; }
+      else html += '<div class="n"></div>';
+    }
+    gin.innerHTML = html;
+    const height = Math.max(LINE_H, Math.min(MAX_TEXT_H, total * LINE_H));
+    ta.style.height = height + "px";
+    gutter.style.height = height + "px";
+  }
+  syncGutter();
+  refreshSend();
+}
+
 async function send() {
-  const ta = $("say");
   const text = ta.value.trim();
-  if (!text) return;
-  ta.value = ""; ta.style.height = "auto";
-  $("send").disabled = true;
+  if (!text || S.sending) return;
+  S.sending = true;
+  const btn = $("send");
+  const icon = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner"></span>';
+  refreshSend();
   try {
     await api("/say", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({text})});
+    ta.value = "";
+    drawnLines = 0;
+    measureComposer();
     S.pinned = true;
     poll();
-  } catch (e) { ta.value = text; }
-  $("send").disabled = false;
+  } catch (e) {
+    toast("没发出去：" + e.message);
+  }
+  S.sending = false;
+  btn.innerHTML = icon;
+  refreshSend();
   ta.focus();
 }
 
 $("send").onclick = send;
-$("say").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-});
-$("say").addEventListener("input", (e) => {
-  e.target.style.height = "auto";
-  e.target.style.height = Math.min(150, e.target.scrollHeight) + "px";
-});
+ta.addEventListener("input", measureComposer);
+ta.addEventListener("scroll", syncGutter);
+window.addEventListener("resize", () => { drawnLines = 0; measureComposer(); });
+measureComposer();
 $("thread").addEventListener("scroll", () => {
   const box = $("thread");
   S.pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
@@ -633,6 +833,81 @@ $("into").onclick = () => {
   $("thread").innerHTML = '<div class="wrap"><div class="empty">载入中…</div></div>';
   poll();
 };
+/* ── 选模型 ───────────────────────────────────────────────────────────── */
+/* 顶栏那个模型按钮和设置里的「列表」都走这里：问 /models 要端点自己的清单，
+   挑一个填回去（设置里填进输入框，顶栏直接存）。 */
+const PICK = {kind: "chat", key: null};
+const pickName = (kind) => kind === "embed" ? "嵌入模型"
+  : (kind === "summary" ? "摘要模型" : "对话模型");
+
+async function openPicker(kind, key) {
+  PICK.kind = kind;
+  PICK.key = key;
+  $("p-title").textContent = pickName(kind);
+  $("p-note").textContent = "正在问端点…";
+  $("p-body").innerHTML = "";
+  $("picker").classList.add("open");
+  try { renderPicker(await api("/models?kind=" + kind)); }
+  catch (e) { renderPicker({ok: false, error: "拉不到：" + e.message, models: []}); }
+}
+
+function pickCurrent() {
+  if (PICK.key) {
+    const el = $("set-body").querySelector('[data-key="' + PICK.key + '"]');
+    return el ? el.value : "";
+  }
+  const mm = S.models || {};
+  return PICK.kind === "embed" ? (mm.embed || "") : (mm.chat || "");
+}
+
+function renderPicker(data) {
+  const box = $("p-body");
+  box.innerHTML = "";
+  $("p-note").textContent = data.ok ? (data.models.length + " 个") : "拉不到";
+  if (!data.ok) {
+    box.innerHTML = '<div class="perr">' + esc(data.error || "拉不到列表") + "</div>" +
+      '<div class="perr quiet">' + esc(data.url || "") + "</div>" +
+      '<div class="perr quiet">拉不到就直接在输入框里手写模型名。</div>';
+    return;
+  }
+  const current = pickCurrent();
+  for (const id of data.models) {
+    const row = document.createElement("div");
+    row.className = "mrow" + (id === current ? " on" : "");
+    row.innerHTML = "<span>" + esc(id) + '</span><span class="tag">' +
+      (id === current ? "在用" : "选用") + "</span>";
+    row.onclick = () => chooseModel(id);
+    box.appendChild(row);
+  }
+  if (!data.models.length) box.innerHTML = '<div class="perr">端点没给模型。</div>';
+}
+
+async function chooseModel(id) {
+  $("picker").classList.remove("open");
+  if (PICK.key) {
+    const el = $("set-body").querySelector('[data-key="' + PICK.key + '"]');
+    if (el) el.value = id;
+    toast("已填 " + id + "，点「保存并生效」");
+    return;
+  }
+  const field = PICK.kind === "embed" ? "embed_model"
+    : (PICK.kind === "summary" ? "summary_model" : "model");
+  try {
+    await api("/settings", {method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({values: {[field]: id}})});
+    toast("已换成 " + id);
+    poll();
+    if ($("settings").classList.contains("open")) renderSettings(await api("/settings"));
+  } catch (e) { toast("换不了：" + e.message); }
+}
+
+$("p-close").onclick = () => $("picker").classList.remove("open");
+$("picker").onclick = (ev) => {
+  if (ev.target.id === "picker") $("picker").classList.remove("open");
+};
+$("h-model").onclick = () => openPicker("chat", null);
+
 /* ── 设置 ─────────────────────────────────────────────────────────────── */
 let SET_FIELDS = [];
 let SET_DATA = null;
@@ -656,6 +931,11 @@ function fieldRow(f, value, def, pending) {
   let ctl = "";
   if (f.type === "bool") {
     ctl = '<input type="checkbox" data-key="' + f.key + '"' + (value ? " checked" : "") + ">";
+  } else if (f.type === "select") {
+    ctl = '<select data-key="' + f.key + '">' + (f.options || []).map((option) =>
+      '<option value="' + esc(option) + '"' +
+      (option === value ? " selected" : "") + ">" + esc(option) + "</option>").join("") +
+      "</select>";
   } else if (f.type === "ints") {
     ctl = '<input type="text" data-key="' + f.key + '" value="' +
       esc((value || []).join(", ")) + '">';
@@ -665,10 +945,15 @@ function fieldRow(f, value, def, pending) {
     ctl = '<input type="number" step="' + (f.type === "float" ? "0.1" : "1") +
       '" data-key="' + f.key + '" value="' + esc(value) + '">';
   }
+  if (f.picker) {
+    ctl += '<button class="pick" data-pick="' + esc(f.key) + '" data-kind="' +
+      esc(f.picker) + '" title="从端点的模型列表里挑">列表</button>';
+  }
   const changed = fmtVal(value) !== fmtVal(def);
   const pendingNote = pending ? " · 已保存，待重启" : "";
   row.innerHTML = '<div class="lab">' + esc(f.label) + '</div><div class="ctl">' +
-    ctl + '<div class="hint">' + esc(f.help || "") +
+    '<div class="rowline">' + ctl + "</div>" +
+    '<div class="hint">' + esc(f.help || "") +
     (changed
       ? ' · <button class="rst" data-reset="' + f.key + '" data-def="' +
         esc(fmtVal(def)) + '">恢复默认 ' + esc(fmtVal(def)) + "</button>"
@@ -682,6 +967,21 @@ function renderSettings(data) {
   SET_FIELDS = data.fields;
   const box = $("set-body");
   box.innerHTML = "";
+
+  const sec0 = document.createElement("div");
+  sec0.className = "sec";
+  sec0.innerHTML = "<h3>外观</h3>";
+  const modeChips = document.createElement("div");
+  modeChips.className = "chips";
+  for (const pair of [["auto", "跟随系统"], ["light", "浅色"], ["dark", "深色"]]) {
+    const b = document.createElement("button");
+    b.textContent = pair[1];
+    b.className = themeMode() === pair[0] ? "on" : "";
+    b.onclick = () => setTheme(pair[0]);
+    modeChips.appendChild(b);
+  }
+  sec0.appendChild(modeChips);
+  box.appendChild(sec0);
 
   const sec1 = document.createElement("div");
   sec1.className = "sec";
@@ -704,6 +1004,17 @@ function renderSettings(data) {
     const pending = (data.stored && data.stored[f.key] !== undefined) &&
       fmtVal(cur) !== fmtVal(data.values[f.key]);
     sec1.appendChild(fieldRow(f, cur, data.defaults[f.key], pending));
+  }
+  if (SET_GROUP === "记忆" && data.memory) {
+    const m = data.memory;
+    const line = document.createElement("div");
+    line.className = "hint";
+    line.style.padding = "10px 0 2px";
+    line.textContent = "嵌入服务：" + (m.embed_ok ? "可用" : "不可用") +
+      " · " + (m.embed_model || "—") + " · " + (m.embed_dim || "—") + " 维" +
+      (m.embed_host ? " · " + m.embed_host : "") +
+      (m.embed_ok ? "" : "（没有百炼的 key，recall 只能靠词面）");
+    sec1.appendChild(line);
   }
   box.appendChild(sec1);
 
@@ -758,6 +1069,7 @@ function collectValues() {
     const key = el.getAttribute("data-key");
     const type = kinds[key] || "text";
     if (type === "bool") values[key] = el.checked;
+    else if (type === "select") values[key] = el.value;
     else if (type === "ints") {
       values[key] = el.value.split(",")
         .map((s) => Number(s.trim())).filter((n) => !isNaN(n));
@@ -780,6 +1092,11 @@ async function saveParams() {
 $("set-body").addEventListener("click", async (ev) => {
   const t = ev.target;
   if (t.tagName !== "BUTTON") return;
+  const pick = t.getAttribute("data-pick");
+  if (pick) {
+    openPicker(t.getAttribute("data-kind") || "chat", pick);
+    return;
+  }
   const resetField = t.getAttribute("data-reset");
   if (resetField) {
     const el = $("set-body").querySelector('[data-key="' + resetField + '"]');

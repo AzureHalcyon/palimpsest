@@ -136,12 +136,6 @@ def main(argv=None) -> int:
 
     web_access.set_tavily_key(credentials.tavily_key)
     web_access.set_deepseek_key(credentials.chat_key)
-    try:
-        memory_credentials = MemoryCredentials.load(args.credentials)
-        embedder = Embedder(MemoryChatConfig(), memory_credentials)
-    except Exception as exc:
-        print("记忆嵌入不可用：%s" % exc, file=sys.stderr)
-        embedder = None
 
     config = LoopConfig(name=args.name, model=args.model,
                         temperature=args.temperature, max_tokens=args.max_tokens,
@@ -159,7 +153,31 @@ def main(argv=None) -> int:
                         max_steps=args.max_steps,
                         data_dir=args.data)
     # 网页上改过的旋钮存在 <data>/settings.json，盖掉命令行给的值。
+    # 要赶在建嵌入器之前：嵌入模型/维度就是从这份配置里读的。
     settings.apply(config, settings.load(config.data_dir))
+
+    memory_credentials = None
+    try:
+        memory_credentials = MemoryCredentials.load(args.credentials)
+    except Exception as exc:
+        print("记忆嵌入不可用：%s" % exc, file=sys.stderr)
+
+    def make_embedder():
+        """按当前配置造一个嵌入器；网页上换模型时也走这里。"""
+        if memory_credentials is None:
+            return None
+        memory_config = MemoryChatConfig()
+        memory_config.embed_model = str(config.embed_model)
+        memory_config.embed_dim = int(config.embed_dim)
+        return Embedder(memory_config, memory_credentials)
+
+    embedder = None
+    if memory_credentials is not None:
+        try:
+            embedder = make_embedder()
+        except Exception as exc:
+            print("记忆嵌入不可用：%s" % exc, file=sys.stderr)
+
     store = LoopStore(config.db_path())
     memory = MemoryBridge(args.memory_data, embedder=embedder,
                           lexical=config.lexical,
@@ -194,9 +212,9 @@ def main(argv=None) -> int:
     memory.archiver = lambda material: ask_model(loop.client, material)
     memory.on_recall = store.add_recall
 
-    print("名字：%s · 模型：%s · 摘要：%s · 嵌入：%s · 词面：%s · 预算 %s · 块 %s · 库 %s · 记忆 %s" % (
+    print("名字：%s · 模型：%s · 摘要：%s · 嵌入：%s/%d · 词面：%s · 预算 %s · 块 %s · 库 %s · 记忆 %s" % (
         config.name, config.model, config.summary_model,
-        "百炼" if embedder is not None and getattr(embedder, "available", False) else "不可用",
+        config.embed_model, int(config.embed_dim),
         "开" if config.lexical else "关",
         _k(config.context_budget), _k(config.block_tokens),
         os.path.abspath(config.db_path()), os.path.abspath(args.memory_data)), flush=True)
@@ -217,7 +235,8 @@ def main(argv=None) -> int:
         token = args.token or web.make_token(os.path.join(args.data, "web-token"))
         try:
             web.serve(config, config.db_path(), token, host or "127.0.0.1", port,
-                  data_dir=config.data_dir, loop=loop)
+                      data_dir=config.data_dir, loop=loop, credentials=credentials,
+                      embed_factory=make_embedder)
         except OSError as exc:
             print("网页起不来：%s" % exc, file=sys.stderr)
             return 1

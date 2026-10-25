@@ -20,6 +20,9 @@ import json
 import os
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -121,6 +124,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, self._context())
             if route.path == "/settings":
                 return self._send(200, self._settings_payload())
+            if route.path == "/models":
+                return self._send(200, self._models(parse_qs(route.query)))
             if route.path == "/feed":
                 return self._send(200, self._feed(parse_qs(route.query)))
         except Exception as exc:                     # 页面不该因为一条查询挂掉
@@ -199,16 +204,41 @@ class _Handler(BaseHTTPRequestHandler):
     def _apply_live(self, stored: dict) -> None:
         """旋钮改了立刻生效：这几项都是每步现读的，不用等重启。
 
-        只有模型名藏在客户端自己的配置里，要单独推一把。
+        有两处不能只改配置：主模型藏在客户端自己的配置里；摘要客户端和嵌入器
+        是**造好就带着模型名**的，得按新配置重建一个。
         """
         config = self.server.config
+        before = {key: getattr(config, key, None) for key in
+                  ("model", "temperature", "max_tokens", "summary_model",
+                   "summary_provider", "embed_model", "embed_dim")}
         settings.apply(config, stored)
         loop = getattr(self.server, "loop", None)
+
         client_config = getattr(getattr(loop, "client", None), "config", None)
         if client_config is not None:
             client_config.model = config.model
             client_config.temperature = config.temperature
             client_config.max_tokens = config.max_tokens
+
+        if (before["summary_model"] != config.summary_model
+                or before["summary_provider"] != config.summary_provider):
+            compressor = getattr(loop, "compressor", None)
+            rebuild = getattr(compressor, "rebuild", None)
+            if callable(rebuild):
+                rebuild()
+
+        if (before["embed_model"] != config.embed_model
+                or before["embed_dim"] != config.embed_dim):
+            factory = getattr(self.server, "embed_factory", None)
+            embedder = None
+            if callable(factory):
+                try:
+                    embedder = factory()
+                except Exception:
+                    embedder = None
+            memory = getattr(loop, "memory", None)
+            if memory is not None:
+                memory.embedder = embedder
 
     def _save_prompt(self):
         payload = self._body()
@@ -223,6 +253,86 @@ class _Handler(BaseHTTPRequestHandler):
     def _restart(self):
         control.request_stop()
         return self._send(200, {"ok": True})
+
+    # ── 模型列表 ──────────────────────────────────────────────────────────
+    def _models(self, query: dict) -> dict:
+        """问端点要一份模型清单；缓存两分钟，点两次「列表」不重复走网络。"""
+        kind = str((query.get("kind") or ["chat"])[0] or "chat")
+        if kind not in ("chat", "summary", "embed"):
+            kind = "chat"
+        cache = getattr(self.server, "models_cache", None)
+        if cache is None:
+            cache = {}
+            self.server.models_cache = cache
+        hit = cache.get(kind)
+        if hit and time.time() - float(hit.get("at") or 0) < 120:
+            return hit["payload"]
+        payload = self._fetch_models(kind)
+        cache[kind] = {"at": time.time(), "payload": payload}
+        return payload
+
+    def _fetch_models(self, kind: str) -> dict:
+        credentials = getattr(self.server, "credentials", None)
+        if credentials is None:
+            return {"ok": False, "kind": kind, "models": [], "url": "",
+                    "error": "没有凭证，问不了模型列表"}
+        config = self.server.config
+        if kind == "chat":
+            url, key = credentials.chat_url, credentials.chat_key
+        else:
+            field = "summary_model" if kind == "summary" else "embed_model"
+            model = str(getattr(config, field, "") or "")
+            provider = str(getattr(config, "summary_provider", "auto") or "auto")
+            if provider == "auto":
+                provider = "bailian" if "qwen" in model.lower() else "deepseek"
+            if provider == "bailian" and credentials.summary_url:
+                url = credentials.summary_url
+                key = credentials.summary_key or credentials.chat_key
+            else:
+                url, key = credentials.chat_url, credentials.chat_key
+        base = str(url or "").rstrip("/")
+        for suffix in ("/chat/completions", "/embeddings"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+        if not base:
+            return {"ok": False, "kind": kind, "models": [], "url": "",
+                    "error": "凭证里没有端点地址"}
+        target = base + "/models"
+        request = urllib.request.Request(target)
+        request.add_header("Authorization", "Bearer " + str(key or ""))
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return {"ok": False, "kind": kind, "models": [], "url": target,
+                    "error": "端点回 %d：%s" % (exc.code, _short_error(exc))}
+        except Exception as exc:
+            return {"ok": False, "kind": kind, "models": [], "url": target,
+                    "error": "%s：%s" % (type(exc).__name__, str(exc)[:160])}
+        items = payload.get("data") if isinstance(payload, dict) else None
+        ids = []
+        for item in items or []:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
+            elif isinstance(item, str):
+                ids.append(item)
+        filtered = False
+        if kind == "embed":
+            embed_ids = [model for model in ids if "embed" in model.lower()]
+            if embed_ids:                # 百炼那份清单里还有几十个对话/画图模型
+                ids, filtered = embed_ids, True
+        return {"ok": True, "kind": kind, "models": ids, "url": target,
+                "filtered": filtered, "error": ""}
+
+    def _embed_status(self) -> dict:
+        loop = getattr(self.server, "loop", None)
+        embedder = getattr(getattr(loop, "memory", None), "embedder", None)
+        config = self.server.config
+        return {"embed_model": str(getattr(config, "embed_model", "") or ""),
+                "embed_dim": int(getattr(config, "embed_dim", 0) or 0),
+                "embed_ok": bool(embedder is not None
+                                 and getattr(embedder, "available", False)),
+                "embed_host": str(getattr(self.server, "embed_host", "") or "")}
 
     # ── 设置视图 ──────────────────────────────────────────────────────────
     def _settings_payload(self) -> dict:
@@ -246,6 +356,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "groups": list(settings.GROUPS),
                 "prompts": prompts,
                 "history": settings.history(data_dir),
+                "memory": self._embed_status(),
                 "data_dir": data_dir}
 
     # ── 三个视图 ──────────────────────────────────────────────────────────
@@ -259,8 +370,13 @@ class _Handler(BaseHTTPRequestHandler):
         current = serialize_entries(state["current"].entries, fold_keep=fold_keep)
         previous = serialize_entries(state["previous"].entries, fold_keep=fold_keep)
         totals = store.usage_totals()
+        embed = self._embed_status()
         return {"name": getattr(config, "name", ""),
                 "model": getattr(config, "model", ""),
+                "models": {"chat": getattr(config, "model", ""),
+                           "summary": getattr(config, "summary_model", ""),
+                           "embed": embed["embed_model"],
+                           "embed_ok": embed["embed_ok"]},
                 "status": store.status(),
                 "steps": totals["steps"],
                 "compressions": self._compressions(),
@@ -336,9 +452,18 @@ class _Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def _short_error(exc) -> str:
+    """把端点的报错正文截一小段，别把整页 HTML 塞进界面。"""
+    try:
+        return exc.read()[:200].decode("utf-8", "replace").replace("\n", " ")
+    except Exception:
+        return str(exc)
+
+
 def serve(config, path: str, token: str = "",
           host: str = "127.0.0.1", port: int = 8080,
-          data_dir: str = "", loop=None) -> ThreadingHTTPServer:
+          data_dir: str = "", loop=None, credentials=None,
+          embed_factory=None) -> ThreadingHTTPServer:
     """起一个后台线程；返回的 httpd 交给调用方（自检里用来取端口）。"""
     httpd = _Server((host, int(port)), _Handler)
     httpd.config = config
@@ -346,6 +471,11 @@ def serve(config, path: str, token: str = "",
     httpd.token = token
     httpd.data_dir = data_dir or os.path.dirname(os.path.abspath(path))
     httpd.loop = loop
+    httpd.credentials = credentials
+    httpd.embed_factory = embed_factory
+    httpd.models_cache = {}
+    summary_url = str(getattr(credentials, "summary_url", "") or "")
+    httpd.embed_host = urlsplit(summary_url).netloc if summary_url else ""
     threading.Thread(target=httpd.serve_forever, daemon=True, name="web").start()
     return httpd
 

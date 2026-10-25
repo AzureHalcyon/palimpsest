@@ -25,9 +25,12 @@ FIELDS = (
     {"key": "name", "group": "模型", "label": "名字", "type": "text",
      "help": "sink 第一句里的名字；改完重启生效"},
     {"key": "model", "group": "模型", "label": "主模型", "type": "text",
-     "help": "说话用的模型"},
+     "picker": "chat", "help": "说话用的模型"},
     {"key": "summary_model", "group": "模型", "label": "摘要模型", "type": "text",
-     "help": "压旧块用的模型，可以比主模型便宜"},
+     "picker": "summary", "help": "压旧块用的模型，可以比主模型便宜"},
+    {"key": "summary_provider", "group": "模型", "label": "摘要走哪家", "type": "select",
+     "options": ["auto", "deepseek", "bailian"],
+     "help": "auto：模型名带 qwen 走百炼，其余走主模型端点"},
     {"key": "temperature", "group": "模型", "label": "温度", "type": "float",
      "min": 0, "max": 2, "help": "越高越飘"},
     {"key": "max_tokens", "group": "模型", "label": "单次输出上限", "type": "int",
@@ -54,6 +57,11 @@ FIELDS = (
      "min": 0, "max": 1000, "help": "0=关；开着可以让刚发生的事只出现在原文里"},
     {"key": "lexical", "group": "记忆", "label": "词面检索", "type": "bool",
      "help": "打开后 recall 除了嵌入还会按字面匹配"},
+    {"key": "embed_model", "group": "记忆", "label": "嵌入模型", "type": "text",
+     "picker": "embed", "help": "recall / remember 取向量用的模型；换模型同名要连维度一起换"},
+    {"key": "embed_dim", "group": "记忆", "label": "嵌入维度", "type": "int",
+     "min": 256, "max": 4096,
+     "help": "要和模型匹配（qwen3.7-text-embedding 是 1024）；改了旧的向量缓存会作废重取"},
 
     {"key": "daily_token_cap", "group": "成本", "label": "每天 token 上限",
      "type": "int", "min": 0, "max": 100000000,
@@ -111,6 +119,12 @@ def _coerce(field: dict, value):
     kind = field["type"]
     if kind == "bool":
         return bool(value)
+    if kind == "select":
+        value = str(value or "").strip()
+        options = list(field.get("options") or ())
+        if value not in options:
+            raise SettingsError("%s 只能是 %s" % (field["label"], " / ".join(options)))
+        return value
     if kind == "ints":
         if not isinstance(value, (list, tuple)):
             raise SettingsError("%s 要给 %d 个数" % (field["label"], field["count"]))

@@ -920,6 +920,16 @@ def check_web() -> None:
         check(state["steps"] >= 1, "状态里该有步数：%r" % state["steps"])
         check(state["block_tokens"] == 100000, "状态里该有块限额")
         check("kind" in state["status"], "状态里该有它现在在干什么")
+        check(state["models"]["chat"] == config.model, "状态里该报对话模型")
+        check(state["models"]["summary"] == config.summary_model, "状态里该报摘要模型")
+        check(state["models"]["embed"] == config.embed_model, "状态里该报嵌入模型")
+
+        with urllib.request.urlopen(base + "/", timeout=5) as response:
+            page = response.read().decode("utf-8")
+        check('id="gutter"' in page, "页面里该有行号槽")
+        check("data-theme" in page and 'id="theme"' in page, "页面里该有主题切换")
+        check('id="picker"' in page, "页面里该有选模型的弹窗")
+        check('id="mirror"' in page, "页面里该有量行数的镜像墙")
 
         _, feed = get("/feed?since=0:0")
         check(any("在吗" in item["text"] for item in feed["entries"]),
@@ -974,6 +984,44 @@ def check_settings() -> None:
         check(payload["values"]["block_tokens"] == 100000, "设置里该有当前值")
         check(any(item["key"] == "sink" for item in payload["prompts"]),
               "设置里该有提示词")
+
+        fields = {item["key"]: item for item in payload["fields"]}
+        check("embed_model" in fields and fields["embed_model"]["group"] == "记忆",
+              "设置里该有嵌入模型")
+        check(fields["embed_model"].get("picker") == "embed", "嵌入模型该能从列表挑")
+        check(fields["model"].get("picker") == "chat", "主模型该能从列表挑")
+        check(fields["summary_provider"]["type"] == "select", "摘要端点该是下拉")
+        check(payload["memory"]["embed_dim"] > 0, "设置里该报嵌入维度")
+        check(call("/models?kind=chat")["ok"] is False,
+              "没凭证时拉模型列表该老实说不行，而不是 500")
+
+        call("/settings", {"values": {"summary_provider": "bailian"}}, "PUT")
+        check(config.summary_provider == "bailian", "下拉的值要能存")
+        try:
+            call("/settings", {"values": {"summary_provider": "瞎写"}}, "PUT")
+        except urllib.error.HTTPError as exc:
+            check(exc.code == 400, "下拉的野值该 400，拿到 %d" % exc.code)
+        else:
+            raise AssertionError("下拉的野值也存进去了")
+
+        # 换嵌入模型：得当场重建嵌入器（它是造好就带着模型名的）。
+        import types
+        made = []
+
+        def factory():
+            made.append(1)
+            return types.SimpleNamespace(available=True)
+
+        httpd.loop = types.SimpleNamespace(
+            memory=types.SimpleNamespace(embedder=None), client=None)
+        httpd.embed_factory = factory
+        call("/settings", {"values": {"embed_model": "qwen3.7-text-embedding-flash",
+                                      "embed_dim": 2048}}, "PUT")
+        check(config.embed_model == "qwen3.7-text-embedding-flash",
+              "嵌入模型该立刻生效")
+        check(config.embed_dim == 2048, "嵌入维度该立刻生效")
+        check(made and httpd.loop.memory.embedder is not None,
+              "换了嵌入模型该当场换个嵌入器")
 
         call("/settings", {"values": {"block_tokens": 5000}}, "PUT")
         check(settings.load(workdir).get("block_tokens") == 5000, "改的值要落盘")

@@ -82,6 +82,11 @@ class LoopConfig:
     summary_provider: str = "auto"
     summary_max_tokens: int = 4000
 
+    # 嵌入（memory_v2 的向量身份）：模型与维度要配对，换一个就得连另一个一起对，
+    # 不然缓存里旧向量按 (model, dim) 认不出来，召回会静默变差。
+    embed_model: str = "qwen3.7-text-embedding"
+    embed_dim: int = 1024
+
     # 四段旧记录的长度上限（字符）：0 最旧，末位最近。每老一格再截短。
     band_chars: tuple = (1200, 2400, 4800, 9600)
     # 往老一格至少缩到这个比例，保证分辨率从后往前单调下降。

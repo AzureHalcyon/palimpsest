@@ -91,7 +91,16 @@ class Compressor:
     def __init__(self, config, credentials=None,
                  summarizer: Optional[Callable[[str], dict]] = None):
         self.config = config
+        self.credentials = credentials
+        # 自检塞进来的假摘要器：网页改模型时不许被换掉。
+        self._custom = summarizer is not None
         self.summarizer = summarizer or self._model_summarizer(credentials)
+
+    def rebuild(self) -> None:
+        """换了摘要模型 / 端点之后重建客户端（网页上改参数时调，不用重启）。"""
+        if self._custom or self.credentials is None:
+            return
+        self.summarizer = self._model_summarizer(self.credentials)
 
     def _model_summarizer(self, credentials):
         if credentials is None:
