@@ -14,6 +14,7 @@ import shutil
 import sys
 import threading
 import time
+from datetime import datetime
 
 from testsupport import tempdir
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
@@ -189,6 +190,21 @@ def check_two_blocks() -> None:
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_clock() -> None:
+    """墙钟只拼进这一步的输入：不进记录、不落库，隔了多久用相对时长说。"""
+    context = Context(_loop_config(name="自检"))
+    context.current = Block([
+        BlockEntry({"role": "user", "content": "预算二十八万。"}, "2026-10-25 14:12:00"),
+        BlockEntry({"role": "assistant", "content": ""}, "2026-10-25 15:40:00"),
+        BlockEntry({"role": "assistant", "content": "记下了。"}, "2026-10-25 15:36:00"),
+    ], "2026-10-25 14:12:00", "2026-10-25 15:40:00")
+    text = context.clock_text(datetime(2026, 10, 25, 15, 42))
+    check(text == "（现在 10-25 周日 15:42；距上次对方说话 1 小时 30 分；"
+                  "距我上次开口 6 分钟）", "墙钟写得不对：%s" % text)
+    check("现在" not in context.block_text(), "墙钟不该进记录")
+    check("现在 10-25" in context.messages()[-1]["content"], "墙钟该在最后一条输入里")
 
 
 def check_loop() -> None:
@@ -1228,6 +1244,7 @@ def main() -> int:
     check_compress()
     check_context_limits()
     check_two_blocks()
+    check_clock()
     check_loop()
     check_compress_failure()
     check_tools()

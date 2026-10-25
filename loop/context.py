@@ -10,6 +10,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List
 
 from . import prompt_files
@@ -106,6 +107,33 @@ def time_range(start_ts: str, end_ts: str) -> str:
     return "%s–%s" % (start[5:16], end[5:16])
 
 
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def humanize(delta) -> str:
+    """一段时长说成人话：刚刚 / 12 分钟 / 3 小时 12 分 / 2 天 5 小时。"""
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return "刚刚"
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%d 分钟" % minutes
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return "%d 小时 %d 分" % (hours, minutes) if minutes else "%d 小时" % hours
+    days, hours = divmod(hours, 24)
+    return "%d 天 %d 小时" % (days, hours) if hours else "%d 天" % days
+
+
+def _stamp_of(stamp: str, moment: datetime):
+    try:
+        when = datetime.strptime(str(stamp or ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    delta = moment - when
+    return delta if delta.total_seconds() >= 0 else None
+
+
 @dataclass
 class Band:
     level: int          # 0 最旧 … 3 最近（“正在”是当前块，不在这里）
@@ -119,6 +147,18 @@ class BlockEntry:
     message: dict       # role: assistant / user / tool / note
     ts: str
     meta: dict = field(default_factory=dict)   # kind 之类，不进渲染，只给规则用
+
+
+def _last_stamp(entries: List[BlockEntry], role: str, spoken: bool) -> str:
+    """最近一条（对方说的 / 我开口的）时间；空的 assistant 只是工具调用，不算开口。"""
+    for entry in reversed(entries):
+        message = entry.message
+        if str(message.get("role") or "") != role:
+            continue
+        if spoken and not str(message.get("content") or "").strip():
+            continue
+        return str(entry.ts or "")
+    return ""
 
 
 @dataclass
@@ -329,10 +369,29 @@ class Context:
             parts.append(rendered)
         return "\n\n".join(parts)
 
+    def clock_text(self, moment: datetime = None) -> str:
+        """现在几点、距上两句话多久。
+
+        只拼进这一步的输入，不落库：写进记录里会变成"她说过现在是几点"，
+        还会被压进摘要；放进 sink 又会让前缀缓存每步作废。
+        """
+        moment = moment or datetime.now()
+        parts = ["现在 %s %s %s" % (moment.strftime("%m-%d"),
+                                    _WEEKDAYS[moment.weekday()],
+                                    moment.strftime("%H:%M"))]
+        entries = self.previous.entries + self.current.entries
+        for role, spoken, label in (("user", False, "距上次对方说话"),
+                                    ("assistant", True, "距我上次开口")):
+            delta = _stamp_of(_last_stamp(entries, role, spoken), moment)
+            if delta is not None:
+                parts.append("%s %s" % (label, humanize(delta)))
+        return "（%s）" % "；".join(parts)
+
     def messages(self) -> List[dict]:
         block = self.block_text().strip()
         if not block:
             block = "（接着上面。）" if self.bands or self.previous.entries else "（还没有记录。）"
+        block = "%s\n\n%s" % (block, self.clock_text())
         return [
             {"role": "system", "content": self.system_text()},
             {"role": "user", "content": block},
