@@ -18,29 +18,47 @@ import os
 import time
 
 # 组名按这个顺序显示；账目的分组借用 App 那边的说法。
-GROUPS = ("模型", "上下文", "记忆", "命令", "成本", "节奏")
+GROUPS = ("模型", "接口", "上下文", "记忆", "命令", "成本", "节奏")
 
 # 网页表单就按这张表画。加一个旋钮 = 在这里加一行 + `LoopConfig` 里加字段。
 FIELDS = (
     {"key": "name", "group": "模型", "label": "名字", "type": "text",
      "help": "sink 第一句里的名字；改完重启生效"},
+    {"key": "user_name", "group": "模型", "label": "对方的名字", "type": "text",
+     "help": "压缩文本里用「名字：」代替「对方：」，sink 第一句也用它"},
     {"key": "model", "group": "模型", "label": "主模型", "type": "text",
      "picker": "chat", "help": "说话用的模型"},
     {"key": "summary_model", "group": "模型", "label": "摘要模型", "type": "text",
      "picker": "summary", "help": "压旧块用的模型，可以比主模型便宜"},
+    {"key": "persona_model", "group": "模型", "label": "整理用的模型", "type": "text",
+     "help": "写自我描述那次整理用哪个模型；空 = 跟主模型走（填便宜的就省主模型额度）"},
     {"key": "summary_provider", "group": "模型", "label": "摘要走哪家", "type": "select",
      "options": ["auto", "deepseek", "bailian"],
      "help": "auto：模型名带 qwen 走百炼，其余走主模型端点"},
+    {"key": "reasoning_effort", "group": "模型", "label": "思考强度", "type": "select",
+     "options": ["", "low", "high", "max"],
+     "help": "空 = 端点默认；官方 V4.1 支持 low / high / max，越低想得越少越快"},
+    {"key": "stream", "group": "模型", "label": "流式输出", "type": "bool",
+     "help": "打开后边生成边推给网页（能看见她在打字）；网关不兼容时关掉"},
     {"key": "temperature", "group": "模型", "label": "温度", "type": "float",
      "min": 0, "max": 2, "help": "越高越飘"},
     {"key": "max_tokens", "group": "模型", "label": "单次输出上限", "type": "int",
      "min": 128, "max": 32000, "help": "一步最多说多少 token"},
 
+    {"key": "chat_url", "group": "接口", "label": "对话地址", "type": "text",
+     "optional": True, "help": "完整 URL（含 /v1）；留空 = 用凭证文件里的"},
+    {"key": "chat_key", "group": "接口", "label": "对话密钥", "type": "text",
+     "secret": True, "help": "留空 = 不改（只显示是否已设置）"},
+    {"key": "embed_url", "group": "接口", "label": "嵌入地址", "type": "text",
+     "optional": True, "help": "记忆取向量用的地址（含 /v1）；留空 = 用凭证文件里的"},
+    {"key": "embed_key", "group": "接口", "label": "嵌入密钥", "type": "text",
+     "secret": True, "help": "留空 = 不改"},
+
     {"key": "block_tokens", "group": "上下文", "label": "块大小", "type": "int",
-     "min": 1000, "max": 200000,
+     "min": 1000, "max": 400000,
      "help": "当前块攒到这么多 token 就升成上一块；块小压得勤、旧事忘得快"},
     {"key": "context_budget", "group": "上下文", "label": "上下文预算", "type": "int",
-     "min": 8000, "max": 400000,
+     "min": 8000, "max": 1000000,
      "help": "一次请求最多多少 token；超了先丢最旧的段"},
     {"key": "band_budget", "group": "上下文", "label": "旧段预算", "type": "int",
      "min": 2000, "max": 200000, "help": "四段摘要合计的上限"},
@@ -84,6 +102,23 @@ FIELDS = (
     {"key": "daily_token_warn", "group": "成本", "label": "每天提醒线",
      "type": "int", "min": 0, "max": 100000000, "help": "过了只在输出里提一句；0=不提"},
 
+    {"key": "persona_enabled", "group": "节奏", "label": "自我描述", "type": "bool",
+     "help": "让她自己写一段自我描述，常驻在 system 里；平时不提，隔一段时间自动重写一次"},
+    {"key": "persona_hours", "group": "节奏", "label": "自我描述重写间隔（小时）", "type": "float",
+     "min": 0, "max": 720, "help": "隔多久重写一次；0 = 不自动重写。改一次会作废一次前缀缓存"},
+    {"key": "persona_min_chars", "group": "节奏", "label": "重写所需新材料（字）", "type": "int",
+     "min": 0, "max": 200000,
+     "help": "上次改写之后至少要攒这么多字才重写；几句话不够，要一段像样的新经历（0 = 到点就写）"},
+    {"key": "persona_feed_chars", "group": "节奏", "label": "整理时喂多少字", "type": "int",
+     "min": 0, "max": 400000,
+     "help": "一次整理最多喂多少字（旧段摘要 + 上次改写之后的新记录）；0 = 全部喂"},
+    {"key": "persona_with_bands", "group": "节奏", "label": "整理时带上旧段摘要", "type": "bool",
+     "help": "旧段摘要一起喂，长程连续性更好；关掉就只看上次改写之后的原文"},
+    {"key": "persona_chars", "group": "节奏", "label": "自我描述上限（字）", "type": "int",
+     "min": 200, "max": 8000, "help": "这段描述最多多少字，超了截断"},
+    {"key": "clock_refresh", "group": "节奏", "label": "墙钟刷新（秒）", "type": "int",
+     "min": 0, "max": 3600,
+     "help": "有人说话、刚醒来一定给；其余步至少隔这么久才刷新，中间那些步只写「接着上面」；0=每步都给"},
     {"key": "watchdog_idle", "group": "节奏", "label": "心跳步数", "type": "int",
      "min": 0, "max": 100,
      "help": "连续几步没有外界动静就问一句「还在做事吗」；0=不问"},
@@ -165,7 +200,7 @@ def _coerce(field: dict, value):
             raise SettingsError("%s 只能是数字" % field["label"]) from None
     else:
         value = str(value or "").strip()
-        if not value:
+        if not value and not field.get("optional"):
             raise SettingsError("%s 不能空着" % field["label"])
     low = field.get("min")
     high = field.get("max")
@@ -188,6 +223,8 @@ def save(data_dir: str, values: dict, who: str = "") -> dict:
     for key, value in dict(values or {}).items():
         if key not in _BY_KEY:
             continue
+        if _BY_KEY[key].get("secret") and not str(value or "").strip():
+            continue                    # 密钥留空就是"不改"，别把已存的清掉
         new = _coerce(_BY_KEY[key], value)
         old = current.get(key, base.get(key))
         if new != old:
@@ -242,6 +279,74 @@ def history(data_dir: str, limit: int = 40) -> list:
     return out
 
 
+CHANNEL_KEYS = ("chat_url", "chat_key", "embed_url", "embed_key")
+
+
+def embed_base_of(value) -> str:
+    """嵌入地址归一：`…/v1/chat/completions`、`…/v1/embeddings` 都收成 `…/v1`。"""
+    url = str(value or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/embeddings"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+    return url
+
+
+def hint_of(value: str) -> str:
+    """密钥只露出"已设置"和尾巴几位。"""
+    text = str(value or "")
+    if not text:
+        return ""
+    return "已设置（%s，%d 位）" % (text[-4:] if len(text) > 8 else "**", len(text))
+
+
+def channel(values: dict) -> dict:
+    """四个渠道键的最终值：设置里写了就用，没写就是空（由凭证文件兜底）。"""
+    values = dict(values or {})
+    out = {}
+    for key in CHANNEL_KEYS:
+        out[key] = str(values.get(key) or "").strip()
+    return out
+
+
+def mask(values: dict) -> dict:
+    """给网页看的：密钥换成空串（前端显示 hint）。"""
+    out = dict(values or {})
+    for key in CHANNEL_KEYS:
+        if key.endswith("_key") and out.get(key):
+            out[key] = ""
+    return out
+
+
+def hints(data_dir: str) -> dict:
+    """密钥字段的提示：只说明"已设置"和末尾几位。"""
+    stored = load(data_dir)
+    out = {}
+    for key in CHANNEL_KEYS:
+        if key.endswith("_key"):
+            hint = hint_of(str(stored.get(key) or ""))
+            if hint:
+                out[key] = hint
+    return out
+
+
+def apply_credentials(credentials, values: dict) -> None:
+    """把设置里的渠道值盖到凭证对象上；没写的保持凭证文件里的原值。"""
+    if credentials is None:
+        return
+    from .config import chat_url_of
+
+    current = channel(values)
+    if current["chat_url"]:
+        credentials.chat_url = chat_url_of(current["chat_url"])
+    if current["chat_key"]:
+        credentials.chat_key = current["chat_key"]
+    # 摘要与嵌入共用一百炼端点：设置里写的就是它的地址/密钥
+    if current["embed_url"]:
+        credentials.summary_url = embed_base_of(current["embed_url"])
+    if current["embed_key"]:
+        credentials.summary_key = current["embed_key"]
+
+
 def apply(config, values: dict) -> None:
     """把存下的值盖到运行时配置上；没存的键保持代码默认。"""
     for key, value in dict(values or {}).items():
@@ -250,10 +355,14 @@ def apply(config, values: dict) -> None:
 
 
 def effective(config) -> dict:
-    """界面上要显示的当前值。"""
+    """界面上要显示的当前值；密钥只给掩码，不给明文。"""
+    stored = load(getattr(config, "data_dir", "") or "")
     out = {}
     for field in FIELDS:
         key = field["key"]
+        if key in CHANNEL_KEYS:
+            out[key] = "" if field.get("secret") else str(stored.get(key) or "")
+            continue
         value = getattr(config, key, None)
         out[key] = list(value or []) if field["type"] == "ints" else value
     return out

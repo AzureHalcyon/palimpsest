@@ -93,6 +93,44 @@ def _recollect_tool(text: dict) -> dict:
     }
 
 
+def _forget_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "forget",
+            "description": text["forget"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event": {"type": "string",
+                              "description": text["forget.event"]},
+                },
+                "required": ["event"],
+            },
+        },
+    }
+
+
+def _rename_tool(text: dict) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "rename",
+            "description": text["rename"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event": {"type": "string",
+                              "description": text["rename.event"]},
+                    "name": {"type": "string",
+                             "description": text["rename.name"]},
+                },
+                "required": ["event", "name"],
+            },
+        },
+    }
+
+
 class MemoryBridge:
     def __init__(self, data_dir: str = "", writer: Optional[Callable[[str], str]] = None,
                  embedder=None, lexical: bool = False, recent_steps: int = 0,
@@ -130,7 +168,8 @@ class MemoryBridge:
         if not self.enabled:
             return []
         text = prompt_files.tool_texts()
-        return [_remember_tool(text), _recall_tool(text), _recollect_tool(text)]
+        return [_remember_tool(text), _recall_tool(text), _recollect_tool(text),
+                _forget_tool(text), _rename_tool(text)]
 
     def call(self, name: str, arguments: str) -> str:
         if not self.enabled:
@@ -145,6 +184,10 @@ class MemoryBridge:
             return self._recall(payload)
         if name == "recollect":
             return self._recollect(payload)
+        if name == "forget":
+            return self._forget(payload)
+        if name == "rename":
+            return self._rename(payload)
         return "没有这个工具：%s" % name
 
     # ── 写 ────────────────────────────────────────────────────────────────
@@ -184,6 +227,14 @@ class MemoryBridge:
             expires_at = (datetime.now() + timedelta(days=max(0, days))).strftime(
                 "%Y-%m-%dT%H:%M:%S")
 
+        # 一字不差的笔记不再写：它一旦以为"没写进去"就会反复调同一个 remember
+        event = self.graph.events[event_id]
+        already = [str(item.get("text") or "") for item in event.get("notes") or []]
+        if note in already:
+            return ("这条和「%s」里已有的笔记一字不差，没再写。"
+                    "要补别的就换个说法；不想留着就 forget 掉。"
+                    % (event.get("name") or event_id))
+
         self.graph.add_note(event_id, note, now().replace(" ", "T"),
                             scope=(scope if created else ""),
                             expires_at=(expires_at if created else ""))
@@ -195,8 +246,44 @@ class MemoryBridge:
         self.graph.save()
 
         event = self.graph.events[event_id]
-        return "已记：%s（%s，%s）" % (event.get("name") or event_id, event_id,
-                                      event.get("scope") or "long")
+        head = ("已记（新建）" if created
+                else "已更新（同名那件还在，这次追加一条笔记）")
+        return "%s：%s（%s，%s，现在 %d 条笔记）" % (
+            head, event.get("name") or event_id, event_id,
+            event.get("scope") or "long", len(event.get("notes") or []))
+
+    def _forget(self, payload: dict) -> str:
+        """删掉一件记忆（连同它的连接）。先 recall 拿 id，别凭印象删。"""
+        reference = str(payload.get("event") or payload.get("name") or "").strip()
+        if not reference:
+            return "forget 需要 event（id 或名字）。先用 recall 找。"
+        event_id = self.graph.resolve(reference)
+        if not event_id:
+            return "没有这一件：%s（用 recall 找找看）" % reference
+        name = str(self.graph.events[event_id].get("name") or event_id)
+        self.graph.remove_event(event_id)
+        self.graph.save()
+        return "忘了：%s（%s）——这件和它的连接都删了" % (name, event_id)
+
+    def _rename(self, payload: dict) -> str:
+        """给一件记忆改名；重名会被拒（否则按名字就分不清是哪件）。"""
+        reference = str(payload.get("event") or "").strip()
+        new_name = str(payload.get("name") or "").strip()
+        if not reference or not new_name:
+            return "rename 需要 event（id 或旧名字）和 name（新名字）。"
+        event_id = self.graph.resolve(reference)
+        if not event_id:
+            return "没有这一件：%s（用 recall 找找看）" % reference
+        clash = [other for other, event in self.graph.events.items()
+                 if other != event_id and str(event.get("name") or "") == new_name]
+        if clash:
+            return ("已经有同名的一件（%s）。换个名字，或者先 forget 掉那一件。"
+                    % clash[0])
+        old_name = str(self.graph.events[event_id].get("name") or event_id)
+        self.graph.events[event_id]["name"] = new_name
+        self.graph.events[event_id]["updated"] = now().replace(" ", "T")
+        self.graph.save()
+        return "改名了：%s → %s（%s）" % (old_name, new_name, event_id)
 
     # ── 归档 ──────────────────────────────────────────────────────────────
     def archive_expired(self) -> int:

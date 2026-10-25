@@ -16,12 +16,13 @@ from memory_v2.core.config import ChatConfig, Credentials
 from memory_v2.core.llm import ChatClient, ChatError
 
 from . import control
+from . import persona
 from . import prompt_files
 from . import shell
 from . import webtools
 from . import workspace
 from .compress import CompressError, Compressor, add_band
-from .context import Context, estimate_tokens
+from .context import Context, estimate_tokens, strip_fake_calls
 from .store import LoopStore
 
 # 一个回复里只允许调一个的工具：阻塞的、必须独占一步的。多出来的不执行，直接
@@ -30,6 +31,8 @@ _BLOCKING_TOOLS = ("wait",)
 
 # 等的时候多久看一次：对方一句话最多晚这么久才被读到。
 _POLL_SECONDS = 1.0
+_TURN_CALL_CAP = 3
+_REPAIR_WINDOW = 7200        # 对账只看最近两小时的进件        # 同一轮里同一个工具最多调几次（防止写同一段记忆打转）
 
 _RELATIVE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|m|h|秒|分钟|分|小时)?\s*$")
 _CLOCK = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
@@ -130,6 +133,14 @@ def _next_midnight(now: Optional[float] = None) -> float:
     return tomorrow.timestamp()
 
 
+def in_meta(item: dict) -> dict:
+    """进件的身份：记进记录里，用来对账「有没有落库」。"""
+    try:
+        return {"inbox_id": int(item.get("id") or 0)}
+    except (TypeError, ValueError):
+        return {}
+
+
 def _inbox_entry(item: dict) -> dict:
     """一条进件写成记录：对方说的话是 `对方：`，别的动静是 `提醒：`。"""
     kind = str(item.get("kind") or "user")
@@ -148,6 +159,8 @@ class Loop:
                  echo: Optional[Callable[[str], None]] = None,
                  log: Optional[Callable[[str], None]] = None):
         self.config = config
+        self.credentials = credentials
+        self._persona_client = None
         self.store = store
         self.compressor = compressor
         self.memory = memory
@@ -158,7 +171,8 @@ class Loop:
         self.client = client or ChatClient(
             ChatConfig(model=config.model, temperature=config.temperature,
                        max_tokens=config.max_tokens, timeout=config.timeout,
-                       retries=config.retries),
+                       retries=config.retries,
+                       reasoning_effort=getattr(config, "reasoning_effort", "")),
             Credentials(api_key=credentials.chat_key, chat_url=credentials.chat_url))
 
         state = store.load_state()
@@ -188,6 +202,14 @@ class Loop:
         self._warn_day = ""
         # 摘要失败后别每步都重试：等当前块再长一点。
         self._compress_after = 0
+        # 墙钟：上一次带上它的时刻；`_woke` 记着"上一个工具是不是等到动静了"。
+        self._clock_at = 0.0
+        self._turn_calls = {}          # 这一轮各工具调了几次（外部一动就清零）
+        self._next_persona = 0.0
+        # 流式的草稿：只给界面看，不进记录（记录只认最后那条完整消息）
+        self.draft_text = ""
+        self.draft_think = ""
+        self._woke = False
         # 连着几步「只说了话、没调工具」：第 1 次之后在末尾问一句还要不要继续，
         # 问了还是只说话就停下（不再问第二遍，免得提问本身变成复读机）。
         self._quiet = 0
@@ -226,7 +248,21 @@ class Loop:
         tools = self.tools()
         # 上一轮说了话、没调工具：这一步末尾问一句「还要继续吗」，问得中性、
         # 不带"该做什么"的提示——它自己决定调工具继续还是 wait 停下。
+        self.clear_draft()
         self.context.asking = self._quiet == 1
+        # 墙钟多久刷一次：有人说话 / 刚醒来一定给；其余步按间隔给，中间只放边界帧。
+        # 时间在末尾那一帧上，不动前缀缓存；这里限的是"别每步都念一遍几点"。
+        try:
+            refresh = int(getattr(self.config, "clock_refresh", 120) or 0)
+        except (TypeError, ValueError):
+            refresh = 120
+        want_clock = (refresh <= 0) or bool(got) or self._woke
+        if not want_clock:
+            want_clock = (time.time() - self._clock_at) >= refresh
+        self.context.show_clock = want_clock
+        if want_clock:
+            self._clock_at = time.time()
+        self._woke = False
         messages = self.context.messages()
         # 心跳那句只在注入的那一步出现一次：它说完就清掉，不进历史。
         self.context.reminder = ""
@@ -241,6 +277,7 @@ class Loop:
         content = str(message.get("content") or "").strip()
         calls = list(message.get("tool_calls") or [])
         self._append(message)
+        self.clear_draft()
         if content:
             # 正文就是说：有工具调用也照说，不能吞掉。
             self.on_speak(content)
@@ -277,6 +314,7 @@ class Loop:
     def run(self, max_steps: Optional[int] = None) -> int:
         limit = self.config.max_steps if max_steps is None else max_steps
         self._maintain()
+        self._repair_inbox()
         resumed = self._resume_waits()
         # 刚起来：没挂着的等、也没有人说话，就先等着。不然模型会对着块的最后
         # 一句再应一遍——每次重启都白说两句，还把记录弄脏。
@@ -294,6 +332,22 @@ class Loop:
         self.since_external = 0
 
     # ── 调模型 ────────────────────────────────────────────────────────────
+    def _on_delta(self, kind: str, text: str) -> None:
+        """流式增量：先攒成草稿，网页那边能看到她边想边说；落库只认最后那条消息。"""
+        piece = str(text or "")
+        if not piece:
+            return
+        if not self.draft_text and not self.draft_think:
+            self.log("[流] 收到第一个增量")
+        if str(kind) == "reasoning":
+            self.draft_think = (self.draft_think + piece)[-4000:]
+        else:
+            self.draft_text = (self.draft_text + piece)[-4000:]
+
+    def clear_draft(self) -> None:
+        self.draft_text = ""
+        self.draft_think = ""
+
     def _chat(self, messages, tools) -> dict:
         """调不通就一直试：长跑里一次抖动不该把循环打死。
 
@@ -303,7 +357,9 @@ class Loop:
         delay = max(1.0, float(getattr(self.config, "retry_delay", 5.0) or 5.0))
         while True:
             try:
-                return self.client.chat(messages, tools=tools or None)
+                stream = bool(getattr(self.config, "stream", True))
+                return self.client.chat(messages, tools=tools or None,
+                                        on_delta=self._on_delta if stream else None)
             except ChatError as exc:
                 self.retries += 1
                 self.store.set_status("retry", "%s（第 %d 次）" % (exc, self.retries))
@@ -396,9 +452,20 @@ class Loop:
         # 思考内容不写进记录（它不进下一轮的上下文），但留在 meta 里：
         # 网页要把「思考」画成一行可展开的东西，靠的就是它。
         meta = dict(meta or {})
+        if str(message.get("role") or "") == "assistant":
+            # 模型手写的“调用 x {...}”“结果：…”一律去掉：真调用走 tool_calls，
+            # 真结果走 role=tool 的消息；正文里这两种行只能是它照着旧格式仿的。
+            cleaned = strip_fake_calls(message.get("content") or "")
+            if cleaned != str(message.get("content") or "") and cleaned:
+                self.log("[修] 正文里有手写的调用/结果行，已去掉")
+            message = dict(message)
+            message["content"] = cleaned
         think = str(message.get("reasoning_content") or "").strip()
         if think:
             meta["think"] = think
+        elif str(message.get("role") or "") == "assistant":
+            # 有就存，没有就记一笔——"这一步为什么没有思考行"能查
+            self.log("[思考] 这一步模型没给 reasoning")
         entry = self.context.append(message, meta)
         self.store.append_entry(self.current_id, entry, step=self.turn)
         return entry
@@ -411,6 +478,12 @@ class Loop:
             name = str(function.get("name") or "")
             arguments = str(function.get("arguments") or "{}")
             content = ""
+            # 同一个工具在一轮（没有外界输入的一串步）里连调太多次：说明它在打转，
+            # 挡一下并把话说明白，别让它一直写同一段记忆（服务器上真发生过，7 步）。
+            self._turn_calls[name] = self._turn_calls.get(name, 0) + 1
+            if self._turn_calls[name] > _TURN_CALL_CAP:
+                content = ("（%s 这一轮已经调了 %d 次，先停一下：同一条事不用反复记，"
+                           "要说就说，要等就 wait）" % (name, _TURN_CALL_CAP))
             if name in _BLOCKING_TOOLS:
                 if name in used:
                     content = ("一次只能调一个 %s：这个回复里已经调过了，这条没执行。"
@@ -424,9 +497,14 @@ class Loop:
         self._flush_after_tool()
 
     def _flush_after_tool(self) -> None:
-        """等在工具调用之后才补的记录（醒来的那句话、回来的结果）。"""
-        for message in self._after_tool:
-            self._append(message)
+        """等在工具调用之后才补的记录（醒来的那句话、回来的结果）。
+
+        写完才把对应进件标已读：反过来的话，中途重启就会"人说了话但记录里没有"。
+        """
+        for entry in self._after_tool:
+            self._append(entry["message"], meta=entry.get("meta") or {})
+            if entry.get("inbox_id"):
+                self.store.consume(int(entry["inbox_id"]))
         self._after_tool = []
 
     def _call_tool(self, name: str, arguments: str) -> str:
@@ -451,10 +529,13 @@ class Loop:
         """每步开始先把攒着的消息读进来：人在你说话的时候插一句也得看到。"""
         taken = 0
         while True:
-            item = self.store.take()
+            item = self.store.peek()
             if item is None:
                 return taken
-            self._append(_inbox_entry(item))
+            meta = in_meta(item)
+            self._append(_inbox_entry(item), meta=meta)   # 落进记录
+            self.store.consume(item["id"])                # 落住了才标已读
+            self._turn_calls = {}
             taken += 1
             self.since_external = 0
 
@@ -481,13 +562,17 @@ class Loop:
                 # 不再编一句「要重启，先停。」塞进记录：那会让模型以为有人跟它说话，
                 # 于是留下两句道别。直接退，没答完的调用留给下次起来接着等。
                 raise control.StopRequested()
-            item = self.store.take(kinds or None)
+            item = self.store.peek(kinds or None)
             if item is not None:
-                self._after_tool.append(_inbox_entry(item))
+                self._after_tool.append({"message": _inbox_entry(item),
+                                         "meta": in_meta(item),
+                                         "inbox_id": item["id"]})
                 self.since_external = 0
+                self._woke = True
                 self.store.set_status("thinking")
                 return _woke_text(str(item["kind"]), time.time() - started)
             if deadline is not None and time.time() >= deadline:
+                self._woke = True
                 self.store.set_status("thinking")
                 return _timeout_text(spec, time.time() - started)
             if deadline is None and not self.standby:
@@ -512,11 +597,12 @@ class Loop:
         time.sleep(span)
 
     def _maintain(self) -> None:
-        """闲时才做的活：归档到期的短期记忆、清进件，别每个轮询都扫一遍。"""
+        """闲时才做的活：归档到期的短期记忆、清进件、隔一阵重写自我描述。"""
         stamp = time.time()
         if stamp < self._next_archive:
             return
         self._next_archive = stamp + 600.0
+        self._maybe_rewrite_persona()
         try:
             count = self.memory.archive_expired()
         except Exception as exc:      # 归档坏了不该影响在场
@@ -528,6 +614,86 @@ class Loop:
             self.store.trim_inbox()
         except Exception as exc:
             self.log("[清进件失败] %s" % exc)
+
+    def _maybe_rewrite_persona(self) -> None:
+        """到点就重写一次自我描述：内容归她，时机归这里。
+
+        不放在每一步：persona 在 system 上，改一次前缀缓存整段作废。
+        失败就退避十分钟再试，当前那版原样留着。
+        """
+        if not persona.due(self.config, floor=self._next_persona):
+            return
+        if not self.context.current.entries:
+            return
+        # 聊得不够多就先不写：凑够 persona_min_chars 才值得动一次缓存
+        if not persona.enough(self.context, self.config):
+            return
+        try:
+            body = persona.rewrite(self._persona_chat, self.context, self.config)
+        except Exception as exc:          # 整理坏了不该影响在场
+            self._next_persona = time.time() + 600.0
+            self.log("[自我] 重写失败：%s" % exc)
+            return
+        persona.touch_stamp(self.config)
+        self._next_persona = 0.0
+        self.log("[自我] 重写了自己的描述（%d 字）" % len(body))
+
+    def _persona_chat(self, messages) -> dict:
+        """整理任务跑一次；不进记录，也不影响这一步的用量统计。
+
+        模型由 persona_model 决定：空就跟主模型走，填了就用它单独跑（便宜的就省额度）。
+        """
+        model = str(getattr(self.config, "persona_model", "") or "").strip()
+        if not model or model == str(getattr(self.config, "model", "")):
+            return self.client.chat(messages)
+        return self._persona_client_for(model).chat(messages)
+
+    def _persona_client_for(self, model: str):
+        """整理任务用的客户端：按模型名造一个并缓存，换了模型就重建。"""
+        cached = getattr(self, "_persona_client", None)
+        if cached is not None and cached[0] == model:
+            return cached[1]
+        from .compress import make_client
+
+        client = make_client(self.config, self.credentials, model,
+                            temperature=0.6,
+                            max_tokens=min(self.config.max_tokens, 2000))
+        self._persona_client = (model, client)
+        return client
+
+    def _repair_inbox(self) -> None:
+        """对账：进件里标了已读、记录里却没有的，补回去。
+
+        `_wait` 是"先落记录再标已读"，正常不会丢；但重启、异常或者旧版本留下的
+        洞会让某条消息只剩进件。这里按 `meta.inbox_id` 核一遍，缺的就补进记录，
+        并记一条日志——补得回来的就不要再丢第二次。
+        """
+        try:
+            missing = self.store.inbox_unappended()
+        except Exception as exc:
+            self.log("[对账] 查不了进件：%s" % exc)
+            return
+        # 按内容去重：老数据没有 inbox_id，同一句话可能早就在记录里了
+        existing = {str(entry.message.get("content") or "").strip()
+                    for entry in self.context.current.entries + self.context.previous.entries
+                    if str(entry.message.get("role") or "") == "user"}
+        # 只看最近两小时的：重启时的洞就在眼前，别把傍晚的老消息翻出来重插
+        cutoff = time.strftime("%Y-%m-%d %H:%M:%S",
+                               time.localtime(time.time() - _REPAIR_WINDOW))
+        missing = [item for item in missing
+                   if str(item.get("ts") or "") >= cutoff]
+        for item in missing:
+            text = str(item.get("text") or "").strip()
+            if text and text in existing:
+                # 已经在记录里：补一个身份标记就行，别重复插一条
+                self.log("[对账] 这条已在记录里，跳过（%d 字）" % len(text))
+                continue
+            try:
+                self._append(_inbox_entry(item), meta=in_meta(item))
+                existing.add(text)
+                self.log("[对账] 补回一条没落库的消息（%d 字）" % len(str(item.get("text") or "")))
+            except Exception as exc:
+                self.log("[对账] 补不回去：%s" % exc)
 
     def _resume_waits(self) -> bool:
         """上次是在等的时候断的：块里有没有结果的 wait 调用，就接着等。

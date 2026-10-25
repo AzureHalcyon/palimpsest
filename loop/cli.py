@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--max-tokens", type=int, default=4000)
     parser.add_argument("--max-steps", type=int, default=20, help="0 表示不设上限")
-    parser.add_argument("--block-tokens", type=int, default=20000,
+    parser.add_argument("--block-tokens", type=int, default=50000,
                         help="当前块攒到多少 token 就压（调试时调小）")
     parser.add_argument("--summary-model", default="deepseek-flash",
                         help="摘要模型；填 qwen-plus 就走凭证里的百炼端点")
@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="每天 token 上限（输入+输出）；到了就等到第二天，0=不限")
     parser.add_argument("--daily-token-warn", type=int, default=0,
                         help="每天 token 提醒线；过了在输出里提一句，0=不提")
-    parser.add_argument("--context-budget", type=int, default=80000)
+    parser.add_argument("--context-budget", type=int, default=200000)
     parser.add_argument("--park-seconds", type=float, default=0.0,
                         help="测试用：挂起后等多少秒再继续；0 表示挂起就停"
                              "（正常运行时等真实事件，不要空转）")
@@ -154,7 +154,10 @@ def main(argv=None) -> int:
                         data_dir=args.data)
     # 网页上改过的旋钮存在 <data>/settings.json，盖掉命令行给的值。
     # 要赶在建嵌入器之前：嵌入模型/维度就是从这份配置里读的。
-    settings.apply(config, settings.load(config.data_dir))
+    stored_settings = settings.load(config.data_dir)
+    settings.apply(config, stored_settings)
+    # 渠道（对话/嵌入的地址与密钥）也认这份设置；没写就还是凭证文件里的
+    settings.apply_credentials(credentials, stored_settings)
 
     memory_credentials = None
     try:
@@ -163,13 +166,23 @@ def main(argv=None) -> int:
         print("记忆嵌入不可用：%s" % exc, file=sys.stderr)
 
     def make_embedder():
-        """按当前配置造一个嵌入器；网页上换模型时也走这里。"""
+        """按当前配置造一个嵌入器；网页上换模型/换地址时也走这里。"""
         if memory_credentials is None:
             return None
+        # 网页里改过嵌入地址/密钥就用它（没写就还是凭证文件里的）
+        live = settings.load(config.data_dir)
+        out = MemoryCredentials(api_key=memory_credentials.api_key,
+                                chat_url=memory_credentials.chat_url,
+                                embed_url=memory_credentials.embed_url,
+                                embed_key=memory_credentials.embed_key)
+        if str(live.get("embed_url") or "").strip():
+            out.embed_url = str(live["embed_url"]).strip().rstrip("/")
+        if str(live.get("embed_key") or "").strip():
+            out.embed_key = str(live["embed_key"]).strip()
         memory_config = MemoryChatConfig()
         memory_config.embed_model = str(config.embed_model)
         memory_config.embed_dim = int(config.embed_dim)
-        return Embedder(memory_config, memory_credentials)
+        return Embedder(memory_config, out)
 
     embedder = None
     if memory_credentials is not None:

@@ -37,6 +37,9 @@ META = {
     "watchdog": ("心跳提醒",
                  "连着几步没有外界动静时问的那一句。改的是语气，不是逻辑。",
                  "watchdog.txt"),
+    "persona": ("自我描述 · 整理",
+                "后台整理任务用的提示词：把这段时间里对自己更清楚的部分沉淀进自我描述。",
+                "persona.txt"),
     "ask": ("问要不要继续",
             "上一轮说了话、没调工具时，在记录末尾挂一句问它要不要继续。要中性，别引导。",
             "ask.txt"),
@@ -164,6 +167,8 @@ TOOL_KEYS = (
     "search", "search.query",
     "run", "run.command",
     "write", "write.path", "write.content", "write.mode",
+    "forget", "forget.event",
+    "rename", "rename.event", "rename.name",
 )
 
 

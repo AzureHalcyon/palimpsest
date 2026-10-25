@@ -34,11 +34,16 @@ class Credentials:
             refs = (yaml.safe_load(target.read_text(encoding="utf-8")) or {}).get("refs") or {}
         except Exception as exc:
             raise CredentialsError("credentials unreadable: %s" % type(exc).__name__) from exc
-        api_key = refs.get("DEEPSEEK_API_KEY")
+        # 换渠道不用改代码：认 LOOP_CHAT_KEY / LOOP_CHAT_URL，没写才退回 DEEPSEEK_*
+        api_key = refs.get("LOOP_CHAT_KEY") or refs.get("DEEPSEEK_API_KEY")
         if not api_key:
-            raise CredentialsError("missing DEEPSEEK_API_KEY in %s" % target)
+            raise CredentialsError("missing LOOP_CHAT_KEY / DEEPSEEK_API_KEY in %s" % target)
+        chat = str(refs.get("LOOP_CHAT_URL") or refs.get("DEEPSEEK_CHAT_URL")
+                   or DEFAULT_CHAT_URL).strip().rstrip("/")
+        if not chat.endswith("/chat/completions"):
+            chat = chat + "/chat/completions"
         return cls(api_key=str(api_key),
-                   chat_url=str(refs.get("DEEPSEEK_CHAT_URL") or DEFAULT_CHAT_URL),
+                   chat_url=chat,
                    embed_url=str(refs.get("ALIYUN_MAAS_BASE_URL") or "").rstrip("/"),
                    embed_key=str(refs.get("ALIYUN_MAAS_API_KEY") or ""))
 

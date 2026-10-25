@@ -28,7 +28,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import control, prompt_files, settings
+from . import control, persona, prompt_files, settings
 from .context import Context, estimate_tokens, serialize_entries
 from .store import LoopStore
 
@@ -53,12 +53,21 @@ def _entry_view(entry) -> dict:
             "text": str(message.get("content") or ""),
             "calls": list(message.get("tool_calls") or []),
             "call_id": str(message.get("tool_call_id") or ""),
+            "seq": int(getattr(entry, "seq", 0) or 0),
             "ts": str(entry.ts),
             "meta": dict(entry.meta or {})}
 
 
-def _block_view(block, fold_keep: int) -> dict:
-    rendered = serialize_entries(block.entries, fold_keep=fold_keep)
+def _mtime(path: str) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return ""
+
+
+def _block_view(block, fold_keep: int, user_name: str = "") -> dict:
+    rendered = serialize_entries(block.entries, fold_keep=fold_keep,
+                                 user_name=user_name)
     return {"start_ts": str(block.start_ts), "end_ts": str(block.end_ts),
             "count": len(block.entries),
             "chars": len(rendered),
@@ -147,6 +156,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._say()
             if route.path == "/edits":
                 return self._save_edits()
+            if route.path == "/persona":
+                return self._persona()
             if route.path == "/restart":
                 return self._restart()
         except Exception as exc:
@@ -202,12 +213,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _save_settings(self):
         payload = self._body()
+        before_channel = settings.channel(settings.load(self.server.data_dir))
         try:
             stored = settings.save(self.server.data_dir, payload.get("values") or {})
         except settings.SettingsError as exc:
             return self._send(400, {"error": str(exc)})
         self._apply_live(stored)
-        return self._send(200, {"ok": True, "stored": stored, "restart": False})
+        if settings.channel(stored) != before_channel:
+            self._rebuild_channel(stored)
+        return self._send(200, {"ok": True, "stored": settings.mask(stored),
+                                "restart": False})
 
     def _apply_live(self, stored: dict) -> None:
         """旋钮改了立刻生效：这几项都是每步现读的，不用等重启。
@@ -227,6 +242,8 @@ class _Handler(BaseHTTPRequestHandler):
             client_config.model = config.model
             client_config.temperature = config.temperature
             client_config.max_tokens = config.max_tokens
+            client_config.reasoning_effort = str(
+                getattr(config, "reasoning_effort", "") or "")
 
         if (before["summary_model"] != config.summary_model
                 or before["summary_provider"] != config.summary_provider):
@@ -247,6 +264,49 @@ class _Handler(BaseHTTPRequestHandler):
             memory = getattr(loop, "memory", None)
             if memory is not None:
                 memory.embedder = embedder
+
+    def _note(self, text: str) -> None:
+        """网页这边出的岔子记进循环的日志（没有循环就打到 stdout）。"""
+        loop = getattr(self.server, "loop", None)
+        log = getattr(loop, "log", None)
+        try:
+            if callable(log):
+                log(text)
+            else:
+                print(text, flush=True)
+        except Exception:
+            pass
+
+    def _rebuild_channel(self, stored: dict) -> None:
+        """渠道换了：盖到凭证上，重建对话/摘要/嵌入三处客户端，清掉模型缓存。"""
+        credentials = getattr(self.server, "credentials", None)
+        settings.apply_credentials(credentials, stored)
+        loop = getattr(self.server, "loop", None)
+        config = self.server.config
+        if credentials is not None and loop is not None:
+            from .compress import make_client
+
+            try:
+                loop.client = make_client(config, credentials, config.model,
+                                          temperature=config.temperature,
+                                          max_tokens=config.max_tokens)
+            except Exception as exc:
+                self._note("[接口] 重建对话客户端失败：%s" % exc)
+            loop._persona_client = None
+            rebuild = getattr(getattr(loop, "compressor", None), "rebuild", None)
+            if callable(rebuild):
+                rebuild()
+            factory = getattr(self.server, "embed_factory", None)
+            if callable(factory):
+                try:
+                    embedder = factory()
+                except Exception as exc:
+                    self._note("[接口] 重建嵌入器失败：%s" % exc)
+                    embedder = None
+                memory = getattr(loop, "memory", None)
+                if memory is not None:
+                    memory.embedder = embedder
+        self.server.models_cache = {}       # 模型清单按渠道缓存，换渠道要重问
 
     def _save_prompt(self):
         payload = self._body()
@@ -287,9 +347,13 @@ class _Handler(BaseHTTPRequestHandler):
         config = self.server.config
         if kind == "chat":
             url, key = credentials.chat_url, credentials.chat_key
+        elif kind == "embed":
+            # 嵌入固定走嵌入端点（百炼那组）；它跟对话渠道不是一家
+            url, key = credentials.summary_url, credentials.summary_key
+            if not url:
+                url, key = credentials.chat_url, credentials.chat_key
         else:
-            field = "summary_model" if kind == "summary" else "embed_model"
-            model = str(getattr(config, field, "") or "")
+            model = str(getattr(config, "summary_model", "") or "")
             provider = str(getattr(config, "summary_provider", "auto") or "auto")
             if provider == "auto":
                 provider = "bailian" if "qwen" in model.lower() else "deepseek"
@@ -358,7 +422,21 @@ class _Handler(BaseHTTPRequestHandler):
             prompts.append({"key": key, "label": label, "desc": desc,
                             "file": filename, "default": default,
                             "override": override, "text": override or default})
-        return {"values": settings.effective(config),
+        values = settings.effective(config)
+        creds = getattr(self.server, "credentials", None)
+        hints = settings.hints(data_dir)
+        if creds is not None:
+            # 没在设置里写过的，就把凭证文件里生效的那份显示出来（不然框是空的）
+            values["chat_url"] = values.get("chat_url") or creds.chat_url
+            values["embed_url"] = (values.get("embed_url")
+                                   or settings.embed_base_of(creds.summary_url))
+            if not hints.get("chat_key"):
+                hints["chat_key"] = settings.hint_of(creds.chat_key)
+            if not hints.get("embed_key"):
+                hints["embed_key"] = settings.hint_of(creds.summary_key)
+        hints = {k: v for k, v in hints.items() if v}
+        return {"values": values,
+                "hints": hints,
                 "stored": settings.load(data_dir),
                 "defaults": settings.defaults(),
                 "fields": settings.FIELDS,
@@ -378,12 +456,21 @@ class _Handler(BaseHTTPRequestHandler):
         context = Context(config)
         context.set_state(state["bands"], state["previous"], state["current"])
         fold_keep = int(getattr(config, "tool_fold_keep", 0) or 0)
-        current = serialize_entries(state["current"].entries, fold_keep=fold_keep)
-        previous = serialize_entries(state["previous"].entries, fold_keep=fold_keep)
+        user_name = str(getattr(config, "user_name", "") or "")
+        current = serialize_entries(state["current"].entries, fold_keep=fold_keep,
+                                    user_name=user_name)
+        previous = serialize_entries(state["previous"].entries, fold_keep=fold_keep,
+                                     user_name=user_name)
         totals = store.usage_totals()
         live = store.usage_live()
         embed = self._embed_status()
+        loop = getattr(self.server, "loop", None)
+        draft = {
+            "text": str(getattr(loop, "draft_text", "") or "")[-1200:],
+            "think": str(getattr(loop, "draft_think", "") or "")[-600:],
+        }
         return {"name": getattr(config, "name", ""),
+                "draft": draft,
                 "model": getattr(config, "model", ""),
                 "models": {"chat": getattr(config, "model", ""),
                            "summary": getattr(config, "summary_model", ""),
@@ -412,6 +499,7 @@ class _Handler(BaseHTTPRequestHandler):
         store = _store_of(self.server)
         config = self.server.config
         fold_keep = int(getattr(config, "tool_fold_keep", 0) or 0)
+        user_name = str(getattr(config, "user_name", "") or "")
         state = store.load_state()
         context = Context(config)
         context.set_state(state["bands"], state["previous"], state["current"])
@@ -420,8 +508,10 @@ class _Handler(BaseHTTPRequestHandler):
                   "chars": len(str(band.text or "")),
                   "tokens": estimate_tokens(str(band.text or ""))}
                  for band in state["bands"]]
-        previous = _block_view(state["previous"], fold_keep)
-        current = _block_view(state["current"], fold_keep)
+        previous = _block_view(state["previous"], fold_keep, user_name)
+        current = _block_view(state["current"], fold_keep, user_name)
+        written = persona.read(config)
+        script = persona.path_of(config)
         sink = context.sink()
         system_tokens = estimate_tokens(context.system_text())
         return {"sink": {"text": sink, "chars": len(sink),
@@ -429,6 +519,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "bands": bands,
                 "previous": previous,
                 "current": current,
+                "persona": {"text": written, "chars": len(written),
+                            "limit": persona.limit_of(config),
+                            "min_chars": persona.min_chars_of(config),
+                            "feed_chars": persona.feed_chars_of(config),
+                            "pending": len(persona.new_material(context, config)),
+                            "hours": persona.hours_of(config),
+                            "at": _mtime(script)},
                 "block_tokens": previous["tokens"] + current["tokens"],
                 "context_tokens": system_tokens + previous["tokens"] + current["tokens"],
                 "limits": {"block_tokens": int(getattr(config, "block_tokens", 0)),
@@ -436,6 +533,16 @@ class _Handler(BaseHTTPRequestHandler):
                            "band_budget": int(getattr(config, "band_budget", 0)),
                            "band_count": len(getattr(config, "band_chars", ()) or ()),
                            "tool_fold_keep": fold_keep}}
+
+    def _persona(self) -> None:
+        """清空她自己写的描述（人这边留一个后门；模型那边不给她改的入口）。"""
+        payload = self._body()
+        config = self.server.config
+        if payload.get("reset"):
+            persona.write(config, "")
+            persona.touch_stamp(config)
+            return self._send(200, {"ok": True, "text": ""})
+        return self._send(400, {"error": "只支持 reset"})
 
     def _graph(self, query: dict) -> str:
         """事件图：直接借 memory_v2 的查看器把 `<data>/memory` 渲染成一页。

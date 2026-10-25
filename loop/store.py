@@ -162,7 +162,7 @@ class LoopStore:
             return Block()
         entries = []
         for item in self.db.execute(
-                "SELECT role, content, tool_calls, tool_call_id, ts, meta"
+                "SELECT seq, role, content, tool_calls, tool_call_id, ts, meta"
                 " FROM entries WHERE block_id = ? ORDER BY seq", (block_id,)):
             message = {"role": str(item["role"]),
                        "content": str(item["content"] or "")}
@@ -172,7 +172,8 @@ class LoopStore:
             if str(item["tool_call_id"] or ""):
                 message["tool_call_id"] = str(item["tool_call_id"])
             entries.append(BlockEntry(message, str(item["ts"]),
-                                      json.loads(item["meta"] or "{}")))
+                                      json.loads(item["meta"] or "{}"),
+                                      int(item["seq"])))
         return Block(entries, str(row["start_ts"]), str(row["end_ts"]))
 
     def open_block(self, start_ts: str) -> int:
@@ -414,8 +415,13 @@ class LoopStore:
         sql += " LIMIT 1"
         return self.db.execute(sql, args).fetchone() is not None
 
-    def take(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
-        """取最早一条没读过的，顺手标成已读；kinds 是白名单。"""
+    def peek(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
+        """看最早一条没读过的，**不**标已读；kinds 是白名单。
+
+        分开 peek/consume 是为了不让消息丢：先把它落进记录，再标已读。
+        以前 take() 一步就标已读，而记录要等到这一步的模型调用之后才写——
+        中途重启（改代码、崩了）就会出现"人说了话，进了进件，但记录里没有"。
+        """
         sql = "SELECT id, ts, kind, text FROM inbox WHERE consumed = 0"
         args: list = []
         if kinds:
@@ -425,10 +431,41 @@ class LoopStore:
         row = self.db.execute(sql, args).fetchone()
         if row is None:
             return None
-        with self.db:
-            self.db.execute("UPDATE inbox SET consumed = 1 WHERE id = ?", (int(row["id"]),))
         return {"id": int(row["id"]), "ts": str(row["ts"]),
                 "kind": str(row["kind"]), "text": str(row["text"])}
+
+    def consume(self, item_id: int) -> None:
+        """标已读：只在这条消息真的写进记录之后调。"""
+        with self.db:
+            self.db.execute("UPDATE inbox SET consumed = 1 WHERE id = ?", (int(item_id),))
+
+    def take(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
+        """peek + consume（自检和旧调用用）；正式路径请用 peek 再 consume。"""
+        item = self.peek(kinds)
+        if item is not None:
+            self.consume(item["id"])
+        return item
+
+    def inbox_unappended(self, limit: int = 20) -> list:
+        """已读、但记录里找不到的进件（按 meta.inbox_id 对账）。"""
+        seen = set()
+        for row in self.db.execute("SELECT meta FROM entries WHERE meta LIKE '%inbox_id%'"):
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except ValueError:
+                continue
+            if meta.get("inbox_id"):
+                seen.add(int(meta["inbox_id"]))
+        out = []
+        for row in self.db.execute(
+                "SELECT id, ts, kind, text FROM inbox WHERE consumed = 1 ORDER BY id"):
+            if int(row["id"]) in seen:
+                continue
+            out.append({"id": int(row["id"]), "ts": str(row["ts"]),
+                        "kind": str(row["kind"]), "text": str(row["text"])})
+            if len(out) >= limit:
+                break
+        return out
 
     def trim_inbox(self, keep: int = 200) -> int:
         """删掉已读的旧进件，只留最近 keep 条已读的：长跑别让这张表一直涨。"""

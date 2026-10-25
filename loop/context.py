@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
 
+from . import persona
 from . import prompt_files
 
 # 工具结果的保留模板。同一个结果，越旧留得越少：
@@ -147,6 +148,7 @@ class BlockEntry:
     message: dict       # role: assistant / user / tool / note
     ts: str
     meta: dict = field(default_factory=dict)   # kind 之类，不进渲染，只给规则用
+    seq: int = 0        # 库里的行号：网页抽屉拿它当折叠块的键，不重复才不串
 
 
 def _last_stamp(entries: List[BlockEntry], role: str, spoken: bool) -> str:
@@ -212,8 +214,8 @@ def _recall_stub(content: str) -> str:
             label = "%s（%s）" % (label, date[5:10])
         items.append(label)
     if not items:
-        return "结果：%s（已折叠）" % (head or "已折叠")
-    return "结果：%s（已折叠）：%s" % (head, "、".join(items))
+        return "%s（已折叠）" % (head or "已折叠")
+    return "%s（已折叠）：%s" % (head, "、".join(items))
 
 
 # 心跳提醒：连着几步没有外界动静时的一句系统动静。它不是发生过的事，所以库里
@@ -240,6 +242,33 @@ def _reminder(text: str) -> str:
     才和对方说的话分得开；sink 里也写了「套着标签的都是系统注入，不是对方说的」。
     """
     return "<system-reminder>%s</system-reminder>" % str(text or "").strip()
+
+
+_FAKE_CALL = re.compile(r"^\s*调用\s+\S+\s+\{")
+
+
+def strip_fake_calls(text: str) -> str:
+    """去掉模型手写的"调用 x {...}"行；只有真出现这种行时，才连带删结果行。
+
+    真调用走 `tool_calls`、真结果走 `role=tool` 的消息。正文里冒出 `调用 x {...}`
+    只可能是它在模仿旧记录的写法（服务器上发生过一次：一步里没有 tool 记录，
+    等于伪造执行）。
+
+    `结果：…` 不单独删：它完全可能是她自己的一句话（"结果：他们没来"）。
+    只有这条正文已经被判定成"抄记录"（出现了伪造的调用行）时，才把结果行一起清掉。
+    """
+    lines = str(text or "").splitlines()
+    faked = any(_FAKE_CALL.match(line) for line in lines)
+    if not faked:
+        return str(text or "").strip()
+    kept = []
+    for line in lines:
+        if _FAKE_CALL.match(line):
+            continue
+        if line.lstrip().startswith("结果："):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
@@ -277,7 +306,7 @@ def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
         calls = message.get("tool_calls") or []
         if role == "tool":
             tool = names.get(str(message.get("tool_call_id") or ""), "")
-            items.append(("assistant", "结果：%s" % _result_text(
+            items.append(("tool_result", _result_text(
                 tool, content, index in fresh or fold_keep <= 0, index in folded),
                 False))
             continue
@@ -301,21 +330,29 @@ def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
                 items.append(("assistant",
                               "写下了记忆：%s" % _remember_name(arguments), False))
             else:
-                items.append(("assistant", "调用 %s %s" % (name, arguments), False))
+                items.append(("tool_call", "%s %s" % (name, arguments), False))
     return items
 
 
-def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0) -> str:
-    """纯文本版：压缩模型只看得到字，所以两边都标前缀（对方：/ 我：/ 提醒：）。"""
+def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0,
+                      user_name: str = "") -> str:
+    """纯文本版：压缩模型只看得到字，所以每行都标清是谁的。
+
+    前缀：`对方：` / `我：` / `我用了：`（工具调用）/ `工具回：`（工具结果）/ `提醒：`。
+    不用「调用 x {} / 结果：」那套记号——它跟"她说过的话"长得太像，曾经让她照着抄。
+    """
     lines = []
+    who = str(user_name or "").strip() or "对方"
     for role, text, spoken in _entry_lines(entries, fold_keep):
         body = str(text or "").strip()
         if not body:
             continue
-        if not spoken:
-            lines.append(body)
+        if role == "tool_call":
+            lines.append("我用了：%s" % _one_turn(body))
+        elif role == "tool_result":
+            lines.append("工具回：%s" % _one_turn(body))
         elif role == "user":
-            lines.append("对方：%s" % _one_turn(body))
+            lines.append("%s：%s" % (who, _one_turn(body)))
         elif role == "note":
             lines.append("提醒：%s" % _one_turn(body))
         else:
@@ -334,6 +371,9 @@ class Context:
         self.asking = False
         # 这一步要顺带说一句系统动静（心跳）。只进这一步的输入，下一步清空。
         self.reminder = ""
+        # 这一步要不要带墙钟。谁决定见 Loop.step：有人说话/刚醒来一定带，
+        # 其余步按 clock_refresh 隔一会儿才带，中间只放一句「接着上面」。
+        self.show_clock = True
 
     # ── 状态 ──────────────────────────────────────────────────────────────
     def set_state(self, bands: List[Band], previous: Block, current: Block) -> None:
@@ -357,14 +397,16 @@ class Context:
     # ── 读 ────────────────────────────────────────────────────────────────
     def current_text(self) -> str:
         return serialize_entries(self.current.entries,
-                                 fold_keep=self.config.tool_fold_keep)
+                                 fold_keep=self.config.tool_fold_keep,
+                                 user_name=getattr(self.config, "user_name", ""))
 
     def current_tokens(self) -> int:
         return estimate_tokens(self.current_text())
 
     def previous_text(self) -> str:
         return serialize_entries(self.previous.entries,
-                                 fold_keep=self.config.tool_fold_keep)
+                                 fold_keep=self.config.tool_fold_keep,
+                                 user_name=getattr(self.config, "user_name", ""))
 
     def block_text(self) -> str:
         parts = []
@@ -393,6 +435,8 @@ class Context:
         if not name:
             raise ValueError("sink 第一句要名字，但 config.name 是空的")
         return prompt_files.render("sink.txt", name=name,
+                                   user=str(getattr(self.config, "user_name", "")
+                                            or "对方"),
                                    recall=self.config.recall_tool,
                                    wait=self.config.wait_tool,
                                    today=time.strftime("%Y-%m-%d")).strip()
@@ -411,8 +455,17 @@ class Context:
             bands.pop(0)
         return bands
 
+    def bands_text(self) -> str:
+        """旧段摘要拼起来（整理任务要长程连续性时喂这个）。"""
+        return self._render_bands(self.fitted_bands())
+
     def system_text(self) -> str:
         parts = [self.sink()]
+        # 她自己写的描述：sink 之后、旧段之前。空就不出现（她不写就没有这一块）。
+        written = persona.read(self.config) if bool(
+            getattr(self.config, "persona_enabled", False)) else ""
+        if written:
+            parts.append("【我自己写的】\n%s" % written)
         rendered = self._render_bands(self.fitted_bands())
         if rendered:
             parts.append(rendered)
@@ -437,30 +490,126 @@ class Context:
         return "（%s）" % "；".join(parts)
 
     def _turns(self) -> List[dict]:
-        """两块原文拼成原生消息：谁在说话由 role 说，不再靠行首前缀。
+        """两块原文拼成原生消息：谁在说话由 role 说，调用与结果也是原生的。
 
-        工具调用与结果并进做那件事的那条 assistant 消息——那是它自己的动作和环境
-        的回话；放进 user 就变成"对方说的"，正是要修的毛病。以心跳提醒为代表的
-        系统动静走 `system`（实测 deepseek-flash 接受中途插的 system，而且会读），
-        它与前后都不合并。
+        ★ 调用必须走原生 `tool_calls` + `tool` 消息，**不能**写成"调用 x / 结果：…"
+          那种文字行：记录里一旦出现这种行，模型会照着抄——服务器上真发生过一次，
+          她把调用和结果当正文手打出来（没有 tool 记录，等于什么都没做）。
+        ★ 没有结果的调用（正等着的 wait、旧数据里断掉的调用）不放进 `tool_calls`，
+          因为端点不接受"悬空调用"；那种情况写一行文字说明。
+        ★ `remember` 的参数里有 note，按设计 note 不进记录，渲染时把它摘掉。
         """
         fold_keep = int(getattr(self.config, "tool_fold_keep", 0) or 0)
+        entries = list(self.previous.entries) + list(self.current.entries)
+        names = _tool_names(entries)
+        results = {}
+        for index, entry in enumerate(entries):
+            message = entry.message
+            if str(message.get("role") or "") == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                if call_id:
+                    results[call_id] = index
+        # 结果条的裁剪口径跟纯文本渲染一致：越旧越短
+        fold_rows = [index for index, entry in enumerate(entries)
+                     if str(entry.message.get("role") or "") == "tool"]
+        fresh = set(fold_rows[-fold_keep:]) if fold_keep > 0 else set()
+        folded = set()
+        for index in fold_rows:
+            if index in fresh:
+                continue
+            message = entries[index].message
+            tool = names.get(str(message.get("tool_call_id") or ""))
+            body = _strip_hints(str(message.get("content") or ""))
+            if tool in _FOLDABLE_TOOLS and len(body) > _FOLD_MIN_CHARS:
+                folded.add(index)
+
+        used = set()
         turns: List[dict] = []
-        for role, text, _spoken in _entry_lines(
-                list(self.previous.entries) + list(self.current.entries), fold_keep):
+
+        def push(role: str, text: str) -> None:
             body = str(text or "").strip()
             if not body:
-                continue
-            if role == "note":
-                turns.append({"role": "system", "content": _reminder(body),
-                              "_own": False})
-                continue
-            target = "user" if role == "user" else "assistant"
+                return
             last = turns[-1] if turns else None
-            if last is not None and last["role"] == target and last.get("_own", True):
+            if last is not None and last["role"] == role and "tool_calls" not in last:
                 last["content"] = "%s\n%s" % (last["content"], body)
             else:
-                turns.append({"role": target, "content": body})
+                turns.append({"role": role, "content": body})
+
+        for index, entry in enumerate(entries):
+            message = entry.message
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "").strip()
+            calls = list(message.get("tool_calls") or [])
+            if role == "tool":
+                if index not in used:
+                    # 没有配对的调用（旧数据、或调用被删了）：当一条环境记录说清楚
+                    tool = names.get(str(message.get("tool_call_id") or ""), "")
+                    push("user", "（%s的回话）%s" % (
+                        tool or "工具",
+                        _result_text(tool, content, index in fresh or fold_keep <= 0,
+                                     index in folded)))
+                continue
+            if role == "user":
+                push("user", content)
+                continue
+            if role == "note":
+                # 心跳是当时的提醒，不是发生过的事：库里记着，但不进上下文
+                # （它的旧文案还会和现在的规矩打架）。新的一版走瞬时注入。
+                if str(entry.meta.get("kind") or "") == "watchdog":
+                    continue
+                turns.append({"role": "system", "content": _reminder(content),
+                              "_own": False})
+                continue
+            live = []
+            for call in calls:
+                call_id = str(call.get("id") or "")
+                target = results.get(call_id)
+                if target is not None and target not in used:
+                    live.append((call, target))
+            if live:
+                payload = []
+                for call, _target in live:
+                    function = dict(call.get("function") or {})
+                    name = str(function.get("name") or "")
+                    if name == "remember":
+                        function["arguments"] = json.dumps(
+                            {"name": _remember_name(
+                                str(function.get("arguments") or "{}"))},
+                            ensure_ascii=False)
+                    payload.append({"id": str(call.get("id") or ""),
+                                    "type": "function", "function": function})
+                # 上一条也是它自己、而且这条没有正文：把调用并进去——
+                # 端点更喜欢"一条 assistant 里既有话又有调用"，也免得连着两条 assistant。
+                last = turns[-1] if turns else None
+                if (not content and last is not None
+                        and last["role"] == "assistant" and "tool_calls" not in last):
+                    last["tool_calls"] = payload
+                else:
+                    turns.append({"role": "assistant", "content": content,
+                                  "tool_calls": payload})
+                for call, target in live:
+                    used.add(target)
+                    tool = names.get(str(call.get("id") or ""), "")
+                    result = entries[target]
+                    text = _result_text(
+                        tool, str(result.message.get("content") or ""),
+                        target in fresh or fold_keep <= 0,
+                        target in folded)
+                    turns.append({"role": "tool",
+                                  "tool_call_id": str(call.get("id") or ""),
+                                  "content": text})
+                continue
+            if content:
+                push("assistant", content)
+            for call in calls:
+                function = call.get("function") or {}
+                name = str(function.get("name") or "")
+                if name == "remember":
+                    push("assistant", "（写下了记忆：%s，没有结果回来）"
+                         % _remember_name(str(function.get("arguments") or "{}")))
+                else:
+                    push("assistant", "（调用了 %s，没有结果回来）" % name)
         for turn in turns:
             turn.pop("_own", None)
         return turns
@@ -479,7 +628,10 @@ class Context:
                         else "（还没有记录。）")
         if self.reminder:
             tail.append(self.reminder)
-        tail.append(self.clock_text())
+        if self.show_clock:
+            tail.append(self.clock_text())
+        elif not tail:
+            tail.append("（接着上面。）")     # 只当边界用：不带时间，也不催
         if self.asking:
             tail.append(prompt_files.render("ask.txt"))
         return ([{"role": "system", "content": self.system_text()}]

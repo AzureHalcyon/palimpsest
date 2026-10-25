@@ -37,6 +37,16 @@ class LoopCredentials:
         return bool(self.summary_key and self.summary_url)
 
 
+def chat_url_of(value) -> str:
+    """把渠道地址归一成 `…/chat/completions`：写 `…/v1` 也认。"""
+    url = str(value or "").strip().rstrip("/")
+    if not url:
+        return DEFAULT_CHAT_URL
+    if url.endswith("/chat/completions"):
+        return url
+    return url + "/chat/completions"
+
+
 def load_credentials(path: str = "") -> LoopCredentials:
     target = Path(os.path.expanduser(
         path or os.environ.get("LOOP_CREDENTIALS") or DEFAULT_CREDENTIALS))
@@ -46,13 +56,15 @@ def load_credentials(path: str = "") -> LoopCredentials:
         refs = (yaml.safe_load(target.read_text(encoding="utf-8")) or {}).get("refs") or {}
     except Exception as exc:
         raise LoopConfigError("凭证文件读不了：%s" % type(exc).__name__) from exc
-    key = str(refs.get("DEEPSEEK_API_KEY") or "")
+    # 换渠道不用改代码：认 LOOP_CHAT_KEY / LOOP_CHAT_URL，没写才退回 DEEPSEEK_*。
+    # URL 写 `…/v1` 或整条 `…/v1/chat/completions` 都行。
+    key = str(refs.get("LOOP_CHAT_KEY") or refs.get("DEEPSEEK_API_KEY") or "")
     if not key:
-        raise LoopConfigError("凭证里没有 DEEPSEEK_API_KEY：%s" % target)
+        raise LoopConfigError("凭证里没有 LOOP_CHAT_KEY / DEEPSEEK_API_KEY：%s" % target)
     base = str(refs.get("ALIYUN_MAAS_BASE_URL") or "").rstrip("/")
     return LoopCredentials(
         chat_key=key,
-        chat_url=str(refs.get("DEEPSEEK_CHAT_URL") or DEFAULT_CHAT_URL),
+        chat_url=chat_url_of(refs.get("LOOP_CHAT_URL") or refs.get("DEEPSEEK_CHAT_URL")),
         summary_key=str(refs.get("ALIYUN_MAAS_API_KEY") or ""),
         summary_url=(base + "/chat/completions") if base else "",
         summary_model=str(refs.get("LOOP_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL),
@@ -63,6 +75,7 @@ def load_credentials(path: str = "") -> LoopCredentials:
 @dataclass
 class LoopConfig:
     name: str = ""                    # sink 第一句的名字；空就是没定 persona
+    user_name: str = "Ranchel"        # 对方的称呼：压缩文本里"它："代替"对方："，sink 第一句也用它
     recall_tool: str = "recall"       # sink 里写的搜索工具名
     wait_tool: str = "wait"           # sink 里写的「停下等」工具名
     lexical: bool = False             # 词面检索；默认关，只用嵌入
@@ -70,14 +83,16 @@ class LoopConfig:
     model: str = "deepseek-flash"
     temperature: float = 0.8
     max_tokens: int = 4000
+    stream: bool = True               # 走 SSE：网页能看到她边想边说（关掉就整段等回来）
+    reasoning_effort: str = "low"     # 思考强度：默认 low；空=端点默认；high / max 更费
     timeout: float = 600.0
     retries: int = 3
 
     # 预算都按 token 估（见 context.estimate_tokens）；真实用量以服务端 usage 为准。
     # 两块原文最多 40k + 四段摘要 30k + sink ≈ 71k，所以 80k 起。
-    context_budget: int = 80000       # 一次请求最多多少 token
+    context_budget: int = 200000      # 一次请求最多多少 token（官方 V4.1 有 1M，先吃 200k）
     band_budget: int = 30000          # 四段旧摘要合计
-    block_tokens: int = 20000         # 当前块攒到这么多就攒块
+    block_tokens: int = 50000         # 当前块攒到这么多就攒块
     summary_model: str = "deepseek-flash"
     # auto：模型名带 qwen 就走百炼端点，其余走主模型端点。
     summary_provider: str = "auto"
@@ -102,6 +117,18 @@ class LoopConfig:
     run_enabled: bool = False
     run_sandbox: bool = True          # 关进 Landlock：只有工作区能写；关掉等于把它放出来
     run_file_mb: int = 64             # 单个文件最大多少 MB（RLIMIT_FSIZE）
+    # 她自己写的自我描述（<data>/persona.md）：平时不提，隔一阵子自动重写一次。
+    # 改一次会让 system 的前缀缓存整段作废，所以内容归她、时机归定时。
+    persona_enabled: bool = True
+    persona_chars: int = 1200         # 这段描述最多多少字
+    persona_hours: float = 24.0       # 隔多久重写一次；0 = 不自动重写
+    persona_min_chars: int = 20000    # 上次改写之后至少攒这么多字才重写
+    persona_feed_chars: int = 30000   # 一次整理最多喂多少字；0 = 全部（含旧段摘要）
+    persona_with_bands: bool = True   # 旧段摘要要不要一起喂（长程连续性）
+    persona_model: str = ""           # 整理自我描述用哪个模型；空 = 跟主模型走
+    # 墙钟多久刷一次（秒）：有人说话、刚醒来一定给；其余步按这个间隔给，
+    # 中间那些步只放一句"接着上面"。0 = 每步都给。
+    clock_refresh: int = 120
     run_timeout: float = 20.0         # 单条命令最多跑多久；超时连进程组一起杀
     # 工作区写入口（`<data>/workspace` 下）：只写相对路径，绝对路径和 `..` 都拒。
     # 不并进 run 的白名单——`<data>/` 服务用户可写，那样等于把改库的权限也交出去。

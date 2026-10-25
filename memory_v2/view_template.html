@@ -162,6 +162,8 @@ details.fold[open] > summary::before{content:"▾ "}
       <label class="chk"><input type="checkbox" id="isoOn">孤立</label>
       <label class="chk" title="打开后拖节点会把它连着一圈邻居一起拉动；关着时拖动等于平移画面"><input type="checkbox" id="dragOn">拖节点</label>
       <label class="chk" title="收敛后节点以 1~2 像素幅度缓慢浮动"><input type="checkbox" id="breathOn" checked>漂浮</label>
+      <button class="fit" id="zout" title="缩小">−</button>
+      <button class="fit" id="zin" title="放大">＋</button>
       <button class="fit" id="fit">适应</button>
       <button class="fit" id="panelBtn" title="收起 / 展开下面的面板">面板</button>
       <button class="fit" id="exportEdits" disabled>导出清单</button>
@@ -528,15 +530,28 @@ function fitView(only) {
     minX = Math.min(minX, node.px); maxX = Math.max(maxX, node.px);
     minY = Math.min(minY, node.py); maxY = Math.max(maxY, node.py);
   }
-  if (!isFinite(minX)) return;
-  const panel = 330;
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+    // 坐标坏了（力导向在只有一个节点时算出过 NaN）：退回居中的默认视野
+    S.view.scale = 1;
+    S.view.tx = width / 2;
+    S.view.ty = height / 2;
+    requestRender();
+    return;
+  }
+  // 窄屏下面板是铺在画布下面的，不该再给右边留 330px
+  const narrow = typeof window.matchMedia === "function" &&
+    window.matchMedia("(max-width:760px)").matches;
+  const panel = narrow ? 0 : 320;
   const pad = 44;
+  const extent = Math.max(1, maxX - minX, maxY - minY);
   const scale = Math.min(
     (width - panel - pad * 2) / Math.max(1, maxX - minX),
     (height - 100 - pad * 2) / Math.max(1, maxY - minY),
     2.2
   );
-  S.view.scale = clamp(scale, 0.12, 6);
+  S.view.scale = clamp(isFinite(scale) ? scale : 1, 0.12, 6);
+  // 只有一个节点（extent 还是 0）时别用 2.2 倍去放：放大了它在哪儿都看不清
+  if (S.nodes.length <= 1 && extent === 0) S.view.scale = 1;
   S.view.tx = (width - panel) / 2 - (minX + maxX) / 2 * S.view.scale;
   S.view.ty = height / 2 + 8 - (minY + maxY) / 2 * S.view.scale;
   requestRender();
@@ -546,8 +561,20 @@ function toScreen(x, y) {
   return [x * S.view.scale + S.view.tx, y * S.view.scale + S.view.ty];
 }
 
+/* 事件给的是窗口坐标；画布在工具栏下面、面板左边，所以要先减掉它在窗口里的位置。
+   漏掉这一步的表现就是"点哪都选不中"（位置整体偏了，正好昨天踩到）。 */
+function eventXY(event) {
+  const rect = canvas.getBoundingClientRect();
+  return [event.clientX - rect.left, event.clientY - rect.top];
+}
+
 function toWorld(sx, sy) {
   return [(sx - S.view.tx) / S.view.scale, (sy - S.view.ty) / S.view.scale];
+}
+
+function zoomCenter(factor) {
+  const size = stageSize();
+  zoomAt(size.width / 2, size.height / 2, factor);
 }
 
 function zoomAt(sx, sy, factor) {
@@ -1118,7 +1145,9 @@ function pick(wx, wy) {
     const dx = node.px - wx;
     const dy = node.py - wy;
     const distance = Math.hypot(dx, dy);
-    const radius = nodeRadius(node) + 7 / S.view.scale;
+    // 容差按"屏幕上的像素"算：手指点不准，给 18 像素；鼠标给 9 像素。
+    const tolerance = (S.touch ? 18 : 9) / S.view.scale;
+    const radius = nodeRadius(node) + tolerance;
     if (distance < radius && distance < bestDistance) {
       best = i;
       bestDistance = distance;
@@ -1317,7 +1346,8 @@ function showTip(index, clientX, clientY) {
 }
 
 canvas.addEventListener("pointerdown", (event) => {
-  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const [ex, ey] = eventXY(event);
+  const [wx, wy] = toWorld(ex, ey);
   const hit = pick(wx, wy);
   S.moved = false;
   S.sim.fitted = true;
@@ -1343,7 +1373,8 @@ canvas.addEventListener("pointerdown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   if (S.drag && S.drag.type === "node") {
-    const [wx, wy] = toWorld(event.clientX, event.clientY);
+    const [ex, ey] = eventXY(event);
+  const [wx, wy] = toWorld(ex, ey);
     const node = S.nodes[S.drag.i];
     node.px = wx + S.drag.dx;
     node.py = wy + S.drag.dy;
@@ -1353,13 +1384,15 @@ canvas.addEventListener("pointermove", (event) => {
     return;
   }
   if (S.drag && S.drag.type === "pan") {
+    if (pinch) return;                       // 双指是缩放，不是平移
     if (Math.hypot(event.clientX - S.drag.sx, event.clientY - S.drag.sy) > 4) S.moved = true;
     S.view.tx = S.drag.tx + (event.clientX - S.drag.sx);
     S.view.ty = S.drag.ty + (event.clientY - S.drag.sy);
     requestRender();
     return;
   }
-  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const [ex, ey] = eventXY(event);
+  const [wx, wy] = toWorld(ex, ey);
   const hit = pick(wx, wy);
   if (hit !== S.hover) {
     S.hover = hit;
@@ -1402,13 +1435,64 @@ canvas.addEventListener("pointerleave", () => {
   requestRender();
 });
 
+document.getElementById("zin").addEventListener("click", () => zoomCenter(1.5));
+document.getElementById("zout").addEventListener("click", () => zoomCenter(1 / 1.5));
+
+/* 手机上：双指捏合缩放、两指中点当锚点。pointer 事件在 WebView 里更可靠，
+   所以用 pointerdown/move/up 自己维护"按住了几根手指"。 */
+const touches = new Map();
+let pinch = null;
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "touch") S.touch = true;
+  const [ex, ey] = eventXY(event);
+  touches.set(event.pointerId, { x: ex, y: ey });
+  if (touches.size === 2) {
+    const [a, b] = Array.from(touches.values());
+    pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y),
+              cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2,
+              scale: S.view.scale, tx: S.view.tx, ty: S.view.ty };
+    S.moved = true;                          // 捏合过就别再当成点击去选中节点
+  }
+}, { passive: true });
+
+canvas.addEventListener("pointermove", (event) => {
+  if (touches.has(event.pointerId)) {
+    const [ex, ey] = eventXY(event);
+    touches.set(event.pointerId, { x: ex, y: ey });
+  }
+  if (pinch && touches.size >= 2) {
+    const [a, b] = Array.from(touches.values());
+    const distance = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+    const factor = distance / Math.max(1, pinch.distance);
+    const scale = clamp(pinch.scale * factor, 0.12, 7);
+    const cx = (a.x + b.x) / 2;
+    const cy = (a.y + b.y) / 2;
+    const [wx, wy] = [(pinch.cx - pinch.tx) / pinch.scale,
+                      (pinch.cy - pinch.ty) / pinch.scale];
+    S.view.scale = scale;
+    S.view.tx = cx - wx * scale;
+    S.view.ty = cy - wy * scale;
+    requestRender();
+  }
+}, { passive: true });
+
+["pointerup", "pointercancel"].forEach((name) => {
+  canvas.addEventListener(name, (event) => {
+    touches.delete(event.pointerId);
+    if (touches.size < 2) pinch = null;
+  }, { passive: true });
+});
+
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-  zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0014));
+  const [ex, ey] = eventXY(event);
+  zoomAt(ex, ey, Math.exp(-event.deltaY * 0.0014));
 }, { passive: false });
 
 canvas.addEventListener("dblclick", (event) => {
-  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const [ex, ey] = eventXY(event);
+  const [wx, wy] = toWorld(ex, ey);
   const hit = pick(wx, wy);
   if (hit < 0) return;
   S.view.scale = clamp(S.view.scale * 1.8, 0.12, 7);

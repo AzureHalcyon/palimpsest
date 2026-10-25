@@ -21,6 +21,7 @@ from datetime import datetime
 from testsupport import tempdir
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
 from . import control
+from . import persona
 from . import prompt_files
 from . import web_access
 from . import webtools
@@ -29,8 +30,8 @@ from . import shell
 from . import workspace
 from . import web
 from .cli import _clean_line
-from .config import LoopConfig
-from .context import (Band, Block, BlockEntry, Context, estimate_tokens,
+from .config import LoopConfig, LoopCredentials
+from .context import (strip_fake_calls, Band, Block, BlockEntry, Context, estimate_tokens,
                       serialize_entries, time_range)
 from .driver import Loop, _timeout_text, _woke_text, parse_until
 from .memory_bridge import MemoryBridge
@@ -50,6 +51,7 @@ def check(condition, message: str) -> None:
 def _loop_config(**kwargs) -> LoopConfig:
     """自检默认不打盹：这些用例没有外部输入，打盹会把它们提前停掉。"""
     kwargs.setdefault("watchdog_idle", 0)
+    kwargs.setdefault("user_name", "")      # 占位「对方：」，名字的用例单独传
     return LoopConfig(**kwargs)
 
 
@@ -62,7 +64,9 @@ class FakeClient:
         self.prompts = []
 
     def chat(self, messages, tools=None, on_delta=None):
+        # 原生 tool_calls 也要算进 prompt_tokens（跟真端点一致）：调用参数不在 content 里
         prompt = "\n".join(str(message.get("content") or "") for message in messages)
+        prompt += "\n".join(str(message.get("tool_calls") or "") for message in messages)
         self.prompts.append(prompt)
         number = self.calls
         self.calls += 1
@@ -177,7 +181,9 @@ def check_context_limits() -> None:
 def check_two_blocks() -> None:
     workdir = tempdir("loop-two-")
     try:
-        config = _loop_config(name="自检", block_tokens=50, max_steps=8,
+        # 80 是配着 FakeClient 那套脚本手调的：8 步正好滚一次、不触发压缩
+        # （原生 tool_calls 也计入 prompt_tokens，比早先的纯文本少一点，所以要调大）
+        config = _loop_config(name="自检", block_tokens=80, max_steps=8,
                             park_seconds=0.001)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         loop = Loop(config, credentials=None, store=store,
@@ -209,6 +215,41 @@ def check_clock() -> None:
                   "距我上次开口 6 分钟）", "墙钟写得不对：%s" % text)
     check("现在" not in context.block_text(), "墙钟不该进记录")
     check("现在 10-25" in context.messages()[-1]["content"], "墙钟该在最后一条输入里")
+
+    # 不带墙钟的那些步：末尾只放一句边界，不念时间也不催
+    context.show_clock = False
+    quiet = context.messages()[-1]["content"]
+    check("现在" not in quiet, "关了就不该带时间：%r" % quiet)
+    check(quiet.strip() == "<system-reminder>（接着上面。）</system-reminder>",
+          "不带墙钟时只留一句边界：%r" % quiet)
+    context.asking = True
+    asked = context.messages()[-1]["content"]
+    check("还要继续吗" in asked and "现在" not in asked,
+          "提问可以不带时间：%r" % asked)
+    context.asking = False
+    context.show_clock = True
+
+    # 真跑两步：第一步带墙钟，紧接着的第二步不重复念（120 秒内），只留边界
+    workdir = tempdir("loop-clock-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=2)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = FakeClient()
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=client)
+        loop.echo = lambda line: None
+        loop.on_speak = lambda text: None
+        loop.inject_user("在吗")
+        loop.step()
+        loop.step()
+        check("现在" in client.prompts[0], "第一步该带墙钟：%r" % client.prompts[0][-80:])
+        check("现在" not in client.prompts[1],
+              "120 秒内不重复念时间：%r" % client.prompts[1][-80:])
+        check("接着上面" in client.prompts[1], "不带墙钟时要有边界那句")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def check_loop() -> None:
@@ -294,10 +335,11 @@ def check_tools() -> None:
                     memory=MemoryBridge.disabled(), client=FakeClient())
         loop.run()
         prompts = loop.client.prompts
-        check(any("调用 recall" in prompt for prompt in prompts),
-              "工具调用要写进记录")
-        check(any("结果：记忆还没接上" in prompt for prompt in prompts),
-              "工具结果要写进记录")
+        # 原生格式：调用走 tool_calls，结果走 role=tool 的消息（不再是"调用 x / 结果：…"文字）
+        check(any("recall" in prompt for prompt in prompts),
+              "工具调用要以原生 tool_calls 进记录：%r" % prompts[-1][-120:])
+        check(any("记忆还没接上" in prompt for prompt in prompts),
+              "工具结果要以 tool 消息进记录")
         check("[T]" not in loop.context.block_text()
               and "[S]" not in loop.context.block_text()
               and "[C]" not in loop.context.block_text(),
@@ -404,6 +446,21 @@ def check_remember_hidden() -> None:
     check("写下了记忆：甲" in text, "记录只留名字")
 
 
+def check_user_name() -> None:
+    """压缩文本里用对方的名字代替「对方：」，sink 第一句也跟着换。"""
+    entry = BlockEntry({"role": "user", "content": "预算二十八万。"},
+                       "2026-10-25 10:00:00")
+    named = serialize_entries([entry], user_name="岚")
+    check(named == "岚：预算二十八万。", "该用名字：%r" % named)
+    check("对方：" not in named, "名字在的时候不该再出现占位")
+    plain = serialize_entries([entry])
+    check(plain.startswith("对方："), "不给名字就退回占位：%r" % plain)
+    config = _loop_config(name="自检", user_name="岚")
+    sink = Context(config).sink()
+    check("岚" in sink and "Ranchel" not in sink and "$user" not in sink,
+          "sink 第一句该用名字：%r" % sink[:60])
+
+
 def check_tool_fold() -> None:
     """工具是持续调的：只折能重取的（recall），记忆本身（recollect）不折。"""
     recall_result = "找到 3 件：\n" + "\n".join(
@@ -435,11 +492,18 @@ def check_tool_fold() -> None:
     # 折了也要留下「哪几件、什么时候」：id、名字、日期。
     check("ev0 某件旧事（10-20）、ev1 某件旧事（10-21）、ev2 某件旧事（10-22）" in folded,
           "折起来的那行要留着 id、名字和日期：%s" % folded[:100])
-    check(folded.count("调用 recall") == 5, "调用行不能被折：当时问的还在")
+    check(folded.count("我用了：recall") == 5, "调用行不能被折：当时问的还在")
+    # 压缩文本按角色标前缀：动作和结果不能长得像她的话
+    check("我用了：" in folded and "工具回：" in folded,
+          "调用/结果要有自己的前缀：%s" % folded[:120])
+    check("调用 recall" not in folded and "结果：" not in folded,
+          "旧的「调用 x / 结果：」记号不该再出现在压缩文本里")
     # 写给模型的提示语只留最新两条，历史里的去掉。
     check(folded.count("看具体用 recollect") == 2, "提示语只该留最新两条，实际 %d"
           % folded.count("看具体用 recollect"))
     check(serialize_entries(items, fold_keep=0) == raw, "fold_keep=0 就是不折")
+    # 墙钟不进压缩文本：时间只靠段头那行（不然"现在几点"会被压成"她说过现在几点"）
+    check("现在 " not in folded, "压缩文本里不该有墙钟")
 
     # 短结果也该按新旧去提示语：「没找到」留着，后半句去掉。
     empty = "没有找到。换个关键词再试。"
@@ -493,7 +557,7 @@ def check_speak_with_calls() -> None:
         check(spoken == ["我先查一下。"], "带工具调用的正文也要投递：%r" % spoken)
         text = loop.context.block_text()
         check("我先查一下。" in text, "正文该进记录")
-        check("调用 recall" in text, "调用也该进记录")
+        check("我用了：recall" in text, "调用也该进记录（标成动作，不是她的话）")
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -581,12 +645,12 @@ def check_wait_resume() -> None:
 
         loop._resume_waits()
         text = loop.context.current_text()
-        check("结果：等了" in text, "重启该补上等待结果：%s" % text)
+        check("工具回：等了" in text, "重启该补上等待结果：%s" % text)
         check("对方：还在吗" in text, "醒来的消息要进记录：%s" % text)
 
         # 已经有过结果的 wait 不该重跑。
         loop._resume_waits()
-        check(loop.context.current_text().count("结果：等了") == 1,
+        check(loop.context.current_text().count("工具回：等了") == 1,
               "有结果的 wait 不该重跑")
         store.close()
     finally:
@@ -954,6 +1018,22 @@ def check_web() -> None:
         check(context["limits"]["block_tokens"] == 100000, "上下文里该有块限额")
         check("bands" in context and "previous" in context, "上下文里该有旧段与上一块")
 
+        # 抽屉里每条工具结果是一个可折叠的小块，靠 seq 当键。没有 seq 的话全挤成
+        # "result:undefined"，点开一个别的跟着开，重画时也认不出谁开着。
+        seqs = [entry.get("seq") for entry in context["current"]["entries"]]
+        check(all(isinstance(seq, int) and seq > 0 for seq in seqs),
+              "上下文里每条该带库里的行号：%r" % seqs[:4])
+        check(len(set(seqs)) == len(seqs), "行号不该重复（折叠块拿它当键）")
+
+        # 这两条是渲染事故的护栏，别删：
+        # ① 抽屉里 role 标签的类名就是 note/user/tool，页面上不能再有裸的 .note，
+        #    否则那个标签会被撑成带橙杠、字挤成一列竖排；
+        # ② 「结果」「调 N 次」这种标签不能被摘要挤窄，窄了只该摘要收省略号。
+        check(".sysnote{" in page and not re.search(r"(?<![\w.\-])\.note\{", page),
+              "时间线那行提醒该叫 .sysnote：裸 .note 会和抽屉里的 role 标签撞名")
+        check("details.sub>summary .sl{flex:none" in page,
+              "抽屉里「结果/调 N 次」不许被挤窄")
+
         cursor = "%d:%d" % (feed["cursor"]["block"], feed["cursor"]["seq"])
         _, more = get("/feed?since=" + cursor)
         check(more["entries"] == [], "游标之后不该重复给同一条")
@@ -1247,7 +1327,7 @@ def check_ask() -> None:
         loop.step()                       # 说了话
         loop.step()                       # 被问一句 → 它调 wait(1s) 停下
         check(client.asked == 1, "该问它一次：%d" % client.asked)
-        check("调用 wait" in loop.context.block_text(), "停下这个决定要进记录")
+        check("我用了：wait" in loop.context.block_text(), "停下这个决定要进记录")
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1303,12 +1383,37 @@ def check_record_marks() -> None:
           "对方的话是 user：%r" % messages[1])
     check(roles[2] == "assistant" and "在。" in messages[2]["content"],
           "自己的话是 assistant：%r" % messages[2])
-    check("调用 wait" in messages[2]["content"] and "结果：好" in messages[2]["content"],
-          "调用和结果并进它自己那条：%r" % messages[2]["content"])
-    check(roles[3] == "system" and "任务回来了" in messages[3]["content"],
-          "系统动静走 system：%r" % messages[3])
-    check(messages[3]["content"].startswith("<system-reminder>"),
-          "系统注入要套标签：%r" % messages[3]["content"])
+    check(roles.count("assistant") >= 1 and "在。" in messages[2]["content"],
+          "自己的话是 assistant：%r" % messages[2])
+    calls = messages[2].get("tool_calls") or []
+    check(len(calls) == 1 and calls[0]["function"]["name"] == "wait",
+          "调用要以原生 tool_calls 挂在它自己那条上：%r" % messages[2])
+    check(roles[3] == "tool" and "好" in messages[3]["content"],
+          "结果要走 role=tool 的消息：%r" % messages[3])
+    check(messages[3].get("tool_call_id") == "c1", "结果要带上对应的 call id")
+    check(roles[4] == "system" and "任务回来了" in messages[4]["content"],
+          "系统动静走 system：%r" % messages[4])
+    check(messages[4]["content"].startswith("<system-reminder>"),
+          "系统注入要套标签：%r" % messages[4]["content"])
+    # 记录里不能再有"调用 x / 结果：…"这种可抄的文字行：
+    # 服务器上真出过——她照着抄，把调用和结果当正文写出来（一步里没有 tool 记录）。
+    flat = "\n".join(str(m.get("content") or "") for m in messages)
+    check(not re.search(r"^调用 \S+ \{", flat, re.M),
+          "原生消息里不该有可抄的「调用 x {...}」行：%r" % flat[:120])
+    check(not any(line.lstrip().startswith("结果：") for line in flat.splitlines()),
+          "原生消息里不该有「结果：」前缀行")
+    # 清洗：模型手写的调用/结果行会被删掉，别的话留着
+    dirty = ("我看了下。\n调用 run {\"command\": \"ls\"}\n"
+             "结果：（退出码 0）文件在这儿\n好，就这样。")
+    clean = strip_fake_calls(dirty)
+    check("调用 run" not in clean and "结果：" not in clean,
+          "抄记录的那条正文里，调用和结果行都该删掉：%r" % clean)
+    check(clean.startswith("我看了下。") and clean.endswith("好，就这样。"),
+          "别的话要留着：%r" % clean)
+    # 没有伪造调用行时，「结果：」是她自己的一句话，不许动
+    prose = "我问了一圈。\n结果：他们还是没来。"
+    check(strip_fake_calls(prose) == prose, "正常的「结果：」不该被吃掉：%r"
+          % strip_fake_calls(prose))
     check(not any("没有外界的动静" in str(m["content"]) for m in messages),
           "心跳提醒不该进上下文（它是当时的提醒，不是发生过的事）")
     joined = "\n".join(str(m["content"]) for m in messages[1:])
@@ -1325,6 +1430,324 @@ def check_record_marks() -> None:
     check("对方：在吗" in text and "我：在。" in text, "纯文本要标两边：%r" % text)
     check("提醒：" in text, "纯文本要标系统提醒：%r" % text)
     check("\n\n" not in text, "纯文本里一条话不留空行，免得下一段像别人接的")
+
+
+def check_memory_tools() -> None:
+    """记忆工具面：写/找/取/删/改名，以及"别重复写"的返回。"""
+    workdir = tempdir("loop-memtools-")
+    try:
+        bridge = MemoryBridge(workdir, writer=None, lexical=True)
+        first = bridge.call("remember", json.dumps({"name": "甲 记下了一件事",
+                                                    "note": "结论一"}))
+        check("已记（新建）" in first, "第一次该说新建：%r" % first)
+        second = bridge.call("remember", json.dumps({"name": "乙 记下了另一件",
+                                                     "note": "另一条"}))
+        check("已记（新建）" in second, "第二件也是新建：%r" % second)
+
+        again = bridge.call("remember", json.dumps({"name": "甲 记下了一件事",
+                                                    "note": "结论一"}))
+        check("没再写" in again, "一字不差别再写：%r" % again)
+        added = bridge.call("remember", json.dumps({"name": "甲 记下了一件事",
+                                                    "note": "结论二"}))
+        check("已更新" in added, "同名补内容要说更新：%r" % added)
+
+        blocked = bridge.call("rename", json.dumps({"event": "乙 记下了另一件",
+                                                    "name": "甲 记下了一件事"}))
+        check("已经有同名" in blocked or "换个名字" in blocked,
+              "重名要拒：%r" % blocked)
+        renamed = bridge.call("rename", json.dumps({"event": "乙 记下了另一件",
+                                                    "name": "乙 改了名"}))
+        check("改名了" in renamed, "改名该成功：%r" % renamed)
+
+        found = bridge.call("recall", json.dumps({"keywords": ["甲"]}))
+        check("甲 记下了一件事" in found, "recall 该能找到：%r" % found)
+        gone = bridge.call("forget", json.dumps({"event": "乙 改了名"}))
+        check("忘了" in gone, "forget 该成功：%r" % gone)
+        missing = bridge.call("recollect", json.dumps({"event": "乙 改了名"}))
+        check("没有" in missing or "找不到" in missing, "删了就取不到：%r" % missing)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_inbox_repair() -> None:
+    """进件对账：已读但记录里没有的，要能查出来并补回去。"""
+    workdir = tempdir("loop-repair-")
+    try:
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        item_id = store.push("user", "这条丢了")
+        store.consume(item_id)               # 模拟"标了已读但没落库"
+        missing = store.inbox_unappended()
+        check(len(missing) == 1 and missing[0]["text"] == "这条丢了",
+              "该查出没落库的那条：%r" % missing)
+
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        loop = Loop(config, LoopCredentials(chat_key="k"), store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        loop._repair_inbox()
+        check("这条丢了" in loop.context.current_text(), "重启后要补进记录")
+        check(store.inbox_unappended() == [], "补过之后对账要干净")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_call_cap() -> None:
+    """同一个工具一轮里连调超过上限：给一句话挡住，别一直写同一段记忆。"""
+    workdir = tempdir("loop-cap-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, LoopCredentials(chat_key="k"), store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=FakeClient())
+        calls = [{"id": "c%d" % i, "type": "function",
+                  "function": {"name": "remember",
+                               "arguments": json.dumps({"name": "同一段"})}}
+                 for i in range(5)]
+        loop._dispatch_calls(calls)
+        texts = [entry.message.get("content") for entry in loop.context.current.entries
+                 if entry.message.get("role") == "tool"]
+        blocked = [t for t in texts if "先停一下" in str(t)]
+        check(len(blocked) == 2, "第 4、5 次该被挡：%r" % texts)
+        check(loop._turn_calls["remember"] == 5, "计数要照常累加")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_effort() -> None:
+    """思考强度：配置了就要进请求体，没配置就不发。"""
+    from memory_v2.core.config import ChatConfig
+    from memory_v2.core.llm import ChatClient as RealClient
+    from memory_v2.core.config import Credentials as MemCreds
+
+    body = RealClient(ChatConfig(model="m", reasoning_effort="high"),
+                      MemCreds(api_key="k"))._body([], None, None, None, False)
+    check(body.get("reasoning_effort") == "high", "high 要进请求体：%r" % body)
+    body = RealClient(ChatConfig(model="m"), MemCreds(api_key="k"))._body(
+        [], None, None, None, False)
+    check("reasoning_effort" not in body, "空值不该发")
+    config = _loop_config(name="自检", data_dir=".local")
+    config.reasoning_effort = "max"
+    check("思考强度" in str([f for f in settings.FIELDS
+                             if f["key"] == "reasoning_effort"][0]), "设置里要有这一项")
+
+
+def check_stream() -> None:
+    """流式：开着就把 on_delta 交给客户端（草稿给界面看），关掉就整段等。"""
+    workdir = tempdir("loop-stream-")
+    try:
+        seen = {}
+
+        class WatchClient(FakeClient):
+            def chat(self, messages, tools=None, on_delta=None):
+                seen["on_delta"] = on_delta is not None
+                if on_delta is not None:
+                    on_delta("reasoning", "想一下")
+                    on_delta("content", "在的")
+                return {"role": "assistant", "content": "在的"}
+
+        config = _loop_config(name="自检", block_tokens=100000, data_dir=workdir)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = WatchClient()
+        loop = Loop(config, LoopCredentials(chat_key="k"), store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=client)
+        loop._chat([{"role": "user", "content": "在吗"}], [])
+        check(seen.get("on_delta") is True, "开着流式就该把 on_delta 交出去")
+        check(loop.draft_text == "在的", "正文增量要攒成草稿：%r" % loop.draft_text)
+        check(loop.draft_think == "想一下", "思考增量也留着：%r" % loop.draft_think)
+
+        config.stream = False
+        loop._chat([{"role": "user", "content": "在吗"}], [])
+        check(seen.get("on_delta") is False, "关掉就不该传 on_delta")
+        loop.clear_draft()
+        check(loop.draft_text == "" and loop.draft_think == "", "清草稿要清干净")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_channel_settings() -> None:
+    """接口组：密钥留空不改、地址归一、打码显示、能盖到凭证上。"""
+    workdir = tempdir("loop-chan-")
+    try:
+        settings.save(workdir, {"chat_key": "sk-first-0001",
+                                "chat_url": "https://a.test/v1"}, who="自检")
+        stored = settings.save(workdir, {"chat_key": "", "chat_url": ""}, who="自检")
+        check(stored.get("chat_key") == "sk-first-0001", "密钥留空不该被清掉")
+        values = settings.effective(LoopConfig(name="自检", data_dir=workdir))
+        check(values.get("chat_key") == "", "界面上的密钥要打码：%r"
+              % values.get("chat_key"))
+        hint = settings.hints(workdir).get("chat_key", "")
+        check("0001" in hint and "sk-first" not in hint, "提示只露尾巴：%r" % hint)
+
+        creds = LoopCredentials(chat_key="old", chat_url="https://old.test/chat/completions")
+        settings.apply_credentials(creds, {"chat_url": "https://b.test/v1",
+                                           "embed_url": "https://c.test/v1",
+                                           "embed_key": "ek"})
+        check(creds.chat_url == "https://b.test/v1/chat/completions", "对话地址要归一")
+        check(creds.chat_key == "old", "没给密钥就沿用凭证里的")
+        check(creds.summary_url == "https://c.test/v1", "嵌入地址盖到百炼那组")
+        check(creds.summary_key == "ek", "嵌入密钥也盖过去")
+        check("secret" in str([f for f in settings.FIELDS
+                               if f["key"] == "chat_key"][0]), "密钥字段要标记成 secret")
+        check(settings.embed_base_of("https://x.test/v1/chat/completions")
+              == "https://x.test/v1", "嵌入地址要收成基础地址")
+        check(settings.embed_base_of("https://x.test/v1/embeddings")
+              == "https://x.test/v1", "/embeddings 也要收")
+        settings.apply_credentials(creds, {"embed_url": "https://d.test/v1/chat/completions"})
+        check(creds.summary_url == "https://d.test/v1", "贴整条也存基础地址")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_channel() -> None:
+    """渠道地址归一：写 `…/v1` 或整条 chat/completions 都认，空就用默认。"""
+    from .config import DEFAULT_CHAT_URL, chat_url_of
+
+    check(chat_url_of("https://api.freeshare.tech:8443/v1")
+          == "https://api.freeshare.tech:8443/v1/chat/completions",
+          "写 /v1 要补成 chat/completions")
+    check(chat_url_of("https://x.test/v1/chat/completions")
+          == "https://x.test/v1/chat/completions", "整条 URL 要原样")
+    check(chat_url_of("https://x.test/v1/") == "https://x.test/v1/chat/completions",
+          "尾斜杠要吃掉")
+    check(chat_url_of("") == DEFAULT_CHAT_URL, "空就退回默认渠道")
+
+
+def check_persona() -> None:
+    """她自己写的自我描述：写盘、截断、进 system、到点才重写。"""
+    workdir = tempdir("loop-persona-")
+    try:
+        # 上限有 200 字的地板（太短写不出东西），所以这里用 200
+        config = _loop_config(name="自检", data_dir=workdir, persona_chars=200)
+        check(persona.read(config) == "", "一开始是空的")
+        check("【我自己写的】" not in Context(config).system_text(),
+              "空的时候不该出现在 system 里")
+
+        body = persona.write(config, "我说话慢，喜欢先看清楚再开口。" * 5)
+        check(len(body) <= 200, "超上限要截断：%d 字" % len(body))
+        check(persona.read(config) == body, "写进去的要能读回来")
+        check(os.path.exists(os.path.join(workdir, "persona.log")), "改写历史要留一份")
+        text = Context(config).system_text()
+        check("【我自己写的】" in text and body in text, "非空时要拼进 system")
+        check(text.index("【我自己写的】") > text.index("我是自检"),
+              "要排在 sink 后面")
+
+        config.persona_enabled = False
+        check("【我自己写的】" not in Context(config).system_text(),
+              "关掉就不出现")
+
+        # 到点判定
+        config.persona_enabled = True
+        config.persona_hours = 24
+        persona.touch_stamp(config, 1000.0)
+        check(not persona.due(config, moment=1000.0 + 3600), "没到点不该重写")
+        check(persona.due(config, moment=1000.0 + 25 * 3600), "过了间隔该重写")
+        check(not persona.due(config, moment=1000.0 + 25 * 3600, floor=9e9),
+              "退避期间不写")
+        config.persona_hours = 0
+        check(not persona.due(config, moment=1e9), "0 就是不自动重写")
+
+        # 整理任务：一次调用，写回，截到上限
+        config.persona_hours = 24
+        context = Context(config)
+        context.current = Block([BlockEntry({"role": "user", "content": "在吗"},
+                                            "2026-10-25 10:00:00")],
+                                "2026-10-25 10:00:00", "2026-10-25 10:01:00")
+        seen = []
+
+        def fake_chat(messages):
+            seen.append(messages)
+            return {"content": "我说话短。" * 30}
+
+        # 聊得不够多就不触发：阈值设高一点，新材料不够就该返回空
+        config.persona_min_chars = 2000
+        persona.touch_stamp(config, 0.0)
+        check(persona.enough(context, config) == "", "新材料不够时不该触发")
+        config.persona_min_chars = 0
+        check(persona.enough(context, config) != "", "阈值 0 就是有新材料就写")
+
+        # 门槛按全长算、喂的时候才截断：门槛比喂养上限大也不能永远不触发
+        config.persona_min_chars = 400
+        context.current = Block([BlockEntry(
+            {"role": "user", "content": "字" * 900}, "2026-10-25 10:00:00")],
+            "2026-10-25 10:00:00", "2026-10-25 10:01:00")
+        fed = persona.enough(context, config)
+        check(bool(fed), "新材料超过门槛就该喂（哪怕要截断）")
+        cap = persona.feed_chars_of(config)
+        check(cap > 0 and len(fed) <= cap + 2,
+              "喂进去的要截到上限 %d 字：%d" % (cap, len(fed)))
+        config.persona_feed_chars = 0
+        huge = persona.enough(context, config)
+        check(len(huge) >= len(fed), "0 就是不截断，喂全量")
+        config.persona_feed_chars = persona.MATERIAL_CHARS
+
+        # 只看上次改写之后的新记录：旧条目不该被反复喂（否则越写越像复述）
+        persona.touch_stamp(config, time.time())
+        check(persona.enough(context, config) == "", "刚写过就不该再有新材料")
+        context.current.entries.append(BlockEntry(
+            {"role": "user", "content": "新的这句"}, "2099-01-01 00:00:00"))
+
+        written = persona.rewrite(fake_chat, context, config)
+        check(len(written) <= persona.limit_of(config), "重写也要截断")
+        check(any("新的这句" in str(m.get("content")) for m in seen[-1]),
+              "整理任务要看到新材料：%r" % seen[-1][-1])
+        check(not any("在吗" in str(m.get("content")) for m in seen[-1]),
+              "改写之前的老条目不必反复喂：%r" % seen[-1][-1])
+        check("当前这版" in str(seen[-1][0].get("content")),
+              "整理任务要看到当前这版")
+
+        # 整理用的模型：空就跟主模型走（不进单独客户端）
+        loop_cfg = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        creds = LoopCredentials(chat_key="k-test",
+                                chat_url="https://x.test/v1/chat/completions")
+        wire = LoopStore(os.path.join(workdir, "persona-model.sqlite3"))
+        try:
+            loop = Loop(loop_cfg, creds, store=wire,
+                        compressor=Compressor(loop_cfg, creds),
+                        memory=MemoryBridge.disabled(), client=FakeClient())
+            made = loop._persona_client_for("glm-5.3-flash")
+            check(getattr(made.config, "model", "") == "glm-5.3-flash",
+                  "整理用的模型要按名字造客户端：%r" % getattr(made.config, "model", ""))
+            again = loop._persona_client_for("glm-5.3-flash")
+            check(again is made, "同一个模型别重复造")
+            other = loop._persona_client_for("deepseek-v4-pro")
+            check(other is not made, "换了模型要重建")
+        finally:
+            wire.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_inbox() -> None:
+    """进件：peek 不标已读、consume 才标——不然中途重启会丢消息。
+
+    服务器上真丢过：人在 20:55 说的话进了进件、被 wait 取走标了已读，
+    可记录要等这一步的模型调用之后才写，正好赶上重启，那条就没了。
+    """
+    workdir = tempdir("loop-inbox-")
+    try:
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        store.push("user", "第一句")
+        store.push("user", "第二句")
+        first = store.peek()
+        check(first is not None and first["text"] == "第一句", "peek 看到最早那条")
+        again = store.peek()
+        check(again is not None and again["id"] == first["id"],
+              "没 consume 之前还看得到（重启也不会丢）")
+        store.consume(first["id"])
+        second = store.peek()
+        check(second is not None and second["text"] == "第二句",
+              "consume 之后才轮到下一条")
+        got = store.take()
+        check(got is not None and got["text"] == "第二句", "take 仍然可用（peek+consume）")
+        check(store.peek() is None, "都标过已读就取不到了")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def check_workspace() -> None:
@@ -1620,6 +2043,7 @@ def main() -> int:
     check_tools()
     check_memory()
     check_usage()
+    check_user_name()
     check_tool_fold()
     check_speak_with_calls()
     check_wait_text()
@@ -1647,6 +2071,15 @@ def main() -> int:
     check_ask()
     check_record_marks()
     check_workspace()
+    check_inbox()
+    check_persona()
+    check_channel()
+    check_channel_settings()
+    check_stream()
+    check_inbox_repair()
+    check_memory_tools()
+    check_call_cap()
+    check_effort()
     print("ok: %d checks" % CHECKS[0])
     return 0
 
