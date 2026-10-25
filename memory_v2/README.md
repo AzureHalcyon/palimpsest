@@ -3,8 +3,7 @@
 > 记忆层。上一代在 [`../archive/v1/`](../archive/v1/README.md)（格 / 件 / 组 / 势），冻结但可运行。
 > 持续在线的循环在 [`../loop/`](../loop/README.md)：它用这里的 `read/write.py`（编写）、
 > `read/activate.py`（检索）、`read/archive.py`（短期记忆到期归档），网页控制台也在那边。
-> `chat/` 是旧的“一轮一回复”入口，App（`app/app/src/main/python/host_glue_v2.py`）与
-> `serve.py` 还在用它。
+> `chat/` 是旧的“一轮一回复”入口，`serve.py` 还在用它。
 > 设计与理由见 [`../docs/事件状态与读取.md`](../docs/事件状态与读取.md)；
 > 参数见 [`../docs/参数.md`](../docs/参数.md)；代码规矩见 [`CODE_STYLE.md`](CODE_STYLE.md)。
 

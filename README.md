@@ -84,7 +84,6 @@ recollect：按顺序重建，写成一段第一人称回忆
 | ------------------------------------- | --------------------- |
 | [`memory_v2/`](memory_v2/README.md)   | 记忆层：事件网络、读取、重放、实时入口 |
 | [`loop/`](loop/README.md)             | 持续在线的循环运行时：两块原文 + 运行时压缩 + 记忆工具面 + 网页控制台 + 上网工具 |
-| [`app/`](app/)                        | Android 客户端（Compose）：uikit、插件骨架；Python 侧走 `memory_v2` 的旧入口 |
 | [`archive/v1/`](archive/v1/README.md) | 上一代实现，冻结但可运行          |
 | [`tools/`](tools/README.md)           | 离线工具                  |
 | `docs/`                               | 设计、参数、决策记录            |
@@ -144,7 +143,7 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --http 127.
 
 默认只绑 `127.0.0.1`，不直接对外；要远程看，自己架一条隧道。
 
-### 旧入口（App 与外部程序还在用）
+### 旧入口（外部程序还在用）
 
 聊一场：
 
