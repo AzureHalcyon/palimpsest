@@ -338,9 +338,6 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
   <div class="brand"><i></i><span id="s-name">palimpsest</span></div>
   <button class="new" id="new-ctx">上下文</button>
 
-  <div class="lab">今天</div>
-  <div class="stat"><span>token</span><b id="s-today">0</b></div>
-  <div class="stat"><span>步数</span><b id="s-steps">0</b></div>
   <div class="lab">上下文</div>
   <div class="stat"><span>当前块</span><b id="s-block">0</b></div>
   <div class="meter" id="m-block"><i></i></div>
@@ -492,6 +489,28 @@ function divider(step, ts) {
   return d;
 }
 
+/* 删掉一条之后屏幕也要跟着退：一步删空了，连它头上那行「第 N 步」一起收掉；
+   一条都不剩就把「还没有记录」放回去。 */
+function dropEntry(host) {
+  const wrapEl = host.parentElement;
+  const above = host.previousElementSibling;
+  const below = host.nextElementSibling;
+  const head = above && above.classList.contains("divider") ? above : null;
+  const orphan = head && (!below || below.classList.contains("divider"));
+  host.remove();
+  if (orphan) {
+    head.remove();
+    S.lastStep = -1;
+  }
+  if (wrapEl && !wrapEl.querySelector(".eitem")) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.id = "empty";
+    empty.textContent = "还没有记录。";
+    wrapEl.appendChild(empty);
+  }
+}
+
 function delBtn(item) {
   const b = document.createElement("button");
   b.className = "del";
@@ -504,13 +523,13 @@ function delBtn(item) {
       "只删对话里的这一行（连它的工具结果一起）：\n" +
       "· 它当时写进记忆的笔记还在；\n" +
       "· 已经压进旧段的摘要改不了（那些块整体是只读的）；\n" +
-      "· 用量和步数不会退回去。\n\n" +
+      "· 输入框下面那行会跟着退回去；设置里的总账不退（钱已经花了）。\n\n" +
       "下一步起它就不再看到这条。")) return;
     try {
       await api("/entries?block=" + item.block + "&seq=" + item.seq,
         {method: "DELETE"});
       const host = b.closest(".eitem");
-      if (host) host.remove();
+      if (host) dropEntry(host);
       toast("已删除，下一步就用新的记录");
     } catch (e) { alert("删不了：" + e.message); }
   };
@@ -691,8 +710,9 @@ function paint(st) {
   S.models = st.models || S.models;
   $("h-dot").className = "dot " + (st.status.kind || "");
 
-  $("s-today").textContent = k(st.today.total);
-  $("s-steps").textContent = st.steps;
+  /* 输入框下面这三个数**跟着记录走**：只算还挂在记录上的步，删一条就退一点。
+     真实总账（不退）在设置里，见「用量总账」。 */
+  const live = st.live || st.totals || {};
   $("s-block").textContent = k(st.current_tokens) + " / " + k(st.block_tokens);
   $("s-ctx").textContent = k(st.context_tokens) + " / " + k(st.context_budget);
   $("m-block").firstElementChild.style.width =
@@ -705,10 +725,10 @@ function paint(st) {
   $("c-model").title = "对话 " + (mm.chat || "—") +
     " · 摘要 " + (mm.summary || "—") +
     " · 嵌入 " + (mm.embed || "—") + (mm.embed_ok ? "" : "（不可用）");
-  $("st-steps").textContent = st.steps + " 步";
-  $("st-tokens").textContent = k(st.today.total) + " tok";
+  $("st-steps").textContent = (live.steps || 0) + " 步";
+  $("st-tokens").textContent = k(live.total) + " tok";
   $("st-hit").textContent = "命中 " +
-    Math.round(100 * (st.totals.hit_rate || 0)) + "%";
+    Math.round(100 * (live.hit_rate || 0)) + "%";
   $("st-hint").textContent = st.status.kind === "waiting"
     ? "在等：" + (st.status.detail || "有动静") : "";
 }
@@ -1017,6 +1037,33 @@ function renderSettings(data) {
     sec1.appendChild(line);
   }
   box.appendChild(sec1);
+
+  /* 真账：`usage` 表全部。它不随删记录退（钱已经花了），所以和输入框下面那行
+     分开摆——那里只算还挂在记录上的步。 */
+  const eu = data.usage || {};
+  const today = eu.today || {};
+  const tot = eu.totals || {};
+  const secU = document.createElement("div");
+  secU.className = "sec";
+  secU.innerHTML = "<h3>用量总账</h3>";
+  for (const pair of [
+    ["今天", (today.steps || 0) + " 步 · 输入 " + k(today.prompt) +
+      " · 输出 " + k(today.completion) + " · 合计 " + k(today.total)],
+    ["累计", (tot.steps || 0) + " 步 · 合计 " + k(tot.total) +
+      " · 命中 " + Math.round(100 * (tot.hit_rate || 0)) + "% · 单次峰值 " +
+      k(tot.peak)],
+  ]) {
+    const row = document.createElement("div");
+    row.className = "hist";
+    row.innerHTML = "<span>" + esc(pair[0]) + "</span><b>" + esc(pair[1]) + "</b>";
+    secU.appendChild(row);
+  }
+  const note = document.createElement("div");
+  note.className = "hint";
+  note.style.padding = "6px 0 0";
+  note.textContent = "这是真账，删记录不退；输入框下面那一行只算还挂在记录上的步，删了就退。";
+  secU.appendChild(note);
+  box.appendChild(secU);
 
   const sec2 = document.createElement("div");
   sec2.className = "sec";

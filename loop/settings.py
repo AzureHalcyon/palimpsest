@@ -18,7 +18,7 @@ import os
 import time
 
 # 组名按这个顺序显示；账目的分组借用 App 那边的说法。
-GROUPS = ("模型", "上下文", "记忆", "成本", "节奏")
+GROUPS = ("模型", "上下文", "记忆", "命令", "成本", "节奏")
 
 # 网页表单就按这张表画。加一个旋钮 = 在这里加一行 + `LoopConfig` 里加字段。
 FIELDS = (
@@ -62,6 +62,15 @@ FIELDS = (
     {"key": "embed_dim", "group": "记忆", "label": "嵌入维度", "type": "int",
      "min": 256, "max": 4096,
      "help": "要和模型匹配（qwen3.7-text-embedding 是 1024）；改了旧的向量缓存会作废重取"},
+
+    {"key": "run_enabled", "group": "命令", "label": "命令工具", "type": "bool",
+     "help": "打开后模型能跑白名单里的命令（宿主上，工作目录 <数据>/workspace）；默认关"},
+    {"key": "run_allow", "group": "命令", "label": "命令白名单", "type": "text",
+     "help": "只跑这里列出的程序，按第一段名判，不经 shell；一行，空格或逗号分隔"},
+    {"key": "run_timeout", "group": "命令", "label": "命令超时（秒）", "type": "float",
+     "min": 1, "max": 300, "help": "超时就杀了，连它自己起的进程一起"},
+    {"key": "run_output_chars", "group": "命令", "label": "命令输出上限", "type": "int",
+     "min": 200, "max": 20000, "help": "超了留头 60% 和尾 40%，中间标出省了多少字"},
 
     {"key": "daily_token_cap", "group": "成本", "label": "每天 token 上限",
      "type": "int", "min": 0, "max": 100000000,

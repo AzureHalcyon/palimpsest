@@ -122,7 +122,8 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - 每步：先把 inbox 里的动静读进来 → 拼上下文（sink + 旧段 + 当前块 + 工具结果）→
   主模型 → 执行 → 继续。
 - 工具走原生 `tool_calls`：`remember` / `recall` / `recollect`（记忆）、`wait`（等）、
-  `fetch` / `search`（上网；取自 `loop/web_access.py`，只走公网 80/443）。
+  `fetch` / `search`（上网；取自 `loop/web_access.py`，只走公网 80/443）、`run`
+  （宿主上的命令；白名单里的程序、不经 shell、默认关）。
 - 正文是"说"：投递，不结束。**正文和工具调用可以同时**（原文 `tool_calls` 允许），
   两者都要处理——只处理其中一种，模型就会以为说过了而其实没说。
 - `wait` 是等：等到有动静（`inbox` 里来了 `user` 或者 `task`）或者到点。`until` 收
@@ -137,6 +138,9 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - 网页还能改记录：删一条只举 `request_reload` 旗子，循环在下一个安全点（步首，或等待里
   每秒那次维护）按库重读两块原文；「重启进程」是 `request_stop()`，让它走到步与步之间
   自己退出，再由外面的进程管理器拉起来——不会留下说了一半的正文或没有结果的调用。
+- 网页上的用量分两份：输入框下面那行（步数 / 用量 / 命中）只算**还挂在记录上的步**
+  （`store.usage_live()`），删一条就退回去；设置里的「用量总账」是 `usage` 表全部，删记录
+  不退（钱已经花了）。
 - 设置、提示词、三处模型（主 / 摘要 / 嵌入）都能在网页上改，改完即生效；摘要客户端与
   嵌入器是造好就带着模型名的，改模型时当场重建，不用重启。
 - 等的时候顺手做维护：块满了就地压缩。
@@ -173,6 +177,9 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
    `/entries`；旋钮、提示词、三处模型都能在线改，深浅主题在浏览器里。
 7. **上网（已完成）**：`fetch` 两级（自己抓 → 抽不出正文再走 DeepSeek 渲染）、
    `search` 三级（DeepSeek → Tavily → Bing RSS）；闸门只放公网 80/443。
+8. **命令（已完成）**：`run` 在宿主上跑一条命令，规则是白名单（按第一段程序名）＋
+   不经 shell（`shlex.split` 后直接 exec，管道和重定向进不来）＋ 工作目录
+   `<data>/workspace` ＋ 超时杀进程组 ＋ 输出截断。默认关，开着也只有读的命令。
 
 建议目录（新代码；尽量不动 memory_v2 的存储语义）：
 
@@ -200,7 +207,8 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻�
   刚压完）才用估算顶一步，估算常数按实测校准（汉字 0.76 token/字、其余 4.11 字符/token）。
 - 压缩日志只打在运行时输出里，不进上下文。摘要默认 `deepseek-flash`（同端点），
   `--summary-model qwen-plus` 走百炼；失败保留原文，等块再长 1k 再试。
-- 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search`；正文是说，空回复即停。
+- 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search` / `run`
+  （`run` 默认关，开了才出现在工具面里）；正文是说，空回复即停。
 - 网页：`loop/web.py` 只读库、只往 `inbox` 写，界面是单个 `loop/web/index.html`；令牌走
   Bearer（`<data>/web-token`），默认只绑 `127.0.0.1`。
 - 记忆：事件带 `notes` / `scope` / `expires_at` / `step`；写入的 note 是编写模型的材料；

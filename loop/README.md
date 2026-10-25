@@ -14,6 +14,7 @@
 | `web.py` | 网页面与接口：`/say` `/feed` `/context` `/state`（只读库、只写 inbox） |
 | `web/index.html` | 单页界面：思考-调用时间线 + 上下文分块监视 |
 | `memory_bridge.py` | 工具面：remember / recall / recollect |
+| `shell.py` | 命令工具 `run`：白名单、不经 shell、超时、输出截断（默认关） |
 | `prompt_files.py` | 读 `prompts/` 下的文本，填 `$占位符` |
 | `prompts/` | 提示词：sink、压缩、工具说明 |
 | `logs.py` | 运行时日志：`data/loop/loop.log`，轮转 5 MB × 5 |
@@ -215,7 +216,8 @@ python -m loop.selfcheck       # 只跑这一层（不联网、不用凭证）
 - **主题**不进 `settings.json`：那是浏览器自己的偏好，存在 localStorage，换设备各管各。
 - **删记录**也不用重启：网页只举一个 `request_reload` 旗子，循环在下一个安全点
   （步首，或等待里每秒那次维护）按库重读两块原文。删的只是时间线那一行 ——
-  它写进记忆的笔记、已经压进旧段的摘要、用量和步数都不会跟着撤回（旧段整体只读）。
+  它写进记忆的笔记、已经压进旧段的摘要都不会跟着撤回（旧段整体只读）；输入框下面
+  那行用量会退，设置里的「用量总账」不退。
 
 只有改过**代码**才需要「重启进程」：`control.request_stop()` 让循环走到步与步之间
 自己退出，再由外面的进程管理器拉起来——不会留下说了一半的正文或没有结果的调用。
@@ -255,3 +257,23 @@ python -m loop.selfcheck       # 只跑这一层（不联网、不用凭证）
 按块级标签断行）。所以 `requirements.txt` 不必加东西。
 
 同一个链接五分钟内不重复抓（进程内缓存）。
+
+## 命令
+
+`run(command)`：在跑循环的那台机器上执行一条命令，**默认关**（设置里的「命令」组）。
+开了也不是什么命令都能跑：
+
+- **白名单**：判据是第一段的程序名。默认只有读的——`ls` `cat` `head` `tail` `wc`
+  `grep` `rg` `file` `stat` `du` `df` `date` `echo` `uname` `uptime` `which` `pwd`
+  `git`；`git` 还只给 status / log / diff / show / branch / remote / tag 这几个子命令。
+- **不经 shell**：`shlex.split` 切开直接 exec，所以 `|`、`>`、`$(...)`、`sh -c`
+  全都用不了。要过滤就用自带条件的程序（`rg`、`git log --grep`）。
+- **工作目录**是 `<data>/workspace`，不是家目录、不是仓库。
+- **超时**默认 20 秒，超了连进程组一起杀；**输出**默认留 4000 字（头 60% + 尾 40%，中间标出省了多少）。
+
+这是**规则，不是沙箱**。跑在云实例上，机器本身就是隔开的，不必再包一层；但「碰得到
+什么」没管——它以服务用户的身份跑，那个用户读得到的文件它就读得到。所以工具说明里
+写着：别把密钥、令牌打印出来写进记录（打印了就会进上下文，还可能被写成笔记）。
+
+工具名与说明在 `prompts/tools.txt` 的 `## run` / `## run.command`；闸门与执行在
+`shell.py`（`allowed()` 判第一段，`execute()` 负责切分、超时、截断）。

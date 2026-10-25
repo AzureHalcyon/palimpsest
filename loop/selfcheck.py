@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -23,6 +24,7 @@ from . import prompt_files
 from . import web_access
 from . import webtools
 from . import settings
+from . import shell
 from . import web
 from .cli import _clean_line
 from .config import LoopConfig
@@ -1113,6 +1115,23 @@ def check_delete() -> None:
         left = store.feed(0, 0)
         check(len(left) == 1 and left[0]["text"] == "在吗", "只该剩用户那句")
 
+        # 用量分两份：live 只算还挂在记录上的步（网页放在输入框下面，删了就退），
+        # totals 是 usage 表全部（网页只在设置里当总账）。
+        store.add_usage(1, {"prompt_tokens": 100, "completion_tokens": 10,
+                            "prompt_cache_hit_tokens": 50})
+        store.add_usage(2, {"prompt_tokens": 200, "completion_tokens": 20,
+                            "prompt_cache_hit_tokens": 100})
+        live = store.usage_live()
+        check(live["steps"] == 1 and live["total"] == 110,
+              "底下的数只算还挂着的那一步：%r" % live)
+        check(store.usage_totals()["steps"] == 2, "总账里两步都得留着")
+        store.append_entry(block_id, BlockEntry(
+            {"role": "user", "content": "第二步"}, "2026-01-01 00:00:04"), step=2)
+        check(store.usage_live()["steps"] == 2, "有了第二步的条目就该算上它")
+        store.delete_entry(block_id, max(e["seq"] for e in store.feed(0, 0)))
+        check(store.usage_live()["steps"] == 1, "把第二步删掉，底下的数要退回去")
+        check(store.usage_totals()["total"] == 330, "总账不退：钱已经花了")
+
         with store.db:
             store.db.execute("UPDATE blocks SET state = 'compressed' WHERE id = ?",
                              (block_id,))
@@ -1239,6 +1258,93 @@ def check_web_tools() -> None:
     check("fetch" in names and "search" in names, "工具面里该有这两个")
 
 
+def check_shell() -> None:
+    """命令工具：白名单、不经 shell、超时杀进程、输出截断。
+
+    自检要在本机（可能是 Windows）跑，所以拿 `sys.executable` 当那条命令，
+    `echo` / `ls` 这种在两边不通用。
+    """
+    workdir = tempdir("loop-shell-")
+    try:
+        python = sys.executable or "python3"
+        program = os.path.basename(python)
+        cfg = _loop_config(name="自检", data_dir=workdir)
+        check(not shell.tools(cfg), "默认关：工具面里连 run 都不该有")
+        check("没开" in shell.call("run", '{"command": "echo hi"}', cfg),
+              "没开时调它要回一句，不该抛")
+        cfg.run_enabled = True
+        cfg.run_allow = program
+        names = [tool["function"]["name"] for tool in shell.tools(cfg)]
+        check(names == ["run"], "打开之后工具面里要有 run：%r" % names)
+
+        out = shell.call("run", json.dumps(
+            {"command": '%s -c "print(1 + 1)"' % program}), cfg)
+        check("退出码 0" in out and "2" in out, "该跑起来并给出输出：%r" % out)
+
+        refused = shell.call("run", json.dumps({"command": "rm -rf /"}), cfg)
+        check("不给跑" in refused, "白名单外的程序要拒：%r" % refused)
+
+        # 不经 shell：重定向只是个参数，不会真生成文件。
+        marker = os.path.join(shell.workspace_of(cfg), "marker.txt")
+        shell.call("run", json.dumps(
+            {"command": '%s -c "print(3)" > marker.txt' % program}), cfg)
+        check(not os.path.exists(marker), "重定向不该生效")
+
+        # 工作目录是 <data>/workspace，不是家目录。
+        where = shell.call("run", json.dumps(
+            {"command": '%s -c "import os;print(os.getcwd())"' % program}), cfg)
+        check(os.path.realpath(shell.workspace_of(cfg)) in
+              os.path.realpath(where), "命令要在 workspace 里跑：%r" % where)
+
+        bad = shell.call("run", json.dumps(
+            {"command": '%s -c "raise SystemExit(3)"' % program}), cfg)
+        check("退出码 3" in bad, "非零退出要如实说：%r" % bad)
+
+        cfg.run_timeout = 0.6
+        started = time.time()
+        slow = shell.call("run", json.dumps(
+            {"command": '%s -c "import time;time.sleep(9)"' % program}), cfg)
+        check("超时" in slow, "跑过头要杀：%r" % slow)
+        check(time.time() - started < 6, "超时之后不能还等在那儿")
+        cfg.run_timeout = 20.0
+
+        cfg.run_output_chars = 100
+        long = shell.call("run", json.dumps(
+            {"command": '%s -c "print(\\"x\\" * 600)"' % program}), cfg)
+        check("省略" in long and len(long) < 400, "长输出要截断：%d 字" % len(long))
+        marked = re.search(r"省略 (\d+) 字", long)
+        check(marked and 400 < int(marked.group(1)) < 620,
+              "要标出省了多少：%r" % long[:80])
+        cfg.run_output_chars = 4000
+
+        cfg.run_allow = program + " git"
+        only_read = shell.call("run", json.dumps({"command": "git commit -m x"}), cfg)
+        check("只给 status" in only_read, "git 只给读的子命令：%r" % only_read)
+
+        called = shell.call("other", "{}", cfg)
+        check("没有这个工具" in called, "别的名字要回「没有」")
+
+        # 接到循环上：工具面里有它，分派也认它。
+        loop_cfg = _loop_config(name="自检", data_dir=workdir,
+                                block_tokens=100000)
+        loop_cfg.run_enabled = True
+        loop_cfg.run_allow = program
+        wire = LoopStore(os.path.join(workdir, "wire.sqlite3"))
+        try:
+            loop = Loop(loop_cfg, credentials=None, store=wire,
+                        compressor=Compressor(loop_cfg, summarizer=fake_summarizer),
+                        memory=MemoryBridge.disabled(), client=FakeClient())
+            names = [tool["function"]["name"] for tool in loop.tools()]
+            check("run" in names, "循环的工具面里要有 run：%r" % names)
+            wired = loop._call_tool("run", json.dumps(
+                {"command": '%s -c "print(7)"' % program}))
+            check("7" in wired, "循环分派要能跑通：%r" % wired)
+        finally:
+            wire.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main() -> int:
     check_summary()
     check_compress()
@@ -1273,6 +1379,7 @@ def main() -> int:
     check_stop_raises()
     check_reload()
     check_web_tools()
+    check_shell()
     print("ok: %d checks" % CHECKS[0])
     return 0
 

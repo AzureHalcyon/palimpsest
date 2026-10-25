@@ -362,6 +362,27 @@ class LoopStore:
                               if totals["prompt"] else 0.0)
         return totals
 
+    def usage_live(self) -> dict:
+        """只算还挂在记录上的步：删掉一步的最后一条，这一步就从这里退出去。
+
+        接缝是 `entries.step` 与 `usage.step`。老条目没有步号（记 0），它们真实的
+        花费只出现在 `usage_totals` 里；网页把这一份放在输入框下面（跟着删除退），
+        `usage_totals` 放在设置里当总账（钱已经花了，不退）。
+        """
+        row = self.db.execute(
+            "SELECT COUNT(*) AS steps, COALESCE(SUM(prompt), 0) AS prompt,"
+            " COALESCE(SUM(completion), 0) AS completion,"
+            " COALESCE(SUM(cache_hit), 0) AS cache_hit"
+            " FROM usage WHERE step IN"
+            " (SELECT DISTINCT step FROM entries WHERE step > 0)").fetchone()
+        live = {"steps": int(row["steps"]), "prompt": int(row["prompt"]),
+                "completion": int(row["completion"]),
+                "cache_hit": int(row["cache_hit"])}
+        live["total"] = live["prompt"] + live["completion"]
+        live["hit_rate"] = (live["cache_hit"] / live["prompt"]
+                            if live["prompt"] else 0.0)
+        return live
+
     def usage_today(self, day: str = "") -> dict:
         """今天的真数：输入 + 输出，成本上限用。"""
         day = str(day or now()[:10])

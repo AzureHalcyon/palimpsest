@@ -17,6 +17,7 @@ from memory_v2.core.llm import ChatClient, ChatError
 
 from . import control
 from . import prompt_files
+from . import shell
 from . import webtools
 from .compress import CompressError, Compressor, add_band
 from .context import Context, estimate_tokens
@@ -193,6 +194,7 @@ class Loop:
         text = prompt_files.tool_texts()
         tools.append(_wait_tool(text))
         tools.extend(webtools.tools())
+        tools.extend(shell.tools(self.config))
         return tools
 
     # ── 一步 ──────────────────────────────────────────────────────────────
@@ -410,6 +412,8 @@ class Loop:
                 return self._wait(arguments)
             if name in webtools.NAMES:
                 return webtools.call(name, arguments)
+            if name in shell.NAMES:
+                return shell.call(name, arguments, self.config)
             return self.memory.call(name, arguments)
         except control.StopRequested:
             raise

@@ -158,6 +158,7 @@ TOOL_KEYS = (
     "wait", "wait.until", "wait.kinds",
     "fetch", "fetch.url", "fetch.offset",
     "search", "search.query",
+    "run", "run.command",
 )
 
 

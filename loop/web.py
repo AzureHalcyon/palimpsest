@@ -338,6 +338,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _settings_payload(self) -> dict:
         config = self.server.config
         data_dir = self.server.data_dir
+        store = _store_of(self.server)
         prompts = []
         current = prompt_files.overrides()
         for key, (label, desc, filename) in prompt_files.META.items():
@@ -356,6 +357,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "groups": list(settings.GROUPS),
                 "prompts": prompts,
                 "history": settings.history(data_dir),
+                "usage": {"today": store.usage_today(),
+                          "totals": store.usage_totals()},
                 "memory": self._embed_status(),
                 "data_dir": data_dir}
 
@@ -370,6 +373,7 @@ class _Handler(BaseHTTPRequestHandler):
         current = serialize_entries(state["current"].entries, fold_keep=fold_keep)
         previous = serialize_entries(state["previous"].entries, fold_keep=fold_keep)
         totals = store.usage_totals()
+        live = store.usage_live()
         embed = self._embed_status()
         return {"name": getattr(config, "name", ""),
                 "model": getattr(config, "model", ""),
@@ -378,7 +382,10 @@ class _Handler(BaseHTTPRequestHandler):
                            "embed": embed["embed_model"],
                            "embed_ok": embed["embed_ok"]},
                 "status": store.status(),
-                "steps": totals["steps"],
+                # 步数与用量给两份：live 只算还挂在记录上的步（删了就退），
+                # totals 是 usage 表全部，网页只在设置里当总账看。
+                "steps": live["steps"],
+                "live": live,
                 "compressions": self._compressions(),
                 "current_tokens": estimate_tokens(current),
                 "context_tokens": (estimate_tokens(context.system_text())

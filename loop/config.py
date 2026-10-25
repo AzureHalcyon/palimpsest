@@ -96,6 +96,14 @@ class LoopConfig:
     # 结果不折会把块塞满，把对白挤出去。
     tool_fold_keep: int = 2
 
+    # 命令工具：跑在宿主机（云实例）上，不用沙盒，只加一条规则——第一段程序名必须在
+    # 白名单里，而且不经过 shell（管道、重定向、$() 进不来）。默认关，默认只给读的。
+    run_enabled: bool = False
+    run_allow: str = ("ls cat head tail wc grep rg file stat du df date echo"
+                      " uname uptime which pwd git")
+    run_timeout: float = 20.0         # 单条命令最多跑多久；超时连进程组一起杀
+    run_output_chars: int = 4000      # 输出最多留多少字：头 60% + 尾 40%
+
     watchdog_idle: int = 6            # 连续几步没有外部输入就问一句「还在做事吗」（0=关）
     retry_delay: float = 5.0          # 模型调不通时的退避起点（秒），之后翻倍
     park_seconds: float = 0.0         # >0 才空转等待；0 表示挂起就停
