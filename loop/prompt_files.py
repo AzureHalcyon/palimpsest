@@ -32,7 +32,7 @@ META = {
                  "compress.txt"),
     "tools": ("工具说明",
               "工具面的说明文字（`## 键` 分段，键名不能改）：remember / recall / recollect /"
-              " wait / fetch / search / run。",
+              " wait / fetch / search / run / write。",
               "tools.txt"),
     "watchdog": ("心跳提醒",
                  "连着几步没有外界动静时问的那一句。改的是语气，不是逻辑。",
@@ -163,6 +163,7 @@ TOOL_KEYS = (
     "fetch", "fetch.url", "fetch.offset",
     "search", "search.query",
     "run", "run.command",
+    "write", "write.path", "write.content", "write.mode",
 )
 
 

@@ -19,6 +19,7 @@ from . import control
 from . import prompt_files
 from . import shell
 from . import webtools
+from . import workspace
 from .compress import CompressError, Compressor, add_band
 from .context import Context, estimate_tokens
 from .store import LoopStore
@@ -198,6 +199,7 @@ class Loop:
         tools.append(_wait_tool(text))
         tools.extend(webtools.tools())
         tools.extend(shell.tools(self.config))
+        tools.extend(workspace.tools(self.config))
         return tools
 
     # ── 一步 ──────────────────────────────────────────────────────────────
@@ -435,6 +437,8 @@ class Loop:
                 return webtools.call(name, arguments)
             if name in shell.NAMES:
                 return shell.call(name, arguments, self.config)
+            if name in workspace.NAMES:
+                return workspace.call(name, arguments, self.config)
             return self.memory.call(name, arguments)
         except control.StopRequested:
             raise

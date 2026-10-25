@@ -123,7 +123,8 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
   主模型 → 执行 → 继续。
 - 工具走原生 `tool_calls`：`remember` / `recall` / `recollect`（记忆）、`wait`（等）、
   `fetch` / `search`（上网；取自 `loop/web_access.py`，只走公网 80/443）、`run`
-  （宿主上的命令；白名单里的程序、不经 shell、默认关）。
+  （宿主上的命令；白名单里的程序、不经 shell、拒读凭证、默认关）、`write`
+  （只写 `<data>/workspace` 的文件，绝对路径与 `..` 都拒）。
 - 正文是"说"：投递，不结束。**正文和工具调用可以同时**（原文 `tool_calls` 允许），
   两者都要处理——只处理其中一种，模型就会以为说过了而其实没说。
 - 没有工具调用就是它这一步没有要做的事了：下一步在记录末尾挂一句中性的
@@ -226,7 +227,7 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻�
   刚压完）才用估算顶一步，估算常数按实测校准（汉字 0.76 token/字、其余 4.11 字符/token）。
 - 压缩日志只打在运行时输出里，不进上下文。摘要默认 `deepseek-flash`（同端点），
   `--summary-model qwen-plus` 走百炼；失败保留原文，等块再长 1k 再试。
-- 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search` / `run`
+- 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search` / `run` / `write`
   （`run` 默认关，开了才出现在工具面里）；正文是说，空回复即停。
 - 网页：`loop/web.py` 只读库、只往 `inbox` 写，界面是单个 `loop/web/index.html`；令牌走
   Bearer（`<data>/web-token`），默认只绑 `127.0.0.1`。

@@ -71,6 +71,10 @@ FIELDS = (
      "min": 1, "max": 300, "help": "超时就杀了，连它自己起的进程一起"},
     {"key": "run_output_chars", "group": "命令", "label": "命令输出上限", "type": "int",
      "min": 200, "max": 20000, "help": "超了留头 60% 和尾 40%，中间标出省了多少字"},
+    {"key": "write_enabled", "group": "命令", "label": "写入工具", "type": "bool",
+     "help": "打开后模型能往工作区（<数据>/workspace）写文件；绝对路径和 .. 一律拒"},
+    {"key": "write_max_chars", "group": "命令", "label": "写入上限（字）", "type": "int",
+     "min": 1000, "max": 1000000, "help": "单次最多写多少字，超了让模型分几次写"},
 
     {"key": "daily_token_cap", "group": "成本", "label": "每天 token 上限",
      "type": "int", "min": 0, "max": 100000000,

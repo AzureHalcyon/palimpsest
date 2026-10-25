@@ -29,6 +29,32 @@ NAMES = ("run",)
 # 少数程序里还要再挑子命令：git 只给读的那几个。
 SUBCOMMANDS = {"git": ("status", "log", "diff", "show", "branch", "remote", "tag")}
 
+# 敏感文件：命令照跑，但参数里点到它就拒。它不是沙箱——源码、数据、日志随便读，
+# 只有凭证/密钥这一类不许进记录（读出来会变成"她说过密钥"，还可能被写成笔记）。
+SENSITIVE_DIRS = ("/etc/palimpsest", "/etc/shadow", "/etc/sudoers", "/root/")
+SENSITIVE_NAMES = ("credentials.yaml", "credentials.yml", "web-token",
+                   "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys")
+SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore")
+
+
+def _sensitive(token: str) -> str:
+    """这个参数像不像敏感文件；像就返回它，不像返回空。"""
+    text = str(token or "").strip().strip("\"'")
+    if not text:
+        return ""
+    lowered = text.lower()
+    for folder in SENSITIVE_DIRS:
+        if folder in lowered:
+            return text
+    name = os.path.basename(lowered)
+    if name in SENSITIVE_NAMES:
+        return text
+    if lowered.endswith(SENSITIVE_SUFFIXES):
+        return text
+    if "/.ssh/" in lowered or lowered.startswith("~/.ssh"):
+        return text
+    return ""
+
 
 def workspace_of(config) -> str:
     """命令在哪儿跑：数据目录下的 workspace，不是仓库也不是家目录。"""
@@ -91,6 +117,11 @@ def execute(command: str, config) -> str:
     if program not in names:
         return ("不给跑：%s 不在白名单里。现在能跑的是 %s。"
                 "要加就在设置里改「命令白名单」。" % (program, " / ".join(names)))
+    for token in argv[1:]:
+        hit = _sensitive(token)
+        if hit:
+            return ("不给读：%s 像凭证或密钥，那类东西不进记录。源码、数据、日志随便看。"
+                    % hit)
     subs = SUBCOMMANDS.get(program)
     if subs:
         picked = next((part for part in argv[1:] if not part.startswith("-")), "")

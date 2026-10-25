@@ -103,6 +103,10 @@ class LoopConfig:
     run_allow: str = ("ls cat head tail wc grep rg file stat du df date echo"
                       " uname uptime which pwd git")
     run_timeout: float = 20.0         # 单条命令最多跑多久；超时连进程组一起杀
+    # 工作区写入口（`<data>/workspace` 下）：只写相对路径，绝对路径和 `..` 都拒。
+    # 不并进 run 的白名单——`<data>/` 服务用户可写，那样等于把改库的权限也交出去。
+    write_enabled: bool = True
+    write_max_chars: int = 100000     # 单次最多写多少字
     run_output_chars: int = 4000      # 输出最多留多少字：头 60% + 尾 40%
 
     watchdog_idle: int = 6            # 连续几步没有外部输入就问一句「还在做事吗」（0=关）

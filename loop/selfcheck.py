@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from . import web_access
 from . import webtools
 from . import settings
 from . import shell
+from . import workspace
 from . import web
 from .cli import _clean_line
 from .config import LoopConfig
@@ -1325,6 +1327,57 @@ def check_record_marks() -> None:
     check("\n\n" not in text, "纯文本里一条话不留空行，免得下一段像别人接的")
 
 
+def check_workspace() -> None:
+    """工作区：write 只能写 <data>/workspace，绝对路径和 .. 都拒；run 拒读凭证。"""
+    workdir = tempdir("loop-work-")
+    try:
+        cfg = _loop_config(name="自检", data_dir=workdir)
+        cfg.write_enabled = False
+        check(not workspace.tools(cfg), "关着就工具面里没有 write")
+        cfg.write_enabled = True
+        names = [tool["function"]["name"] for tool in workspace.tools(cfg)]
+        check(names == ["write"], "开着才有 write：%r" % names)
+
+        out = workspace.call("write", json.dumps(
+            {"path": "草稿/a.md", "content": "你好"}), cfg)
+        check("写好了" in out, "该写进去：%r" % out)
+        target = os.path.join(workspace.root_of(cfg), "草稿", "a.md")
+        check(os.path.exists(target), "文件该在：%s" % target)
+        with io.open(target, encoding="utf-8") as handle:
+            check(handle.read() == "你好", "内容要对")
+        out = workspace.call("write", json.dumps(
+            {"path": "草稿/a.md", "content": "再一句", "mode": "append"}), cfg)
+        check("追加" in out, "append 该追加：%r" % out)
+        with io.open(target, encoding="utf-8") as handle:
+            check(handle.read() == "你好再一句", "追加内容要对")
+
+        for bad in ("/etc/passwd", "../x", "a/../../b", "C:\\x", ""):
+            out = workspace.call("write", json.dumps(
+                {"path": bad, "content": "x"}), cfg)
+            check(any(word in out for word in ("只写工作区", "不要有", "空的",
+                                               "要给一个路径")),
+                  "该拒：%r -> %r" % (bad, out))
+        cfg.write_max_chars = 4
+        out = workspace.call("write", json.dumps(
+            {"path": "big.txt", "content": "12345"}), cfg)
+        check("太长" in out, "超上限要拒：%r" % out)
+
+        run_cfg = _loop_config(name="自检", data_dir=workdir)
+        run_cfg.run_enabled = True
+        run_cfg.run_allow = "cat ls"
+        locked = shell.call("run", json.dumps(
+            {"command": "cat /etc/palimpsest/credentials.yaml"}), run_cfg)
+        check("不给读" in locked, "凭证该拒：%r" % locked)
+        key = shell.call("run", json.dumps(
+            {"command": "ls server.pem"}), run_cfg)
+        check("不给读" in key, "密钥该拒：%r" % key)
+        plain = shell.call("run", json.dumps(
+            {"command": "cat loop/README.md"}), run_cfg)
+        check("不给读" not in plain, "普通文件不该拒：%r" % plain)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def check_stop_raises() -> None:
     """要重启时直接在等里退出：记录里一个字都不留。"""
     workdir = tempdir("loop-stop-")
@@ -1561,6 +1614,7 @@ def main() -> int:
     check_shell()
     check_ask()
     check_record_marks()
+    check_workspace()
     print("ok: %d checks" % CHECKS[0])
     return 0
 

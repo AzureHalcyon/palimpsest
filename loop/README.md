@@ -14,7 +14,8 @@
 | `web.py` | 网页面与接口：`/say` `/feed` `/context` `/state`（只读库、只写 inbox） |
 | `web/index.html` | 单页界面：思考-调用时间线 + 上下文分块监视 |
 | `memory_bridge.py` | 工具面：remember / recall / recollect |
-| `shell.py` | 命令工具 `run`：白名单、不经 shell、超时、输出截断（默认关） |
+| `shell.py` | 命令工具 `run`：白名单、不经 shell、超时、输出截断、拒读凭证（默认关） |
+| `workspace.py` | 工作区 `write`：只写 `<data>/workspace`，拒绝对路径与 `..` |
 | `prompt_files.py` | 读 `prompts/` 下的文本，填 `$占位符` |
 | `prompts/` | 提示词：sink、压缩、工具说明 |
 | `logs.py` | 运行时日志：`data/loop/loop.log`，轮转 5 MB × 5 |
@@ -136,6 +137,22 @@ CLI 的 stdin、以后的 HTTP、任务跑完自己插一行。醒来写成记�
 就接着等。等的时候顺手压缩（块满就地压）。
 
 没有输入通道（不加 `--stdin`）时，无上界的等会直接停住——本地调试不会挂着不走。
+
+## 工作区
+
+`<data>/workspace` 是它自己的地方：跑命令的 cwd 就在这儿，写东西也只写这儿。
+
+| 工具 | 能做什么 | 闸门 |
+|---|---|---|
+| `run` | 跑白名单里的**只读**命令 | 第一段程序名 + 不经 shell + 拒读凭证 |
+| `write` | 往工作区写文件（覆盖 / 追加） | 只写 `<data>/workspace`：绝对路径、`..`、解析后跑出工作区的都拒；单次上限 `write_max_chars`（默认 10 万字） |
+
+为什么不把写命令并进 `run`：`<data>/` 是服务用户可写的，白名单里放 `tee` / `mkdir`
+等于把改 `loop.sqlite3`、`graph.json` 的权限也交出去。`write` 只管工作区这一块，
+其余留给 `run` 的只读面。
+
+那里的 `README.md` 是给人（和它）看的约定：草稿、收件箱、脚本各放哪。它不写这个文件，
+改了也不会被覆盖——只是部署时放了一份。
 
 ## 现在的边界
 
@@ -292,3 +309,7 @@ python -m loop.selfcheck       # 只跑这一层（不联网、不用凭证）
 
 工具名与说明在 `prompts/tools.txt` 的 `## run` / `## run.command`；闸门与执行在
 `shell.py`（`allowed()` 判第一段，`execute()` 负责切分、超时、截断）。
+
+**拒读凭证**：命令参数里点到 `/etc/palimpsest`、`credentials.yaml`、`web-token`、
+`*.pem`、`.ssh` 一类就直接拒（`_sensitive()`）。这不是沙箱——源码、数据、日志随便读，
+只有"读出来会进记录"的那些被挡。
