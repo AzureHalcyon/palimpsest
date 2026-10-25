@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from memory_v2.chat import tools
 from memory_v2.chat.loop import EventChat
+from memory_v2 import edits
 from memory_v2.consolidate.replay import consolidate
 from memory_v2.core.config import ChatConfig
 from memory_v2.core.embed import cosine
@@ -297,4 +298,47 @@ assert segmented and segmented[0]["start"] <= 2 <= segmented[0]["end"], segmente
 shutil.rmtree(data2, ignore_errors=True)
 
 shutil.rmtree(data, ignore_errors=True)
+
+# ── 编辑清单：改名 / 删事件 / 剪边 ──────────────────────────────
+data3 = tempdir("mem-edits-")
+graph3 = Graph(os.path.join(data3, "graph.json"))
+first3 = graph3.new_event_id()
+second3 = graph3.new_event_id()
+third3 = graph3.new_event_id()
+for event_id, name in ((first3, "甲"), (second3, "乙"), (third3, "丙")):
+    graph3.events[event_id] = {"name": name, "segments": [], "seq": 1}
+graph3.edges["e1"] = {"a": first3, "b": second3, "relation": "相关", "strength": 0.5}
+graph3.edges["e2"] = {"a": second3, "b": third3, "relation": "属于", "strength": 0.4}
+graph3.pairs["p1"] = {"a": second3, "b": third3}
+graph3.save()
+
+ops_file = os.path.join(data3, "edits.json")
+with open(ops_file, "w", encoding="utf-8") as handle:
+    json.dump({"ops": [{"op": "rename", "id": first3, "name": "甲改"},
+                       {"op": "unlink", "a": first3, "b": second3},
+                       {"op": "delete", "id": second3},
+                       {"op": "delete", "id": "没有这一件"}]},
+              handle, ensure_ascii=False)
+payload = edits.load(ops_file)
+result = edits.apply(graph3, payload["ops"])
+assert result["changed"] == 3, result
+assert result["skipped"] and "找不到" in result["skipped"][0], result
+assert graph3.events[first3]["name"] == "甲改", graph3.events[first3]
+assert second3 not in graph3.events, graph3.events
+assert not [key for key, edge in graph3.edges.items()
+            if second3 in (edge.get("a"), edge.get("b"))], graph3.edges
+assert not [key for key, pair in graph3.pairs.items()
+            if second3 in (pair.get("a"), pair.get("b"))], graph3.pairs
+saved = edits.backup(graph3.path)
+graph3.save()
+assert saved and os.path.exists(saved), saved
+# 同名不让改：甲改 已经占了，另一件改成它会跳过
+with open(ops_file, "w", encoding="utf-8") as handle:
+    json.dump({"ops": [{"op": "rename", "id": third3, "name": "甲改"}]},
+              handle, ensure_ascii=False)
+again = edits.apply(graph3, edits.load(ops_file)["ops"])
+assert again["changed"] == 0 and again["skipped"], again
+assert graph3.events[third3]["name"] == "丙", graph3.events[third3]
+shutil.rmtree(data3, ignore_errors=True)
+
 print("OK")

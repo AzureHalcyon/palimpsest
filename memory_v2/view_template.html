@@ -1,0 +1,1612 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>记忆网络 · 岚 / 汐</title>
+<style>
+:root{
+  --bg:#0a0d13; --card:#111722; --line:#1e2838; --text:#cfd9e8; --dim:#6d7d94;
+  --accent:#7fb4ff; --warm:#ffb066; --gold:#ffd479;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font:13px/1.55 "Microsoft YaHei","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+canvas.grabbing{cursor:grabbing}
+
+#topbar{position:fixed;inset:0 0 auto 0;z-index:20;display:flex;flex-wrap:wrap;gap:6px 10px;
+  align-items:center;padding:10px 14px;pointer-events:none}
+#topbar>*{pointer-events:auto}
+.brand{font-weight:600;letter-spacing:.14em;color:#e6edf9;font-size:13px;margin-right:4px}
+.tabs{display:flex;gap:4px}
+.tab{padding:3px 11px;border-radius:999px;border:1px solid var(--line);background:#0f141dcc;
+  color:var(--dim);font:inherit;cursor:pointer}
+.tab.on{background:var(--accent);border-color:var(--accent);color:#0a0d13;font-weight:600}
+input[type=search],select{background:#0f141dcc;border:1px solid var(--line);color:var(--text);
+  border-radius:6px;padding:4px 8px;font:inherit;outline:none}
+input[type=search]{width:186px}
+input[type=search]:focus{border-color:var(--accent)}
+.chk{display:inline-flex;align-items:center;gap:5px;color:var(--dim);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--accent)}
+button.fit{background:#0f141dcc;border:1px solid var(--line);color:var(--dim);border-radius:6px;
+  padding:4px 10px;font:inherit;cursor:pointer}
+button.fit:hover{color:var(--text);border-color:#2c3b52}
+input[type=range]{width:70px;accent-color:var(--accent)}
+.stamp{color:#5d6c82;font-size:11px;margin-left:4px;font-variant-numeric:tabular-nums}
+
+#panel{position:fixed;top:56px;right:12px;bottom:12px;width:308px;z-index:15;
+  display:flex;flex-direction:column;gap:9px;overflow-y:auto;padding-right:2px}
+#panel::-webkit-scrollbar{width:6px}
+#panel::-webkit-scrollbar-thumb{background:#1e2838;border-radius:3px}
+.card{background:#111722e0;border:1px solid var(--line);border-radius:10px;padding:10px 12px;
+  backdrop-filter:blur(8px)}
+.card h2{margin:0 0 7px;font-size:11px;letter-spacing:.12em;color:var(--dim);font-weight:600}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px}
+.kv b{color:#e6edf9;font-weight:500;justify-self:end;font-variant-numeric:tabular-nums}
+.detail-name{font-size:14px;color:#f0f5ff;line-height:1.4;margin-bottom:4px}
+.snippet{color:#8fa0b8;font-size:12px;margin:6px 0 8px;white-space:pre-wrap;max-height:104px;overflow:hidden}
+.feed{margin:4px 0 0;padding:7px 9px;background:#0b111b;border:1px solid var(--line);border-radius:6px;
+ color:#a7b6ca;font:11.5px/1.55 Consolas,"Cascadia Mono",monospace;white-space:pre-wrap;
+ max-height:230px;overflow:auto}
+details.fold{margin:4px 0 0}
+details.fold > summary{cursor:pointer;color:#5d6c82;font-size:11px;padding:2px 0;list-style:none}
+details.fold > summary::-webkit-details-marker{display:none}
+details.fold > summary::before{content:"▸ ";color:#41506a}
+details.fold[open] > summary::before{content:"▾ "}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{font-size:11px;padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:#9fb0c8}
+.chip.click{cursor:pointer}
+.chip.click:hover{border-color:var(--accent);color:var(--accent)}
+.act-row{display:grid;grid-template-columns:20px 1fr 42px;gap:6px;align-items:center;
+  padding:2px 4px;border-radius:4px;cursor:pointer;font-size:12px}
+.act-row:hover{background:#19212e}
+.act-row .rank{color:#56657c;font-size:11px;text-align:right}
+.act-row .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-row .sc{color:var(--warm);font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+.hop{font-size:10px;padding:0 5px;border-radius:999px;margin-left:4px;color:#0a0d13;background:#ffd479}
+.hop2{background:#ff9d5c}
+.btnrow{display:flex;gap:6px;margin-top:8px}
+.btnrow button{flex:1;background:#16202e;border:1px solid var(--line);color:#a9bacf;border-radius:6px;
+  padding:5px 0;font:inherit;cursor:pointer}
+.btnrow button:hover{border-color:var(--accent);color:var(--accent)}
+.note{color:#5d6c82;font-size:11px;line-height:1.5;margin-top:8px}
+.edlist{margin-top:4px;max-height:150px;overflow:auto}
+.edrow{display:flex;align-items:center;gap:6px;padding:2px 4px;border-radius:4px;
+  font-size:11.5px;color:#9fb2c8}
+.edrow:hover{background:#19212e}
+.edrow button{margin-left:auto;background:#1d1116;border:1px solid #4a2730;
+  color:#ff9d9d;border-radius:5px;padding:1px 6px;font:inherit;cursor:pointer}
+.edrow button:hover{border-color:#ff6b6b;color:#ffd0d0}
+.fit[disabled]{opacity:.45;cursor:default}
+.swatch{display:inline-block;width:16px;height:0;border-top:2px solid #8fc3ff}
+#legend{position:fixed;left:14px;bottom:12px;z-index:15;background:#111722d9;border:1px solid var(--line);
+  border-radius:10px;padding:9px 11px;font-size:11.5px;color:#8496ae;max-width:342px;backdrop-filter:blur(8px)}
+#legend .row{display:flex;align-items:center;gap:7px;margin:2px 0}
+#legend .grad{width:92px;height:6px;border-radius:3px;flex:none;
+  background:linear-gradient(90deg,hsl(200,72%,62%),hsl(265,72%,62%),hsl(330,72%,62%))}
+#tip{position:fixed;z-index:30;pointer-events:none;background:#0d131cd9;border:1px solid #2a374c;
+  border-radius:8px;padding:6px 9px;font-size:12px;color:#d6e1f1;max-width:262px;
+  opacity:0;transition:opacity .08s;backdrop-filter:blur(6px)}
+#tip .tn{color:#fff;font-weight:600;margin-bottom:2px}
+#tip .tm{color:#7d8ea6;font-size:11px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="topbar">
+  <span class="brand">记忆网络</span>
+  <span class="tabs" id="tabs"></span>
+  <input id="search" type="search" placeholder="搜索事件名，回车定位">
+  <select id="layout">
+    <option value="force">链接布局</option>
+    <option value="semantic">语义投影</option>
+  </select>
+  <label class="chk"><input type="checkbox" id="contentOn" checked>内容近邻</label>
+  <input type="range" id="contentK" min="1" max="8" value="4" title="每个节点显示的内容近邻条数">
+  <label class="chk"><input type="checkbox" id="hubOn">枢纽</label>
+  <label class="chk"><input type="checkbox" id="isoOn">孤立</label>
+  <label class="chk" title="打开后拖节点会把它连着一圈邻居一起拉动；关着时拖动等于平移画面"><input type="checkbox" id="dragOn">拖动节点</label>
+  <label class="chk" title="收敛后节点以 1~2 像素幅度缓慢浮动"><input type="checkbox" id="breathOn" checked>漂浮</label>
+  <button class="fit" id="fit">适应窗口</button>
+  <button class="fit" id="exportEdits" disabled>导出编辑清单</button>
+  <button class="fit" id="clearEdits">清空改动</button>
+  <span class="stamp" id="stamp"></span>
+</div>
+
+<div id="legend">
+  <div class="row"><span class="swatch" style="border-color:#8fc3ff"></span>跨场次边</div>
+  <div class="row"><span class="swatch" style="border-color:#5f7fb8"></span>同场次边（模型声明）</div>
+  <div class="row"><span class="swatch" style="border-color:#ffb066"></span>重放主干（support &gt; 0）</div>
+  <div class="row"><span class="swatch" style="border-color:#ffffff44;border-top-style:dashed"></span>内容近邻（1024 维向量）</div>
+  <div class="row"><span class="grad"></span>节点颜色＝首现场次（早 → 晚）</div>
+</div>
+
+<aside id="panel">
+  <section class="card" id="overview"></section>
+  <section class="card" id="detail"></section>
+  <section class="card" id="actCard"></section>
+</aside>
+
+<div id="tip"></div>
+
+<script id="payload" type="application/json">__PAYLOAD__</script>
+<script>
+"use strict";
+
+const payload = JSON.parse(document.getElementById("payload").textContent);
+const LIVE = payload.live === true;
+const DEBUG = new URLSearchParams(window.location.search).get("debug") === "1";
+const canvas = document.getElementById("cv");
+const ctx = canvas.getContext("2d");
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+const tip = document.getElementById("tip");
+
+const S = {
+  ai: null, nodes: [], edges: [], content: [], sessions: [], traces: {}, stats: {},
+  adj: [], contentRank: new Map(),
+  mode: "force",
+  view: {scale: 1, tx: 0, ty: 0},
+  hover: -1, selected: -1,
+  act: null, actMap: new Map(), pulses: [],
+  contentOn: true, contentK: 4, hubOn: false, isoOn: false, dragOn: false, breathOn: true,
+  filter: "", drag: null, moved: false, edits: [],
+  animating: false, queued: false,
+  live: LIVE, state: null, generated: "", sim: { temp: 0 },
+};
+
+function aiList() {
+  return LIVE ? (S.state ? S.state.ais : []) : payload.ais;
+}
+
+/* ------------------------------------------------------------------ 基础 */
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const esc = (text) => String(text == null ? "" : text)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// 节点互斥强度：1/d 的长程推力。画布尺度约 620，平均间距想落在 40 上下。
+const CHARGE = 300;
+// 位置存本地：换 tab、刷新、切 AI 都接着上次的排法，不再每次重新长一张。
+const POS_KEY = "palimpsest-graph-pos:v1:";
+
+function sessionColor(index) {
+  const count = S.sessions.length;
+  const ratio = count <= 1 ? 0 : index / (count - 1);
+  return "hsl(" + Math.round(200 + 130 * ratio) + ",72%,62%)";
+}
+
+function nodeRadius(node) {
+  return 3.2 + Math.sqrt(node.d + 1) * 2.0 + Math.min(0.6, node.c) * 6;
+}
+
+function shortSession(name) {
+  return String(name || "").replace(/^\d{4}-/, "");
+}
+
+function matches(node) {
+  if (!S.filter) return true;
+  const needle = S.filter.toLowerCase();
+  return (node.n + " " + node.t + " " + node.ctx).toLowerCase().includes(needle);
+}
+
+/* ------------------------------------------------------------------ 数据 */
+
+function buildAdjacency() {
+  S.adj = S.nodes.map(() => []);
+  for (const edge of S.edges) {
+    if (edge.cut) continue;
+    S.adj[edge.a].push({ i: edge.b, rel: edge.rel, strength: edge.strength, kind: "edge" });
+    S.adj[edge.b].push({ i: edge.a, rel: edge.rel, strength: edge.strength, kind: "edge" });
+  }
+}
+
+function loadAi(key, previousNodes, previousId) {
+  const source = aiList();
+  const ai = source.find((item) => item.key === key) || source[0];
+  if (!ai) return;
+  S.ai = ai;
+  S.nodes = ai.nodes.map((node) => Object.assign({}, node));
+  S.groups = S.nodes.map((node) => node.g || 0);
+  S.groupCount = S.groups.reduce((largest, value) => Math.max(largest, value), 0) + 1;
+  S.edges = ai.edges.map((row) => ({
+    a: row[0], b: row[1], rel: row[2], strength: row[3],
+    support: row[4], source: !!row[5], cross: !!row[6],
+  }));
+  S.content = ai.content;
+  S.sessions = ai.sessions;
+  S.traces = ai.traces || {};
+  S.stats = ai.stats;
+  S.contentRank = new Map();
+  for (const row of ai.content) {
+    const key2 = Math.min(row[0], row[1]) + ":" + Math.max(row[0], row[1]);
+    S.contentRank.set(key2, row[3] === undefined ? 0 : row[3]);
+  }
+  S.act = null;
+  S.actMap = new Map();
+  S.pulses = [];
+  S.hover = -1;
+  buildAdjacency();
+
+  if (LIVE) {
+    const firstLoad = !(previousNodes && previousNodes.length);
+    const stored = firstLoad ? loadPositions(S.ai.key) : null;
+    const cold = firstLoad && !(stored && Object.keys(stored).length);
+    placeNodes(previousNodes || [], previousId || "", stored);
+    // 只有真的有新节点才升温；升温也只动新节点和它的一跳邻居，其余钉住
+    S.sim.temp = cold ? 50 : (S.fresh.length ? 18 : 0);
+    S.sim.saved = false;
+    S.sim.fitted = !cold;
+    if (cold) settleLayout(320);
+    updateTabs();
+    renderPanel();
+    if (firstLoad) {
+      // 有存档也把视野对准一次，只是不再重排；之后的刷新不动视野
+      fitView();
+      if (cold) savePositions();
+    }
+    return;
+  }
+
+  S.selected = -1;
+  updateTabs();
+  document.getElementById("layout").value = "force";
+  applyLayout("force");
+  renderPanel();
+}
+
+/* 实时模式：位置按 id 沿用上一次的，新节点先落在已定位邻居旁边。 */
+function loadPositions(key) {
+  try {
+    const raw = localStorage.getItem(POS_KEY + key);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function savePositions() {
+  // 语义投影下 px/py 不是力导向坐标，存了会把布局弄坏
+  if (!LIVE || S.mode !== "force" || !S.ai || !S.nodes || !S.nodes.length) return;
+  const out = {};
+  for (const node of S.nodes) {
+    if (typeof node.px === "number") {
+      out[node.id] = [Math.round(node.px * 10) / 10, Math.round(node.py * 10) / 10];
+    }
+  }
+  try {
+    localStorage.setItem(POS_KEY + S.ai.key, JSON.stringify(out));
+  } catch (error) {
+    // 存不下就退回「每次重新排」
+  }
+}
+
+function placeNodes(previousNodes, previousId, stored) {
+  const previous = new Map(previousNodes.map((node) => [node.id, node]));
+  const nodes = S.nodes;
+  const hasStored = !!(stored && Object.keys(stored).length);
+  const seeded = previousNodes.length > 0 || hasStored;
+  for (const node of nodes) {
+    const old = previous.get(node.id);
+    if (old && typeof old.px === "number") {
+      node.px = old.px;
+      node.py = old.py;
+    } else if (hasStored && stored[node.id]) {
+      node.px = stored[node.id][0];
+      node.py = stored[node.id][1];
+    } else if (!seeded && typeof node.sx === "number") {
+      // 只有首屏才用语义坐标当起点；后来的新节点一律落在邻居旁边
+      node.px = node.sx;
+      node.py = node.sy;
+    }
+  }
+  for (let index = 0; index < nodes.length; index++) {
+    if (typeof nodes[index].px === "number") continue;
+    const neighbours = [];
+    for (const edge of S.edges) {
+      const other = edge.a === index ? edge.b : (edge.b === index ? edge.a : -1);
+      if (other >= 0 && typeof nodes[other].px === "number") neighbours.push(nodes[other]);
+    }
+    if (neighbours.length) {
+      // 从邻居那一团往外让开一个静止长度左右，别正好压在邻居身上
+      const anchor = neighbours[0];
+      const cx = neighbours.reduce((sum, item) => sum + item.px, 0) / neighbours.length;
+      const cy = neighbours.reduce((sum, item) => sum + item.py, 0) / neighbours.length;
+      const angle = Math.atan2(anchor.py - cy, anchor.px - cx) +
+        (Math.random() - 0.5) * 0.6;
+      nodes[index].px = anchor.px + Math.cos(angle) * 18;
+      nodes[index].py = anchor.py + Math.sin(angle) * 18;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      nodes[index].px = Math.cos(angle) * 320;
+      nodes[index].py = Math.sin(angle) * 320;
+    }
+  }
+  S.selected = previousId ? nodes.findIndex((node) => node.id === previousId) : -1;
+  if (S.selected < 0) S.selected = -1;
+
+  // 记住旧位置当锚点；只有这次新出现的节点可以自由移动，其余要么钉住、
+  // 要么（新节点一到两跳内的邻居）被锚点轻轻拉回，整张图不会重排。
+  const fresh = [];
+  for (let index = 0; index < nodes.length; index++) {
+    const old = previous.get(nodes[index].id);
+    const known = (old && typeof old.px === "number")
+      ? [old.px, old.py]
+      : (hasStored && stored[nodes[index].id] ? stored[nodes[index].id] : null);
+    if (known) {
+      nodes[index].ax = known[0];
+      nodes[index].ay = known[1];
+    } else {
+      fresh.push(index);
+    }
+  }
+  // 一跳跟着动得多，二跳只是被带着轻轻让位，更远的一条边都不挪
+  const hop = new Map();
+  for (const index of fresh) hop.set(index, 0);
+  for (let depth = 1; depth <= 2; depth++) {
+    for (const index of Array.from(hop.keys())) {
+      if (hop.get(index) !== depth - 1) continue;
+      for (const edge of S.edges) {
+        const other = edge.a === index ? edge.b : (edge.b === index ? edge.a : -1);
+        if (other >= 0 && !hop.has(other)) hop.set(other, depth);
+      }
+    }
+  }
+  const moving = new Set(hop.keys());
+  for (const [index, depth] of hop) {
+    nodes[index].ak = depth === 0 ? 0 : (depth === 1 ? 0.1 : 0.045);
+  }
+  S.fresh = fresh;
+  S.freshSet = new Set(fresh);
+  S.moving = moving;
+}
+
+function applyLayout(mode) {
+  S.mode = mode;
+  if (!LIVE) {
+    for (const node of S.nodes) {
+      node.px = mode === "semantic" ? node.sx : node.x;
+      node.py = mode === "semantic" ? node.sy : node.y;
+    }
+    fitView();
+    return;
+  }
+  if (mode === "semantic") {
+    for (const node of S.nodes) {
+      node.fx = node.px;
+      node.fy = node.py;
+      if (typeof node.sx === "number") {
+        node.px = node.sx;
+        node.py = node.sy;
+      }
+    }
+    S.sim.temp = 0;
+  } else {
+    for (const node of S.nodes) {
+      if (typeof node.fx === "number") {
+        node.px = node.fx;
+        node.py = node.fy;
+      }
+    }
+    S.sim.temp = 50;
+    S.sim.fitted = false;
+  }
+  fitView();
+}
+
+function updateTabs() {
+  const holder = document.getElementById("tabs");
+  holder.innerHTML = aiList().map((ai) =>
+    '<button class="tab' + (S.ai && ai.key === S.ai.key ? " on" : "") + '" data-key="' + ai.key + '">' +
+    esc(ai.label) + " · " + ai.stats.events + "</button>").join("");
+  holder.querySelectorAll(".tab").forEach((button) => {
+    button.addEventListener("click", () => switchAi(button.dataset.key));
+  });
+}
+
+function switchAi(key) {
+  if (!S.ai || key === S.ai.key) return;
+  loadAi(key, [], "");
+}
+
+/* ------------------------------------------------------------------ 视图 */
+
+function fitView(only) {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of S.nodes) {
+    if (only && only.length && !only.includes(node)) continue;
+    minX = Math.min(minX, node.px); maxX = Math.max(maxX, node.px);
+    minY = Math.min(minY, node.py); maxY = Math.max(maxY, node.py);
+  }
+  if (!isFinite(minX)) return;
+  const panel = 330;
+  const pad = 44;
+  const scale = Math.min(
+    (width - panel - pad * 2) / Math.max(1, maxX - minX),
+    (height - 100 - pad * 2) / Math.max(1, maxY - minY),
+    2.2
+  );
+  S.view.scale = clamp(scale, 0.12, 6);
+  S.view.tx = (width - panel) / 2 - (minX + maxX) / 2 * S.view.scale;
+  S.view.ty = height / 2 + 8 - (minY + maxY) / 2 * S.view.scale;
+  requestRender();
+}
+
+function toScreen(x, y) {
+  return [x * S.view.scale + S.view.tx, y * S.view.scale + S.view.ty];
+}
+
+function toWorld(sx, sy) {
+  return [(sx - S.view.tx) / S.view.scale, (sy - S.view.ty) / S.view.scale];
+}
+
+function zoomAt(sx, sy, factor) {
+  const [wx, wy] = toWorld(sx, sy);
+  const scale = clamp(S.view.scale * factor, 0.12, 7);
+  S.view.scale = scale;
+  S.view.tx = sx - wx * scale;
+  S.view.ty = sy - wy * scale;
+  requestRender();
+}
+
+/* ------------------------------------------------------------------ 绘制 */
+
+function resize() {
+  canvas.width = Math.floor(window.innerWidth * DPR);
+  canvas.height = Math.floor(window.innerHeight * DPR);
+  requestRender();
+}
+
+function requestRender() {
+  if (S.queued) return;
+  S.queued = true;
+  requestAnimationFrame((now) => {
+    S.queued = false;
+    S.frames = (S.frames || 0) + 1;
+    try {
+      stepRender(now);
+    } catch (error) {
+      S.lastError = String(error);
+    }
+    if (needsAnimation(now) || (S.sim && S.sim.temp > 0.4) || S.breathOn) requestRender();
+  });
+}
+
+/* 静止后的低幅度漂浮：只改画的位置，不动布局本身，所以不会越飘越远。 */
+function breathe(now) {
+  const amp = 2.0 / Math.max(0.12, S.view.scale);
+  for (let i = 0; i < S.nodes.length; i++) {
+    const node = S.nodes[i];
+    const phase = (i * 2.399963) % (Math.PI * 2);
+    node.bx = Math.sin(now / 2900 + phase) * amp;
+    node.by = Math.cos(now / 3400 + phase * 1.7) * amp * 0.8;
+    node.px += node.bx;
+    node.py += node.by;
+  }
+}
+
+function unbreathe() {
+  for (const node of S.nodes) {
+    if (typeof node.bx === "number") {
+      node.px -= node.bx;
+      node.py -= node.by;
+    }
+  }
+}
+
+function stepRender(now) {
+  if (LIVE && S.mode === "force" && S.sim.temp > 0.4) {
+    // 一帧一步，按真实间隔缩放：掉帧时不跳变，高刷屏上也不会加速
+    const dt = S.lastFrame ? clamp((now - S.lastFrame) / 16.667, 0.4, 2.2) : 1;
+    S.lastFrame = now;
+    simulateTick(dt);
+    if (S.sim.temp === 0 && !S.sim.fitted) {
+      S.sim.fitted = true;
+      fitView();
+    }
+  } else {
+    S.lastFrame = 0;
+  }
+  stepAnimations(now);
+  if (S.breathOn && S.nodes.length) {
+    // 漂浮只要 30fps，省电；真正需要动画的帧照常跑
+    const busy = needsAnimation(now) || (S.sim && S.sim.temp > 0.4);
+    if (!busy && now - (S.breathLast || 0) < 32) return;
+    S.breathLast = now;
+    breathe(now);
+    try {
+      draw();
+    } finally {
+      unbreathe();
+    }
+    return;
+  }
+  draw();
+}
+
+function simulateTick(dt = 1) {
+  const nodes = S.nodes;
+  const count = nodes.length;
+  if (count < 2) {
+    S.sim.temp = 0;
+    return;
+  }
+  const disp = new Array(count);
+  const fix = new Array(count);
+  for (let i = 0; i < count; i++) {
+    disp[i] = [0, 0];
+    fix[i] = [0, 0];
+  }
+
+  // 排斥：1/d 的长程推 + 半径级的硬碰硬（大点也不许叠）
+  for (let i = 0; i < count; i++) {
+    const ri = nodeRadius(nodes[i]);
+    for (let j = i + 1; j < count; j++) {
+      let dx = nodes[i].px - nodes[j].px;
+      let dy = nodes[i].py - nodes[j].py;
+      let d2 = dx * dx + dy * dy;
+      if (d2 < 0.01) {
+        // 完全重合时给个确定的方向，别除以 0
+        dx = (i % 7) - 3 + 0.5;
+        dy = (j % 7) - 3 + 0.5;
+        d2 = dx * dx + dy * dy;
+      }
+      const d = Math.max(6, Math.sqrt(d2));
+      const ux = dx / d;
+      const uy = dy / d;
+      const force = CHARGE / d;
+      disp[i][0] += ux * force;
+      disp[i][1] += uy * force;
+      disp[j][0] -= ux * force;
+      disp[j][1] -= uy * force;
+      const gap = ri + nodeRadius(nodes[j]) + 2;
+      if (d < gap) {
+        // 重叠只做位置修正（不进速度），不然会在两个点之间来回弹、看着发抖
+        const push = (gap - d) * 0.5;
+        fix[i][0] += ux * push;
+        fix[i][1] += uy * push;
+        fix[j][0] -= ux * push;
+        fix[j][1] -= uy * push;
+      }
+    }
+  }
+
+  // 弹簧：关系边短而硬，内容近邻长而软
+  const spring = (a, b, rest, stiffness) => {
+    const dx = nodes[b].px - nodes[a].px;
+    const dy = nodes[b].py - nodes[a].py;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    let force = (d - rest) * stiffness;
+    // 拉太长的边（新节点被挤出去那种）额外往回拽，免得吊着一根长线飘在外面
+    const limit = rest * 2.2;
+    if (d > limit) force += (d - limit) * stiffness * 1.6;
+    const ux = dx / d;
+    const uy = dy / d;
+    disp[a][0] += ux * force;
+    disp[a][1] += uy * force;
+    disp[b][0] -= ux * force;
+    disp[b][1] -= uy * force;
+  };
+  for (const edge of S.edges) spring(edge.a, edge.b, 16, 0.7);
+  for (const row of S.content) {
+    if (row[3] !== undefined && row[3] < 3) spring(row[0], row[1], 34, 0.2 * (row[2] || 0.5));
+  }
+
+  // 社区：往自己中心收，被别的中心推开
+  const groupCount = Math.max(1, S.groupCount || 1);
+  const sumX = new Float64Array(groupCount);
+  const sumY = new Float64Array(groupCount);
+  const counts = new Float64Array(groupCount);
+  for (let i = 0; i < count; i++) {
+    const g = S.groups[i] || 0;
+    sumX[g] += nodes[i].px;
+    sumY[g] += nodes[i].py;
+    counts[g] += 1;
+  }
+  const centerX = new Float64Array(groupCount);
+  const centerY = new Float64Array(groupCount);
+  for (let g = 0; g < groupCount; g++) {
+    if (!counts[g]) continue;
+    centerX[g] = sumX[g] / counts[g];
+    centerY[g] = sumY[g] / counts[g];
+  }
+  for (let i = 0; i < count; i++) {
+    const g = S.groups[i] || 0;
+    disp[i][0] += (centerX[g] - nodes[i].px) * 0.05;
+    disp[i][1] += (centerY[g] - nodes[i].py) * 0.05;
+    for (let h = 0; h < groupCount; h++) {
+      if (h === g || !counts[h]) continue;
+      const dx = nodes[i].px - centerX[h];
+      const dy = nodes[i].py - centerY[h];
+      const d2 = Math.max(400, dx * dx + dy * dy);
+      const d = Math.sqrt(d2);
+      const force = 16000 / d2;
+      disp[i][0] += dx / d * force;
+      disp[i][1] += dy / d * force;
+    }
+  }
+
+  // 积分：速度 + 阻尼 + 重力；非本轮的节点钉在锚点上，只当斥力源
+  const moving = S.moving || null;
+  const anchorScale = typeof S.anchorScale === "number" ? S.anchorScale : 1;
+  const damping = Math.pow(0.62, dt);
+  // 力整体按温度缩放：温度越高动得越快，降下来力也变小，收得平滑不再一顿一顿
+  const alpha = clamp(S.sim.temp / 22, 0.04, 1);
+  for (let i = 0; i < count; i++) {
+    if (moving && !moving.has(i)) {
+      if (typeof nodes[i].ax === "number") {
+        nodes[i].px = nodes[i].ax;
+        nodes[i].py = nodes[i].ay;
+      }
+      nodes[i].vx = 0;
+      nodes[i].vy = 0;
+      continue;
+    }
+    let fx = disp[i][0] - nodes[i].px * 0.008;
+    let fy = disp[i][1] - nodes[i].py * 0.008;
+    if (typeof nodes[i].ax === "number" && typeof nodes[i].ak === "number" && nodes[i].ak > 0) {
+      // 新节点附近的点：被锚点拉着，会跟着让位但不会漂走
+      const k = nodes[i].ak * anchorScale;
+      fx += (nodes[i].ax - nodes[i].px) * k;
+      fy += (nodes[i].ay - nodes[i].py) * k;
+    }
+    let vx = ((nodes[i].vx || 0) + fx * alpha) * damping;
+    let vy = ((nodes[i].vy || 0) + fy * alpha) * damping;
+    const speed = Math.sqrt(vx * vx + vy * vy);
+    const cap = 3;
+    if (speed > cap) {
+      vx *= cap / speed;
+      vy *= cap / speed;
+    }
+    nodes[i].vx = vx;
+    nodes[i].vy = vy;
+    nodes[i].px += vx * dt;
+    nodes[i].py += vy * dt;
+    // 位置修正单独加：只推开重叠，不进速度，也不许一帧弹太远
+    const push = fix[i];
+    const pushLen = Math.sqrt(push[0] * push[0] + push[1] * push[1]);
+    if (pushLen > 0) {
+      const scale = Math.min(1, 2.5 / pushLen);
+      nodes[i].px += push[0] * scale;
+      nodes[i].py += push[1] * scale;
+    }
+  }
+
+  S.sim.temp *= Math.pow(0.965, dt);
+  if (S.sim.temp < 0.4) {
+    S.sim.temp = 0;
+    if (!S.sim.saved) {
+      S.sim.saved = true;
+      savePositions();
+    }
+  }
+}
+
+/* 同步跑一段：首屏和刷新后让新节点落位，避免用户看着一堆点往外飞。 */
+function settleLayout(ticks) {
+  for (let i = 0; i < ticks; i++) {
+    if (S.sim.temp <= 0.4) break;
+    simulateTick();
+  }
+  if (S.sim.temp <= 0.4) {
+    S.sim.temp = 0;
+    S.sim.fitted = true;
+    normalizeLayout();
+  }
+}
+
+/* 力导向收敛后坐标尺度由冷却决定，跟画布无关；统一缩放到 span 再交给 fitView。 */
+function normalizeLayout() {
+  const nodes = S.nodes;
+  if (!nodes.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.px); maxX = Math.max(maxX, node.px);
+    minY = Math.min(minY, node.py); maxY = Math.max(maxY, node.py);
+  }
+  const span = 620;
+  const scale = Math.min((2 * span) / Math.max(1, maxX - minX),
+                         (2 * span) / Math.max(1, maxY - minY));
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  for (const node of nodes) {
+    node.px = (node.px - cx) * scale;
+    node.py = (node.py - cy) * scale;
+  }
+}
+
+function stepAnimations(now) {
+  if (S.act) {
+    for (const entry of S.act.entries) {
+      if (entry.shown || now < entry.reveal) continue;
+      entry.shown = true;
+      if (entry.via >= 0) {
+        S.pulses.push({ from: entry.via, to: entry.i, t0: now, dur: 620, hop: entry.hop });
+      }
+    }
+  }
+  S.pulses = S.pulses.filter((pulse) => now - pulse.t0 < pulse.dur);
+}
+
+function needsAnimation(now) {
+  if (S.pulses.length) return true;
+  if (!S.act) return false;
+  return S.act.entries.some((entry) => !entry.shown) || now - S.act.t0 < 1500;
+}
+
+function draw() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  // 背景晕影
+  const glow = ctx.createRadialGradient(width * 0.45, height * 0.45, 40,
+                                        width * 0.45, height * 0.45, Math.max(width, height) * 0.75);
+  glow.addColorStop(0, "rgba(30,46,72,0.32)");
+  glow.addColorStop(1, "rgba(10,13,19,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.translate(S.view.tx, S.view.ty);
+  ctx.scale(S.view.scale, S.view.scale);
+
+  drawContentEdges();
+  drawModelEdges();
+  drawActivationPaths();
+  drawNodes();
+  drawPulses(performance.now());
+
+  ctx.restore();
+  drawLabels();
+  if (DEBUG) {
+    const box = fitBox();
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.font = "12px Consolas, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("scale=" + S.view.scale.toFixed(2) + "  bbox=" + box.w.toFixed(0) + "x" +
+                 box.h.toFixed(0) + "  temp=" + S.sim.temp.toFixed(1) +
+                 "  fitted=" + !!S.sim.fitted + "  frames=" + (S.frames || 0) +
+                 (S.lastError ? "  ERR=" + S.lastError : ""), 12, 70);
+  }
+}
+
+function fitBox() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of S.nodes) {
+    minX = Math.min(minX, node.px); maxX = Math.max(maxX, node.px);
+    minY = Math.min(minY, node.py); maxY = Math.max(maxY, node.py);
+  }
+  return {w: maxX - minX, h: maxY - minY};
+}
+
+function drawContentEdges() {
+  if (!S.contentOn || S.contentK <= 0) return;
+  const px = 1 / S.view.scale;
+  ctx.beginPath();
+  for (const row of S.content) {
+    const a = row[0], b = row[1];
+    const key = Math.min(a, b) + ":" + Math.max(a, b);
+    const rank = S.contentRank.get(key);
+    if (rank === undefined || rank >= S.contentK) continue;
+    const A = S.nodes[a], B = S.nodes[b];
+    if (S.filter && !(matches(A) || matches(B))) continue;
+    ctx.moveTo(A.px, A.py);
+    ctx.lineTo(B.px, B.py);
+  }
+  ctx.strokeStyle = "rgba(214,228,255,0.06)";
+  ctx.lineWidth = 0.7 * px;
+  ctx.stroke();
+}
+
+function drawModelEdges() {
+  const plain = new Path2D();
+  const cross = new Path2D();
+  const hot = new Path2D();
+  for (const edge of S.edges) {
+    if (edge.source || edge.cut) continue;
+    const A = S.nodes[edge.a], B = S.nodes[edge.b];
+    if (S.filter && !(matches(A) || matches(B))) continue;
+    const path = edge.cross ? cross : plain;
+    path.moveTo(A.px, A.py);
+    path.lineTo(B.px, B.py);
+    if (S.hubOn && (A.d >= 5 || B.d >= 5)) {
+      hot.moveTo(A.px, A.py);
+      hot.lineTo(B.px, B.py);
+    }
+  }
+  const px = 1 / S.view.scale;
+  ctx.strokeStyle = "rgba(95,127,184,0.34)";
+  ctx.lineWidth = 0.9 * px;
+  ctx.stroke(plain);
+  ctx.strokeStyle = "rgba(143,195,255,0.5)";
+  ctx.lineWidth = 1.1 * px;
+  ctx.stroke(cross);
+  if (S.hubOn) {
+    ctx.strokeStyle = "rgba(180,212,255,0.55)";
+    ctx.lineWidth = 1.6 * px;
+    ctx.stroke(hot);
+  }
+  for (const edge of S.edges) {
+    if (!edge.source || edge.cut) continue;
+    const A = S.nodes[edge.a], B = S.nodes[edge.b];
+    ctx.strokeStyle = "rgba(255,176,102,0.82)";
+    ctx.lineWidth = (1.5 + Math.min(2.4, edge.support * 0.12)) * px;
+    ctx.beginPath();
+    ctx.moveTo(A.px, A.py);
+    ctx.lineTo(B.px, B.py);
+    ctx.stroke();
+  }
+}
+
+function drawActivationPaths() {
+  if (!S.act) return;
+  const px = 1 / S.view.scale;
+  for (const entry of S.act.entries) {
+    if (!entry.shown || entry.via < 0) continue;
+    const from = S.actMap.has(entry.via) ? entry.via : S.act.seed;
+    const A = S.nodes[from], B = S.nodes[entry.i];
+    ctx.strokeStyle = entry.hop === 1 ? "rgba(255,212,121,0.62)" : "rgba(255,157,92,0.42)";
+    ctx.lineWidth = (entry.hop === 1 ? 1.9 : 1.2) * px;
+    ctx.beginPath();
+    ctx.moveTo(A.px, A.py);
+    ctx.lineTo(B.px, B.py);
+    ctx.stroke();
+  }
+}
+
+function drawNodes() {
+  const now = performance.now();
+  for (let i = 0; i < S.nodes.length; i++) {
+    const node = S.nodes[i];
+    const x = node.px, y = node.py;
+    const r = nodeRadius(node);
+    const lonely = node.d === 0;
+    const dim = (S.filter && !matches(node)) || (S.isoOn && !lonely);
+    const active = S.actMap.get(i);
+    const isSeed = S.act && S.act.seed === i;
+
+    ctx.globalAlpha = dim ? 0.16 : 1;
+
+    if (active) {
+      const t = clamp((now - S.act.t0) / 500, 0, 1);
+      const halo = ctx.createRadialGradient(x, y, r * 0.6, x, y, r * (3.2 + 2.4 * t));
+      halo.addColorStop(0, "rgba(255,196,110,0.30)");
+      halo.addColorStop(1, "rgba(255,140,60,0)");
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, r * (3.2 + 2.4 * t), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = isSeed ? "#ffffff" : (active ? "#ffd479" : sessionColor(node.s.length ? node.s[0] : 0));
+    ctx.fill();
+    ctx.lineWidth = 0.6 / S.view.scale;
+    ctx.strokeStyle = "rgba(10,13,19,0.85)";
+    ctx.stroke();
+
+    if (i === S.selected) {
+      ctx.beginPath();
+      ctx.arc(x, y, r + 4.5 / S.view.scale, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 1.4 / S.view.scale;
+      ctx.stroke();
+    }
+    if (node.r) {
+      ctx.beginPath();
+      ctx.arc(x, y, r + 2.4 / S.view.scale, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,214,121,0.55)";
+      ctx.lineWidth = 0.9 / S.view.scale;
+      ctx.stroke();
+    }
+    if (node.del) {
+      // 本页标了「删掉」：先画红圈，导出清单后才真删库
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3.2 / S.view.scale, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,90,90,0.95)";
+      ctx.lineWidth = 1.5 / S.view.scale;
+      ctx.stroke();
+    }
+    if (lonely && S.isoOn) {
+      // 孤立节点：没有一条模型边，单独描出来
+      ctx.setLineDash([3 / S.view.scale, 2.4 / S.view.scale]);
+      ctx.beginPath();
+      ctx.arc(x, y, r + 3.6 / S.view.scale, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(140,255,205,0.9)";
+      ctx.lineWidth = 1.2 / S.view.scale;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  if (S.act) {
+    const t = clamp((now - S.act.t0) / 1200, 0, 1);
+    const seed = S.nodes[S.act.seed];
+    ctx.beginPath();
+    ctx.arc(seed.px, seed.py, 8 + t * 90, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(255,212,121," + (0.55 * (1 - t)).toFixed(3) + ")";
+    ctx.lineWidth = 1.4 / S.view.scale;
+    ctx.stroke();
+  }
+}
+
+function drawPulses(now) {
+  for (const pulse of S.pulses) {
+    const A = S.nodes[pulse.from], B = S.nodes[pulse.to];
+    const t = clamp((now - pulse.t0) / pulse.dur, 0, 1);
+    const ease = 1 - Math.pow(1 - t, 2.2);
+    const x = A.px + (B.px - A.px) * ease;
+    const y = A.py + (B.py - A.py) * ease;
+    const r = (pulse.hop === 1 ? 2.6 : 1.9) / Math.sqrt(S.view.scale);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = pulse.hop === 1 ? "rgba(255,226,160,0.95)" : "rgba(255,180,120,0.85)";
+    ctx.fill();
+  }
+}
+
+function drawLabels() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.font = '11px "Microsoft YaHei", system-ui, sans-serif';
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  const showAll = S.view.scale > 1.9;
+  const topActive = new Set();
+  if (S.act) {
+    S.act.entries.slice(0, 4).forEach((entry) => topActive.add(entry.i));
+  }
+
+  const candidates = [];
+  for (let i = 0; i < S.nodes.length; i++) {
+    const node = S.nodes[i];
+    const pinned = i === S.selected || i === S.hover;
+    const important = node.d >= 7 || pinned || topActive.has(i);
+    if (!important && !showAll) continue;
+    if (S.filter && !matches(node)) continue;
+    const [sx, sy] = toScreen(node.px, node.py);
+    if (sx < -60 || sy < -20 || sx > window.innerWidth + 60 || sy > window.innerHeight + 40) continue;
+    const text = node.n.length > 14 ? node.n.slice(0, 14) + "…" : node.n;
+    candidates.push({ i, node, sx, sy, text, pinned });
+  }
+  candidates.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+
+  const placed = [];
+  for (const item of candidates) {
+    const offset = (nodeRadius(item.node) * S.view.scale) + 5;
+    const width = ctx.measureText(item.text).width + 12;
+    const top = item.sy - offset - 14;
+    const box = [item.sx - width / 2, top - 2, item.sx + width / 2, top + 16];
+    const clash = placed.some((other) =>
+      box[2] > other[0] && box[0] < other[2] && box[3] > other[1] && box[1] < other[3]);
+    if (clash && !item.pinned) continue;
+    placed.push(box);
+
+    ctx.fillStyle = "rgba(6,9,14,0.9)";
+    ctx.fillText(item.text, item.sx + 1, item.sy - offset + 1);
+    ctx.fillStyle = S.nodes[item.i].del ? "#ff9d9d"
+      : item.i === S.selected ? "#ffffff"
+      : (S.actMap.has(item.i) ? "#ffe6b8" : "rgba(200,214,235,0.88)");
+    ctx.fillText(item.text, item.sx, item.sy - offset);
+  }
+}
+
+/* ------------------------------------------------------------------ 交互 */
+
+function pick(wx, wy) {
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let i = 0; i < S.nodes.length; i++) {
+    const node = S.nodes[i];
+    const dx = node.px - wx;
+    const dy = node.py - wy;
+    const distance = Math.hypot(dx, dy);
+    const radius = nodeRadius(node) + 7 / S.view.scale;
+    if (distance < radius && distance < bestDistance) {
+      best = i;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/* ------------------------------------------------------------------ 编辑
+ * 页面只攒改动，不写库：改名 / 删事件 / 剪边都先在本页生效（看得见结果），
+ * 导出 edits.json 之后再 `python -m memory_v2 apply` 落到 graph.json。
+ * 这样记忆图仍然只有一个写者（循环进程），页面这边永远只读。
+ */
+function pushEdit(op) {
+  S.edits.push(op);
+  refreshEditBadge();
+}
+
+function refreshEditBadge() {
+  const button = document.getElementById("exportEdits");
+  if (!button) return;
+  button.textContent = S.edits.length
+    ? "导出编辑清单 (" + S.edits.length + ")" : "导出编辑清单";
+  button.disabled = !S.edits.length;
+}
+
+function renameSelected() {
+  if (S.selected < 0) return;
+  const node = S.nodes[S.selected];
+  const answer = prompt("改成什么名字？（导出清单后才写库）", node.n);
+  if (answer === null) return;
+  const name = String(answer).trim();
+  if (!name || name === node.n) return;
+  node.n = name;
+  pushEdit({op: "rename", id: node.id, name: name});
+  renderPanel();
+  requestRender();
+}
+
+function deleteSelected() {
+  if (S.selected < 0) return;
+  const node = S.nodes[S.selected];
+  if (node.del) {
+    node.del = false;
+    S.edits = S.edits.filter((op) => !(op.op === "delete" && op.id === node.id));
+    refreshEditBadge();
+  } else {
+    node.del = true;
+    pushEdit({op: "delete", id: node.id});
+  }
+  renderPanel();
+  requestRender();
+}
+
+function cutEdge(from, to) {
+  if (from < 0 || to < 0) return;
+  const a = S.nodes[from].id;
+  const b = S.nodes[to].id;
+  S.edges.forEach((edge) => {
+    if ((edge.a === from && edge.b === to) || (edge.a === to && edge.b === from)) edge.cut = true;
+  });
+  buildAdjacency();
+  pushEdit({op: "unlink", a: a, b: b});
+  renderPanel();
+  requestRender();
+}
+
+function exportEdits() {
+  if (!S.edits.length) return;
+  const out = {
+    data: (S.ai && S.ai.data) || "",
+    generated: new Date().toISOString(),
+    ops: S.edits,
+  };
+  const blob = new Blob([JSON.stringify(out, null, 2)], {type: "application/json"});
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "edits.json";
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 800);
+}
+
+function clearEdits() {
+  S.edits = [];
+  S.nodes.forEach((node) => { delete node.del; });
+  S.edges.forEach((edge) => { delete edge.cut; });
+  buildAdjacency();
+  refreshEditBadge();
+  renderPanel();
+  requestRender();
+}
+
+function selectNode(index) {
+  S.selected = index;
+  if (index >= 0) playActivation(index);
+  renderPanel();
+  requestRender();
+}
+
+function playActivation(seed, rows) {
+  if (rows === undefined) {
+    if (LIVE) {
+      const node = S.nodes[seed];
+      const token = (S.actToken = (S.actToken || 0) + 1);
+      fetch("/api/spread?ai=" + encodeURIComponent(S.ai.key) +
+            "&seed=" + encodeURIComponent(node.id), { cache: "no-store" })
+        .then((response) => response.json())
+        .then((data) => {
+          if (token !== S.actToken) return;
+          const byId = new Map(S.nodes.map((item, index) => [item.id, index]));
+          const mapped = (data.entries || []).map(([id, score, hop, via]) => {
+            const index = byId.get(id);
+            if (index === undefined) return null;
+            const parent = via ? byId.get(via) : undefined;
+            return [index, score, hop, parent === undefined ? -1 : parent];
+          }).filter(Boolean);
+          playActivation(seed, mapped);
+        })
+        .catch(() => playActivation(seed, []));
+      return;
+    }
+    rows = S.traces[String(seed)] || [];
+  }
+  const now = performance.now();
+  const entries = rows.map((row, order) => ({
+    i: row[0], score: row[1], hop: row[2], via: row[3],
+    reveal: now + 160 + Math.max(0, row[2] - 1) * 620 + order * 55,
+    shown: false,
+  }));
+  S.act = { seed: seed, entries: entries, t0: now };
+  S.actMap = new Map();
+  for (const entry of entries) S.actMap.set(entry.i, entry);
+  S.pulses = [];
+  requestRender();
+  renderPanel();
+}
+
+function clearActivation() {
+  S.act = null;
+  S.actMap = new Map();
+  S.selected = -1;
+  S.pulses = [];
+  renderPanel();
+  requestRender();
+}
+
+function showTip(index, clientX, clientY) {
+  if (index < 0) {
+    tip.style.opacity = "0";
+    return;
+  }
+  const node = S.nodes[index];
+  const sessionsText = node.s.map((value) => shortSession(S.sessions[value])).join(" · ");
+  tip.innerHTML = '<div class="tn">' + esc(node.n) + "</div>" +
+    '<div class="tm">场次 ' + esc(sessionsText || "—") + " · 连接 " + node.d +
+    (node.r ? " · 标记" : "") + "</div>" +
+    (node.t ? '<div class="tm" style="margin-top:4px;color:#9fb0c8">' + esc(node.t.slice(0, 70)) + "</div>" : "");
+  tip.style.opacity = "1";
+  const width = tip.offsetWidth || 220;
+  tip.style.left = Math.min(clientX + 14, window.innerWidth - width - 12) + "px";
+  tip.style.top = Math.min(clientY + 14, window.innerHeight - 90) + "px";
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const hit = pick(wx, wy);
+  S.moved = false;
+  S.sim.fitted = true;
+  if (hit >= 0 && S.dragOn) {
+    S.drag = { type: "node", i: hit, dx: S.nodes[hit].px - wx, dy: S.nodes[hit].py - wy };
+    if (LIVE) {
+      // 拖谁就临时放开谁和它的一圈邻居，松手后收回
+      if (S.moving) {
+        S.moving.add(hit);
+        for (const link of S.adj[hit] || []) S.moving.add(link.i);
+      }
+      if (S.freshSet) S.freshSet.add(hit);
+      S.anchorScale = 0.2;
+    }
+  } else {
+    // 关掉拖动节点时，拖节点等于拖画面；但没动过就算点击，仍然选中它
+    S.drag = { type: "pan", hit: hit, sx: event.clientX, sy: event.clientY,
+               tx: S.view.tx, ty: S.view.ty };
+  }
+  canvas.setPointerCapture(event.pointerId);
+  canvas.classList.add("grabbing");
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  if (S.drag && S.drag.type === "node") {
+    const [wx, wy] = toWorld(event.clientX, event.clientY);
+    const node = S.nodes[S.drag.i];
+    node.px = wx + S.drag.dx;
+    node.py = wy + S.drag.dy;
+    S.moved = true;
+    if (LIVE) S.sim.temp = Math.max(S.sim.temp, 18);
+    requestRender();
+    return;
+  }
+  if (S.drag && S.drag.type === "pan") {
+    if (Math.hypot(event.clientX - S.drag.sx, event.clientY - S.drag.sy) > 4) S.moved = true;
+    S.view.tx = S.drag.tx + (event.clientX - S.drag.sx);
+    S.view.ty = S.drag.ty + (event.clientY - S.drag.sy);
+    requestRender();
+    return;
+  }
+  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const hit = pick(wx, wy);
+  if (hit !== S.hover) {
+    S.hover = hit;
+    canvas.style.cursor = hit >= 0 ? "pointer" : "grab";
+    showTip(hit, event.clientX, event.clientY);
+    requestRender();
+  } else if (hit >= 0) {
+    showTip(hit, event.clientX, event.clientY);
+  }
+});
+
+canvas.addEventListener("pointerup", (event) => {
+  canvas.classList.remove("grabbing");
+  const drag = S.drag;
+  S.drag = null;
+  // 松手：锚点恢复原来的力度，拖过的地方就地固定
+  if (LIVE) {
+    S.anchorScale = 1;
+    if (drag && drag.type === "node") {
+      const node = S.nodes[drag.i];
+      node.ax = node.px;
+      node.ay = node.py;
+      if (S.freshSet) S.freshSet.delete(drag.i);
+      savePositions();
+    }
+  }
+  if (!drag || S.moved) return;
+  if (drag.type === "node") {
+    selectNode(drag.i);
+  } else if (typeof drag.hit === "number" && drag.hit >= 0) {
+    selectNode(drag.hit);
+  } else {
+    clearActivation();
+  }
+});
+
+canvas.addEventListener("pointerleave", () => {
+  S.hover = -1;
+  showTip(-1, 0, 0);
+  requestRender();
+});
+
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0014));
+}, { passive: false });
+
+canvas.addEventListener("dblclick", (event) => {
+  const [wx, wy] = toWorld(event.clientX, event.clientY);
+  const hit = pick(wx, wy);
+  if (hit < 0) return;
+  S.view.scale = clamp(S.view.scale * 1.8, 0.12, 7);
+  S.view.tx = window.innerWidth / 2 - S.nodes[hit].px * S.view.scale;
+  S.view.ty = window.innerHeight / 2 - S.nodes[hit].py * S.view.scale;
+  selectNode(hit);
+});
+
+/* ------------------------------------------------------------------ 面板 */
+
+function renderPanel() {
+  const stats = S.stats;
+  document.getElementById("overview").innerHTML =
+    "<h2>概览 · " + esc(S.ai.label) + "</h2>" +
+    '<div class="kv">' +
+    "<b>事件</b><span>" + stats.events + "</span>" +
+    "<b>关系边</b><span>" + stats.edges + "（模型 " + stats.model + " / 重放 " + stats.replay + "）</span>" +
+    "<b>跨场次</b><span>" + stats.cross + " 条</span>" +
+    "<b>内容近邻</b><span>" + stats.content + " 对（画前 " + S.contentK + " 条/节点）</span>" +
+    "<b>孤立事件</b><span>" + stats.isolated + "</span>" +
+    "<b>场次</b><span>" + stats.sessions + "</span>" +
+    "</div>" +
+    '<div class="note">模型边是 AI 写入时自己声明的（属于 / 相关 / remember）；内容近邻来自 1024 维向量缓存；' +
+    "重放主干是 consolidate 固化出来的边（support &gt; 0）" +
+    (stats.replay === 0 ? "，当前为 0 条。" : "。") + "</div>" +
+    '<div class="note">生成于 ' + esc(payload.generated) + "，是那一刻的快照。</div>";
+
+  const detail = document.getElementById("detail");
+  if (S.selected < 0) {
+    const lonely = [];
+    S.nodes.forEach((node, index) => { if (node.d === 0) lonely.push(index); });
+    const lonelyChips = lonely.map((index) =>
+      '<span class="chip click" data-i="' + index + '">' + esc(S.nodes[index].n) + "</span>").join("");
+    detail.innerHTML = "<h2>节点</h2><div class=\"note\">点一个节点，从它出发做两跳扩散。拖拽移动节点，滚轮缩放，拖动空白平移。</div>" +
+      (lonely.length
+        ? '<div class="note" style="margin-top:8px">孤立事件 ' + lonely.length +
+          " 个（一条模型边都没有）：勾上面的「孤立」可以把它们从画面上挑出来。</div>" +
+          '<div class="chips" style="margin-top:4px">' + lonelyChips + "</div>"
+        : '<div class="note" style="margin-top:8px">没有孤立事件。</div>');
+    detail.querySelectorAll(".chip.click").forEach((chip) => {
+      chip.addEventListener("click", () => selectNode(Number(chip.dataset.i)));
+    });
+  } else {
+    const node = S.nodes[S.selected];
+    const sessions = node.s.map((value) => '<span class="chip">' + esc(shortSession(S.sessions[value])) + "</span>").join("");
+    const neighbours = S.adj[S.selected].slice().sort((a, b) => b.strength - a.strength).slice(0, 10);
+    const chips = neighbours.map((item) =>
+      '<span class="chip click" data-i="' + item.i + '">' + esc(S.nodes[item.i].n) + "</span>").join("");
+    const liveEdges = S.adj[S.selected] || [];
+    const edgeRows = liveEdges.length
+      ? liveEdges.map((item) =>
+          '<div class="edrow">' + esc(S.nodes[item.i].n) +
+          ' <span style="color:#6d7d94">' + esc(item.rel) + " " + Number(item.strength).toFixed(2) +
+          '</span><button data-i="' + item.i + '">×</button></div>').join("")
+      : '<div class="note">没有连着别的节点。</div>';
+    detail.innerHTML =
+      "<h2>节点</h2>" +
+      '<div class="detail-name">' + esc(node.n) + "</div>" +
+      '<div class="chips">' + (sessions || '<span class="chip">无场次</span>') +
+      (node.d === 0 ? '<span class="chip" style="color:#8cffcd;border-color:#2b5c4e">孤立</span>' : "") + "</div>" +
+      '<div class="snippet">' + esc(node.t || node.ctx || "（无摘要）") + "</div>" +
+      '<div class="kv">' +
+      "<b>连接</b><span>" + node.d + " 条</span>" +
+      "<b>巩固</b><span>" + node.c.toFixed(2) + "</span>" +
+      "<b>id</b><span style=\"font-size:11px;color:#6d7d94\">" + esc(node.id) + "</span>" +
+      "</div>" +
+      '<div class="btnrow"><button id="renameNode">改名</button>' +
+      '<button id="deleteNode"' + (node.del ? ' style="border-color:#ff6b6b;color:#ff9d9d"' : "") +
+      ">" + (node.del ? "撤销删除" : "删掉这件事") + "</button></div>" +
+      '<div class="note" style="margin-top:6px">改动只攒在这一页；导出清单后跑 ' +
+      "<code>python -m memory_v2 apply --file edits.json</code> 才写库。</div>" +
+      '<div class="note" style="margin-top:6px">连着的边（点 × 剪断）</div>' +
+      '<div class="edlist" id="edgeList">' + edgeRows + "</div>" +
+      (node.del ? '<div class="note" style="color:#ff9d9d">这一件已标记删除，导出后从图里移除（连它的边一起）。</div>' : "") +
+      (chips ? '<div class="note">相邻节点</div><div class="chips" style="margin-top:4px">' + chips + "</div>" : "") +
+      '<div class="note" style="margin-top:8px">编写这个节点的模型当时拿到的原文（原样，未截断）</div>' +
+      '<pre class="feed" id="feedBox">读取中…</pre>' +
+      '<div class="note" style="margin-top:8px">recollect：交给编写模型之前的那一步</div>' +
+      '<div id="recBox">读取中…</div>';
+    detail.querySelectorAll(".chip.click").forEach((chip) => {
+      chip.addEventListener("click", () => selectNode(Number(chip.dataset.i)));
+    });
+    const renameBtn = document.getElementById("renameNode");
+    if (renameBtn) renameBtn.addEventListener("click", () => renameSelected());
+    const deleteBtn = document.getElementById("deleteNode");
+    if (deleteBtn) deleteBtn.addEventListener("click", () => deleteSelected());
+    document.querySelectorAll("#edgeList button").forEach((button) => {
+      button.addEventListener("click", () => cutEdge(S.selected, Number(button.dataset.i)));
+    });
+    loadFeed(node.id);
+    loadRec(node.id);
+  }
+
+  const act = document.getElementById("actCard");
+  if (!S.act) {
+    act.innerHTML = "<h2>激活扩散</h2><div class=\"note\">还没有起点。点节点后按两跳扩散播放，路径会同时画出来。</div>";
+  } else {
+    const seedName = S.nodes[S.act.seed].n;
+    const rows = S.act.entries.slice(0, 14).map((entry, order) => {
+      const badge = entry.hop === 0 ? '<span class="hop">起</span>'
+        : '<span class="hop' + (entry.hop === 2 ? " hop2" : "") + '">' + entry.hop + "跳</span>";
+      return '<div class="act-row" data-i="' + entry.i + '">' +
+        '<span class="rank">' + (order + 1) + "</span>" +
+        '<span class="nm">' + esc(S.nodes[entry.i].n) + badge + "</span>" +
+        '<span class="sc">' + entry.score.toFixed(2) + "</span></div>";
+    }).join("");
+    act.innerHTML =
+      "<h2>激活扩散</h2>" +
+      '<div class="detail-name" style="font-size:13px">起点「' + esc(seedName) + "」</div>" +
+      '<div class="note" style="margin-top:2px">两跳；边权 0.85（模型）/ 内容 0.5×相似度，增益 &gt; 0.05 才继续。' +
+      (S.stats.events < 256
+        ? "近邻上限是 256，本图只有 " + S.stats.events + " 个事件，所以内容近邻几乎是全连：第一跳就会点亮绝大多数节点，最终靠分数排序，这里只列分数最高的。"
+        : "") +
+      "</div>" +
+      '<div style="margin-top:6px">' + rows + "</div>" +
+      '<div class="btnrow"><button id="replay">重播</button><button id="clear">清除</button></div>';
+    act.querySelectorAll(".act-row").forEach((row) => {
+      row.addEventListener("click", () => selectNode(Number(row.dataset.i)));
+    });
+    document.getElementById("replay").addEventListener("click", () => playActivation(S.act.seed));
+    document.getElementById("clear").addEventListener("click", clearActivation);
+  }
+}
+
+/* 节点详情里的原文：按需取，取到的就是当年喂给编写模型的那几段。 */
+async function loadFeed(eventId) {
+  const box = document.getElementById("feedBox");
+  if (!box) return;
+  const wanted = eventId;
+  if (!LIVE) {
+    box.textContent = "静态快照不带原文；开实时版（graph_view_server.py）才有。";
+    return;
+  }
+  try {
+    const response = await fetch("/api/text?ai=" + encodeURIComponent(S.ai.key) +
+                                 "&id=" + encodeURIComponent(wanted), { cache: "no-store" });
+    if (!response.ok) throw new Error("text " + response.status);
+    const data = await response.json();
+    const current = document.getElementById("feedBox");
+    if (!current) return;
+    const blocks = data.blocks || [];
+    if (!blocks.length) {
+      current.textContent = "（这个节点还没挂上对话，或者原文文件不在了）";
+      return;
+    }
+    current.textContent = blocks.map((block) =>
+      "# " + (block.date || "—") + "\n" + block.text).join("\n\n");
+  } catch (error) {
+    const current = document.getElementById("feedBox");
+    if (current) current.textContent = "取不到：" + error.message;
+  }
+}
+
+/* recollect 的输入侧：挑了几段、拼成什么、上一次答案是什么。 */
+async function loadRec(eventId) {
+  const box = () => document.getElementById("recBox");
+  if (!box()) return;
+  if (!LIVE) {
+    box().innerHTML = '<div class="note">静态快照不带这条；开实时版才有。</div>';
+    return;
+  }
+  try {
+    const response = await fetch("/api/writings?ai=" + encodeURIComponent(S.ai.key) +
+                                 "&id=" + encodeURIComponent(eventId), { cache: "no-store" });
+    if (!response.ok) throw new Error("writings " + response.status);
+    const data = await response.json();
+    const target = box();
+    if (!target) return;
+    const entries = data.entries || [];
+    const parts = [];
+    parts.push('<div class="note" style="margin:0 0 4px">共 ' + data.segments + " 段 · 回忆过 " +
+      entries.length + " 次 · 上限 " + data.limit + " 段 / " + data.chars + " 字</div>");
+    const latest = entries[entries.length - 1];
+    if (latest) {
+      const head = String(latest.at || "").replace("T", " ") + " · 线索 " +
+        ((latest.cue || []).join("、") || "（无）") +
+        (latest.segments ? " · 用了 " + latest.segments + " 段" : "");
+      parts.push('<div class="note" style="margin:0">' + esc(head) + "</div>");
+      // 输入默认折起来：大多时候它就是上面那段原文，展开了反而像重复
+      if (latest.feed) {
+        parts.push('<details class="fold"><summary>交给模型的输入（' +
+          latest.feed.length + " 字）</summary><pre class=\"feed\">" +
+          esc(latest.feed) + "</pre></details>");
+      }
+      parts.push('<div class="note" style="margin:4px 0 0">写出来的回忆</div>' +
+        '<pre class="feed">' + esc(latest.memory || "") + "</pre>");
+    } else {
+      parts.push('<div class="note" style="margin:0">还没回忆过。' +
+        (data.cue_dependent
+          ? "段数超过上限，具体挑哪几段取决于当时的线索词。"
+          : "它只有一段，喂进去的就是上面那段原文（权重 1.00）。") +
+        "</div>");
+    }
+    target.innerHTML = parts.join("");
+  } catch (error) {
+    const target = box();
+    if (target) target.innerHTML = '<div class="note">取不到：' + esc(error.message) + "</div>";
+  }
+}
+
+/* ------------------------------------------------------------------ 控件 */
+
+document.getElementById("layout").addEventListener("change", (event) => {
+  applyLayout(event.target.value);
+});
+
+document.getElementById("contentOn").addEventListener("change", (event) => {
+  S.contentOn = event.target.checked;
+  requestRender();
+});
+
+document.getElementById("contentK").addEventListener("input", (event) => {
+  S.contentK = Number(event.target.value);
+  renderPanel();
+  requestRender();
+});
+
+document.getElementById("hubOn").addEventListener("change", (event) => {
+  S.hubOn = event.target.checked;
+  requestRender();
+});
+
+document.getElementById("dragOn").addEventListener("change", (event) => {
+  S.dragOn = event.target.checked;
+  canvas.style.cursor = "grab";
+});
+
+document.getElementById("breathOn").addEventListener("change", (event) => {
+  S.breathOn = event.target.checked;
+  if (S.breathOn) requestRender();
+});
+
+document.getElementById("isoOn").addEventListener("change", (event) => {
+  S.isoOn = event.target.checked;
+  requestRender();
+  if (S.isoOn) {
+    const lonely = S.nodes.filter((node) => node.d === 0);
+    if (lonely.length) fitView(lonely);
+  }
+});
+
+document.getElementById("fit").addEventListener("click", fitView);
+document.getElementById("exportEdits").addEventListener("click", exportEdits);
+document.getElementById("clearEdits").addEventListener("click", clearEdits);
+
+document.getElementById("search").addEventListener("input", (event) => {
+  S.filter = event.target.value.trim();
+  requestRender();
+});
+
+document.getElementById("search").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const index = S.nodes.findIndex((node) => matches(node));
+  if (index < 0) return;
+  S.view.tx = window.innerWidth / 2 - S.nodes[index].px * S.view.scale;
+  S.view.ty = window.innerHeight / 2 - S.nodes[index].py * S.view.scale;
+  selectNode(index);
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") clearActivation();
+});
+
+window.addEventListener("resize", () => {
+  canvas.width = Math.floor(window.innerWidth * DPR);
+  canvas.height = Math.floor(window.innerHeight * DPR);
+  requestRender();
+});
+
+window.addEventListener("beforeunload", () => { savePositions(); });
+
+/* ------------------------------------------------------------------ 启动 */
+
+let booted = false;
+
+async function boot() {
+  if (booted) return;
+  booted = true;
+  canvas.width = Math.floor(window.innerWidth * DPR);
+  canvas.height = Math.floor(window.innerHeight * DPR);
+  const params = new URLSearchParams(window.location.search);
+
+  if (LIVE) {
+    try {
+      await refresh(true);
+    } catch (error) {
+      document.getElementById("stamp").textContent = "连不上服务";
+      return;
+    }
+    if (params.get("layout") === "semantic") {
+      document.getElementById("layout").value = "semantic";
+      applyLayout("semantic");
+    }
+    const start = S.nodes.reduce((best, node, index) => node.d > S.nodes[best].d ? index : best, 0);
+    if (S.nodes.length) selectNode(start);
+    setInterval(() => { refresh(false).catch(() => {}); }, 3000);
+    return;
+  }
+
+  const wanted = params.get("ai");
+  loadAi(payload.ais.some((item) => item.key === wanted) ? wanted : payload.ais[0].key);
+  if (params.get("layout") === "semantic") {
+    document.getElementById("layout").value = "semantic";
+    applyLayout("semantic");
+  }
+  const start = S.nodes.reduce((best, node, index) => node.d > S.nodes[best].d ? index : best, 0);
+  selectNode(start);
+}
+
+/* 实时：拉一次状态，按 id 合并；节点没变就不动画面。 */
+async function refresh(initial) {
+  const response = await fetch("/api/state", { cache: "no-store" });
+  if (!response.ok) throw new Error("state " + response.status);
+  const state = await response.json();
+  if (!state.ais || !state.ais.length) return;
+  if (!initial && state.generated === S.generated) return;
+
+  const previous = S.nodes;
+  const previousId = S.selected >= 0 && previous[S.selected] ? previous[S.selected].id : "";
+  const wasActivated = S.act ? S.act.seed : -1;
+  const wanted = S.ai ? S.ai.key : (new URLSearchParams(window.location.search).get("ai") || state.ais[0].key);
+
+  S.generated = state.generated;
+  S.state = state;
+  loadAi(state.ais.some((item) => item.key === wanted) ? wanted : state.ais[0].key,
+         previous, previousId);
+
+  if (initial) {
+    document.getElementById("stamp").textContent = "现场 · " + state.generated.slice(11);
+  } else {
+    document.getElementById("stamp").textContent = "已更新 · " + state.generated.slice(11);
+    const index = wasActivated >= 0 ? S.nodes.findIndex((node) => node.id === (previous[wasActivated] || {}).id) : -1;
+    if (index >= 0) playActivation(index);
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
+</script>
+</body>
+</html>

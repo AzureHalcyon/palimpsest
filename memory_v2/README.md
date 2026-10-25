@@ -74,7 +74,27 @@ python -m memory_v2 freeze
 # 备份 / 恢复（包含 frozen、messages、说法与全局冻结）
 python -m memory_v2 snapshot --out memory.psnap
 python -m memory_v2 restore --snapshot memory.psnap --to <dir>
+
+# 看图：把事件图画成一页 HTML（数据内嵌，浏览器直接打开）；--png 另出一张快照
+python -m memory_v2 view --data data/memory
+python -m memory_v2 view --data data/memory --label Rin --png
+
+# 改图：把页面上攒的编辑清单落到 graph.json（先备份；--dry-run 只说不写）
+python -m memory_v2 apply --data data/memory --file edits.json
+python -m memory_v2 apply --data data/memory --file edits.json --dry-run
 ```
+
+**改图走"清单"这条路**：页面是只读的（记忆图只有一个写者——循环进程），所以
+改名 / 删事件 / 剪边都在页面上先攒成一份 `edits.json`（选节点 → 面板里改名或删掉、
+边列表里点 × 剪断 → 顶栏「导出编辑清单」），再用 `apply` 落库。它会**先备份**
+`graph.json.bak-<时间>`，并且**只在循环挂起或停下时跑**（两个写者同时改会互相覆盖）。
+`apply` 只改图、不动 `状态/*.jsonl`：`ingest` / `ingest --rebuild` 会照状态记录把
+事件补回来，改名也只活在 `graph.json` 里。
+
+`view` 只用只读地读 `<dir>/graph.json`（有 `content-index.json` 时会画内容近邻），
+写出一页自带数据的 HTML；一页里能切「链接布局／语义投影」、按内容近邻条数过滤、
+点节点做两跳扩散（权重与 `read/activate.py` 一致）。`networkx` 只用于社区划分、
+`matplotlib` 只在 `--png` 时用，缺了也能出 HTML。
 
 `chat --replay-on-exit` 是封口开关：聊完自动跑一次重放，不自动对别的场跑。
 归档会把 live 图与向量写成下一版 `冻结/`。回忆读的是 live 图（本场和旧场都在里面），

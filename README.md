@@ -91,6 +91,7 @@ recollect：按顺序重建，写成一段第一人称回忆
 | [`loop/`](loop/README.md)             | 持续在线的循环运行时：两块原文 + 运行时压缩 + 记忆工具面 + 网页控制台 + 上网工具 |
 | [`archive/v1/`](archive/v1/README.md) | 上一代实现，冻结但可运行                                   |
 | [`tools/`](tools/README.md)           | 离线工具                                           |
+| `memory_v2/view.py` + `view_template.html` | 事件图查看器：`python -m memory_v2 view --data <记忆目录>` |
 | `docs/`                               | 设计、参数、决策记录                                     |
 
 ## 文档

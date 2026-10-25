@@ -240,6 +240,46 @@ def _cmd_edges(args) -> int:
     return 0
 
 
+def _cmd_apply(args) -> int:
+    """把页面导出的编辑清单落到 graph.json（先备份；--dry-run 只说不写）。"""
+    from . import edits
+
+    graph = Graph.open(os.path.abspath(args.data))
+    payload = edits.load(args.file)
+    if payload["data"] and os.path.abspath(payload["data"]) != os.path.abspath(args.data):
+        print("注意：清单里的目录是 %s，这次按 --data %s 写。"
+              % (payload["data"], args.data), file=sys.stderr)
+    result = edits.apply(graph, payload["ops"], dry_run=args.dry_run)
+    edits.report(result)
+    if not result["changed"]:
+        print("没有改动。")
+        return 0
+    if args.dry_run:
+        print("演练：会改 %d 处，没写库。" % result["changed"])
+        return 0
+    saved = edits.backup(graph.path)
+    graph.save()
+    print("改了 %d 处。%s" % (result["changed"],
+                             ("原图备份在 %s" % saved) if saved else "原来没有图，新建了。"))
+    print("只改了图：状态记录没动，ingest / ingest --rebuild 会把事件按状态记录补回来。")
+    return 0
+
+
+def _cmd_view(args) -> int:
+    """把事件图画成一页 HTML（自带数据，浏览器直接打开）。"""
+    from . import view
+
+    argv = ["--data", os.path.abspath(args.data), "--out", args.out,
+            "--span", str(args.span)]
+    if args.label:
+        argv += ["--label", args.label]
+    if args.png:
+        argv += ["--png"]
+    if args.seed:
+        argv += ["--seed", args.seed]
+    return view.main(argv)
+
+
 def _cmd_unlink(args) -> int:
     graph = Graph.open(os.path.abspath(args.data))
     first = graph.resolve(args.first)
@@ -363,6 +403,21 @@ def main(argv=None) -> int:
     edges_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
     edges_parser.add_argument("--limit", default="20")
     edges_parser.set_defaults(func=_cmd_edges)
+
+    apply_parser = sub.add_parser("apply", help="把页面导出的编辑清单落到 graph.json")
+    apply_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
+    apply_parser.add_argument("--file", required=True, help="页面导出的 edits.json")
+    apply_parser.add_argument("--dry-run", action="store_true", help="只说会改什么，不写库")
+    apply_parser.set_defaults(func=_cmd_apply)
+
+    view_parser = sub.add_parser("view", help="把事件图画成一页 HTML（浏览器里看）")
+    view_parser.add_argument("--data", default=DEFAULT_DATA_DIR)
+    view_parser.add_argument("--label", default="", help="页面上显示的名字；默认用目录名")
+    view_parser.add_argument("--out", default=os.path.join(".local", "view"))
+    view_parser.add_argument("--span", type=float, default=620.0)
+    view_parser.add_argument("--png", action="store_true", help="同时出 PNG 快照")
+    view_parser.add_argument("--seed", default="", help="PNG 激活快照的起点事件 id")
+    view_parser.set_defaults(func=_cmd_view)
 
     args = parser.parse_args(argv)
     try:
