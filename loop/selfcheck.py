@@ -1491,85 +1491,117 @@ def check_web_tools() -> None:
 
 
 def check_shell() -> None:
-    """命令工具：白名单、不经 shell、超时杀进程、输出截断。
+    """命令工具：关进 Landlock（只有工作区能写）、超时杀进程、输出截断。
 
-    自检要在本机（可能是 Windows）跑，所以拿 `sys.executable` 当那条命令，
-    `echo` / `ls` 这种在两边不通用。
+    自检要在这台机器上跑（可能是 Windows）：Windows 上没有 Landlock，所以先验
+    fail-closed，再明确关掉沙箱验执行链路；Linux 上再把沙箱开回来验边界。
     """
     workdir = tempdir("loop-shell-")
     try:
         python = sys.executable or "python3"
-        program = os.path.basename(python)
         cfg = _loop_config(name="自检", data_dir=workdir)
         check(not shell.tools(cfg), "默认关：工具面里连 run 都不该有")
         check("没开" in shell.call("run", '{"command": "echo hi"}', cfg),
               "没开时调它要回一句，不该抛")
         cfg.run_enabled = True
-        cfg.run_allow = program
         names = [tool["function"]["name"] for tool in shell.tools(cfg)]
         check(names == ["run"], "打开之后工具面里要有 run：%r" % names)
 
+        ready = shell.sandbox_ready()
+        if not ready:
+            refused = shell.call("run", json.dumps({"command": "echo hi"}), cfg)
+            check("跑不了" in refused,
+                  "没有 Landlock 就该 fail-closed，不能裸跑：%r" % refused)
+
+        # 下面验执行链路：明确关掉沙箱（Linux 上最后再把沙箱开回来验边界）。
+        # 命令一律写成"跑一个脚本文件"，别用 `-c "..."`——Windows 的 cmd /c 会把嵌套引号拆坏。
+        cfg.run_sandbox = False
+        root = shell.workspace_of(cfg)
+        os.makedirs(root, exist_ok=True)
+
+        def script(name: str, body: str) -> str:
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+                handle.write(body)
+            return name
+
         out = shell.call("run", json.dumps(
-            {"command": '%s -c "print(1 + 1)"' % program}), cfg)
+            {"command": "%s %s" % (python, script("sum.py", "print(1 + 1)"))}), cfg)
         check("退出码 0" in out and "2" in out, "该跑起来并给出输出：%r" % out)
 
-        refused = shell.call("run", json.dumps({"command": "rm -rf /"}), cfg)
-        check("不给跑" in refused, "白名单外的程序要拒：%r" % refused)
+        refused = shell.call("run", json.dumps(
+            {"command": "cat /etc/palimpsest/credentials.yaml"}), cfg)
+        check("不给读" in refused, "凭证该拒：%r" % refused)
 
-        # 不经 shell：重定向只是个参数，不会真生成文件。
-        marker = os.path.join(shell.workspace_of(cfg), "marker.txt")
-        shell.call("run", json.dumps(
-            {"command": '%s -c "print(3)" > marker.txt' % program}), cfg)
-        check(not os.path.exists(marker), "重定向不该生效")
-
-        # 工作目录是 <data>/workspace，不是家目录。
         where = shell.call("run", json.dumps(
-            {"command": '%s -c "import os;print(os.getcwd())"' % program}), cfg)
+            {"command": "%s %s" % (python, script(
+                "cwd.py", "import os\nprint(os.getcwd())\n"))}), cfg)
         check(os.path.realpath(shell.workspace_of(cfg)) in
               os.path.realpath(where), "命令要在 workspace 里跑：%r" % where)
 
         bad = shell.call("run", json.dumps(
-            {"command": '%s -c "raise SystemExit(3)"' % program}), cfg)
+            {"command": "%s %s" % (python, script(
+                "exit3.py", "raise SystemExit(3)\n"))}), cfg)
         check("退出码 3" in bad, "非零退出要如实说：%r" % bad)
 
         cfg.run_timeout = 0.6
         started = time.time()
         slow = shell.call("run", json.dumps(
-            {"command": '%s -c "import time;time.sleep(9)"' % program}), cfg)
+            {"command": "%s %s" % (python, script(
+                "slow.py", "import time\ntime.sleep(9)\n"))}), cfg)
         check("超时" in slow, "跑过头要杀：%r" % slow)
         check(time.time() - started < 6, "超时之后不能还等在那儿")
         cfg.run_timeout = 20.0
 
         cfg.run_output_chars = 100
         long = shell.call("run", json.dumps(
-            {"command": '%s -c "print(\\"x\\" * 600)"' % program}), cfg)
+            {"command": "%s %s" % (python, script(
+                "long.py", "print('x' * 600)\n"))}), cfg)
         check("省略" in long and len(long) < 400, "长输出要截断：%d 字" % len(long))
         marked = re.search(r"省略 (\d+) 字", long)
         check(marked and 400 < int(marked.group(1)) < 620,
               "要标出省了多少：%r" % long[:80])
         cfg.run_output_chars = 4000
 
-        cfg.run_allow = program + " git"
-        only_read = shell.call("run", json.dumps({"command": "git commit -m x"}), cfg)
-        check("只给 status" in only_read, "git 只给读的子命令：%r" % only_read)
+        # 管道能用（关掉沙箱的这半边只是验 shell 通道）
+        pipe_cmd = "%s %s | %s %s" % (
+            python, script("value.py", "print(42)\n"),
+            python, script("echo_stdin.py",
+                           "import sys\nprint(sys.stdin.read().strip())\n"))
+        piped = shell.call("run", json.dumps({"command": pipe_cmd}), cfg)
+        check("42" in piped, "管道该通：%r" % piped)
 
         called = shell.call("other", "{}", cfg)
         check("没有这个工具" in called, "别的名字要回「没有」")
+
+        if ready:
+            # Linux：开回沙箱，验内核边界
+            cfg.run_sandbox = True
+            wrote = shell.call("run", json.dumps(
+                {"command": "echo hi > 自检.txt; cat 自检.txt"}), cfg)
+            check("hi" in wrote, "工作区里该能写：%r" % wrote)
+            outside = shell.call("run", json.dumps(
+                {"command": "echo x > ../escape.txt"}), cfg)
+            check(("Permission denied" in outside) or ("denied" in outside.lower()),
+                  "工作区外该被内核拒：%r" % outside)
+            check(not os.path.exists(os.path.join(workdir, "escape.txt")),
+                  "确实没写出去")
+            read = shell.call("run", json.dumps({"command": "head -1 /etc/hostname"}), cfg)
+            check("退出码 0" in read, "工作区外该能读：%r" % read)
 
         # 接到循环上：工具面里有它，分派也认它。
         loop_cfg = _loop_config(name="自检", data_dir=workdir,
                                 block_tokens=100000)
         loop_cfg.run_enabled = True
-        loop_cfg.run_allow = program
+        loop_cfg.run_sandbox = False
         wire = LoopStore(os.path.join(workdir, "wire.sqlite3"))
         try:
             loop = Loop(loop_cfg, credentials=None, store=wire,
                         compressor=Compressor(loop_cfg, summarizer=fake_summarizer),
                         memory=MemoryBridge.disabled(), client=FakeClient())
-            names = [tool["function"]["name"] for tool in loop.tools()]
-            check("run" in names, "循环的工具面里要有 run：%r" % names)
+            tool_names = [tool["function"]["name"] for tool in loop.tools()]
+            check("run" in tool_names, "循环的工具面里要有 run：%r" % tool_names)
             wired = loop._call_tool("run", json.dumps(
-                {"command": '%s -c "print(7)"' % program}))
+                {"command": "%s %s" % (python, script("seven.py", "print(7)"))}))
             check("7" in wired, "循环分派要能跑通：%r" % wired)
         finally:
             wire.close()

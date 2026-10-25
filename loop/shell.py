@@ -1,24 +1,22 @@
-"""在宿主机上跑一条命令：只跑白名单里的程序，不经过 shell。
+"""在宿主机上跑一条命令：关进 Landlock 的"只能写工作区"里，不维护程序白名单。
 
-说明文字在 `prompts/tools.txt` 的 `## run` 段里，这里只管闸门和分派。和记忆、上网
-工具一样，出错不是抛给循环，而是写进工具结果——模型下一步能看见「不给跑」，而不是
-整步挂掉。
+说明文字在 `prompts/tools.txt` 的 `## run` 段里，这里只管闸门和执行。
 
-★ 这是**闸门，不是沙箱**。判据是第一段的程序名，而且不经过 shell：管道、重定向、
-  `$(...)`、`sh -c` 全都进不来（`shlex.split` 切不开的写法直接拒）。命令在
-  `<data>/workspace` 里跑，带超时（超时连进程组一起杀），输出截断。
-★ 它以服务用户的身份跑，那个用户读得到的文件它就读得到——所以说明里写着别把密钥
-  读出来写进记录。真要把「碰得到什么」也管住，得另起低权限用户或者 bwrap，
-  那是另一件事，这里先不做。
+★ 边界是**内核**，不是程序名单：整台机器都能读、能执行，只有 `<data>/workspace`
+  能写（建/删/改/截断/改名）。`loop/landlock.py` 装规则，装不上就 fail-closed——
+  绝不"没沙箱也照跑"。
+★ 命令走 `sh -c`（管道、重定向都能用），因为有沙箱兜底了。
+★ 唯一剩下的一条规则：参数里点到凭证/密钥就不跑（读出来会进记录）。它不是沙箱，
+  挡的是"别把密钥念进对话"。
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import signal
 import subprocess
+import sys
 import time
 from typing import List
 
@@ -26,10 +24,7 @@ from . import prompt_files
 
 NAMES = ("run",)
 
-# 少数程序里还要再挑子命令：git 只给读的那几个。
-SUBCOMMANDS = {"git": ("status", "log", "diff", "show", "branch", "remote", "tag")}
-
-# 敏感文件：命令照跑，但参数里点到它就拒。它不是沙箱——源码、数据、日志随便读，
+# 敏感文件：命令照跑，但命令里点到它就不跑。它不是沙箱——源码、数据、日志随便读，
 # 只有凭证/密钥这一类不许进记录（读出来会变成"她说过密钥"，还可能被写成笔记）。
 SENSITIVE_DIRS = ("/etc/palimpsest", "/etc/shadow", "/etc/sudoers", "/root/")
 SENSITIVE_NAMES = ("credentials.yaml", "credentials.yml", "web-token",
@@ -61,10 +56,14 @@ def workspace_of(config) -> str:
     return os.path.join(str(getattr(config, "data_dir", ".") or "."), "workspace")
 
 
-def allowed(config) -> List[str]:
-    """白名单：设置里那一行字，逗号或空格都认。"""
-    raw = str(getattr(config, "run_allow", "") or "")
-    return [item for item in raw.replace(",", " ").split() if item]
+def sandbox_ready() -> bool:
+    """这台机器能不能装 Landlock（不能就别跑，fail-closed）。"""
+    from . import landlock
+
+    try:
+        return landlock.abi_version() >= 1
+    except Exception:
+        return False
 
 
 def tools(config=None) -> List[dict]:
@@ -105,31 +104,20 @@ def call(name: str, arguments: str, config) -> str:
     return execute(command, config)
 
 
-def execute(command: str, config) -> str:
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        return "这条命令切不开（引号没配平？）：%s" % exc
-    if not argv:
-        return "要给一条命令。"
-    names = allowed(config)
-    program = os.path.basename(argv[0])
-    if program not in names:
-        return ("不给跑：%s 不在白名单里。现在能跑的是 %s。"
-                "要加就在设置里改「命令白名单」。" % (program, " / ".join(names)))
-    for token in argv[1:]:
-        hit = _sensitive(token)
-        if hit:
-            return ("不给读：%s 像凭证或密钥，那类东西不进记录。源码、数据、日志随便看。"
-                    % hit)
-    subs = SUBCOMMANDS.get(program)
-    if subs:
-        picked = next((part for part in argv[1:] if not part.startswith("-")), "")
-        if picked not in subs:
-            return ("%s 只给 %s 这几个。要写东西/换分支得先加白名单，或者让对方来做。"
-                    % (program, " / ".join(subs)))
+def _shell_argv(command: str) -> List[str]:
+    """命令怎么交给系统：POSIX 上 `sh -c`（管道、重定向都能用），Windows 上 `cmd /c`。"""
+    if os.name == "nt":
+        return ["cmd", "/c", command]
+    return ["sh", "-c", command]
 
-    workdir = workspace_of(config)
+
+def execute(command: str, config) -> str:
+    hit = _sensitive(command)
+    if hit:
+        return ("不给读：命令里点到了 %s 这类凭证或密钥，那类东西不进记录。"
+                "源码、数据、日志随便看。" % hit)
+
+    workdir = os.path.abspath(workspace_of(config))
     try:
         os.makedirs(workdir, exist_ok=True)
     except OSError as exc:
@@ -143,9 +131,26 @@ def execute(command: str, config) -> str:
     except (TypeError, ValueError):
         limit = 4000
 
+    argv = _shell_argv(command)
+    if bool(getattr(config, "run_sandbox", True)):
+        if not sandbox_ready():
+            return ("跑不了：这台机器装不上 Landlock 的「只能写工作区」规则，"
+                    "而命令默认必须关在沙箱里。要在没沙箱的情况下跑，"
+                    "得在设置里明确关掉「关进沙箱」，那是另一回事。")
+        from . import landlock
+
+        wrapper = os.path.join(os.path.dirname(os.path.abspath(landlock.__file__)),
+                               "landlock.py")
+        try:
+            file_mb = int(getattr(config, "run_file_mb", 64) or 64)
+        except (TypeError, ValueError):
+            file_mb = 64
+        argv = [sys.executable, wrapper, "--workspace", workdir,
+                "--file-mb", str(file_mb), "--"] + argv
+
     started = time.time()
     try:
-        proc = subprocess.Popen(  # noqa: S603 - 白名单 + 不经 shell，就是这里的闸门
+        proc = subprocess.Popen(  # noqa: S603 - 边界在内核（Landlock），不在这里
             argv, cwd=workdir, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", start_new_session=True)
@@ -164,8 +169,10 @@ def execute(command: str, config) -> str:
             out = ""
     cost = time.time() - started
     body = _clip(str(out or ""), limit)
-    head = ("超时 %g 秒，已经杀掉" % timeout if timed_out
-            else "退出码 %s" % proc.returncode)
+    code = proc.returncode
+    if code == 125 and "landlock:" in body:
+        return "沙箱装不上，这条没跑：%s" % body.replace("landlock:", "").strip()
+    head = ("超时 %g 秒，已经杀掉" % timeout if timed_out else "退出码 %s" % code)
     return "（%s，用时 %.1f 秒）%s%s" % (head, cost, "\n" if body else "",
                                         body or "没有输出")
 

@@ -123,8 +123,8 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
   主模型 → 执行 → 继续。
 - 工具走原生 `tool_calls`：`remember` / `recall` / `recollect`（记忆）、`wait`（等）、
   `fetch` / `search`（上网；取自 `loop/web_access.py`，只走公网 80/443）、`run`
-  （宿主上的命令；白名单里的程序、不经 shell、拒读凭证、默认关）、`write`
-  （只写 `<data>/workspace` 的文件，绝对路径与 `..` 都拒）。
+  （宿主上的命令；走 `sh -c`、关进 Landlock「只有工作区能写」、装不上就 fail-closed、
+  拒读凭证、默认关）、`write`（只写 `<data>/workspace` 的文件，绝对路径与 `..` 都拒）。
 - 正文是"说"：投递，不结束。**正文和工具调用可以同时**（原文 `tool_calls` 允许），
   两者都要处理——只处理其中一种，模型就会以为说过了而其实没说。
 - 没有工具调用就是它这一步没有要做的事了：下一步在记录末尾挂一句中性的

@@ -100,8 +100,8 @@ class LoopConfig:
     # 命令工具：跑在宿主机（云实例）上，不用沙盒，只加一条规则——第一段程序名必须在
     # 白名单里，而且不经过 shell（管道、重定向、$() 进不来）。默认关，默认只给读的。
     run_enabled: bool = False
-    run_allow: str = ("ls cat head tail wc grep rg file stat du df date echo"
-                      " uname uptime which pwd git")
+    run_sandbox: bool = True          # 关进 Landlock：只有工作区能写；关掉等于把它放出来
+    run_file_mb: int = 64             # 单个文件最大多少 MB（RLIMIT_FSIZE）
     run_timeout: float = 20.0         # 单条命令最多跑多久；超时连进程组一起杀
     # 工作区写入口（`<data>/workspace` 下）：只写相对路径，绝对路径和 `..` 都拒。
     # 不并进 run 的白名单——`<data>/` 服务用户可写，那样等于把改库的权限也交出去。

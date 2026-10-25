@@ -65,8 +65,10 @@ FIELDS = (
 
     {"key": "run_enabled", "group": "命令", "label": "命令工具", "type": "bool",
      "help": "打开后模型能跑白名单里的命令（宿主上，工作目录 <数据>/workspace）；默认关"},
-    {"key": "run_allow", "group": "命令", "label": "命令白名单", "type": "text",
-     "help": "只跑这里列出的程序，按第一段名判，不经 shell；一行，空格或逗号分隔"},
+    {"key": "run_sandbox", "group": "命令", "label": "关进沙箱", "type": "bool",
+     "help": "用 Landlock 把它关在「只有工作区能写」里；关掉等于把整台机器交给它，默认开"},
+    {"key": "run_file_mb", "group": "命令", "label": "单文件上限（MB）", "type": "int",
+     "min": 1, "max": 2048, "help": "工作区里一个文件最大多少 MB，防止把盘写满"},
     {"key": "run_timeout", "group": "命令", "label": "命令超时（秒）", "type": "float",
      "min": 1, "max": 300, "help": "超时就杀了，连它自己起的进程一起"},
     {"key": "run_output_chars", "group": "命令", "label": "命令输出上限", "type": "int",
