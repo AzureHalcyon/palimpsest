@@ -196,7 +196,8 @@ python -m loop.usage --data data/loop --days 7
 ## 测试
 
 ```powershell
-python -m loop.selfcheck
+python check_all.py            # 全部离线自测，CI 用的同一条命令
+python -m loop.selfcheck       # 只跑这一层（不联网、不用凭证）
 ```
 ## 设置
 

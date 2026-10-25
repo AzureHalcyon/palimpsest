@@ -67,7 +67,7 @@ python -m memory_v2 ingest
 # 整体重建：清空当前图，旧图先备份；重放边、强度、奖励与手工修改不恢复
 python -m memory_v2 ingest --rebuild
 
-# 升级/迁移：把当前 live 图与向量写成全局冻结版（之后新场从这里开场）
+# 升级/迁移：把当前 live 图与向量写成全局冻结版（旧数据升级、loop 启动时并进 live 图用）
 python -m memory_v2 freeze
 
 # 备份 / 恢复（包含 frozen、messages、说法与全局冻结）
@@ -76,8 +76,9 @@ python -m memory_v2 restore --snapshot memory.psnap --to <dir>
 ```
 
 `chat --replay-on-exit` 是封口开关：聊完自动跑一次重放，不自动对别的场跑。
-归档会把 live 图与向量写成下一版 `冻结/`。本场 recall 直接读 live 图（含本场和旧场），
-不再依赖 `状态/<场>.frozen/`。续聊加载 `messages.json`（含 tool calls）；旧未归档场没有
+归档会把 live 图与向量写成下一版 `冻结/`。回忆读的是 live 图（本场和旧场都在里面），
+规则只有一份：[`../docs/事件状态与读取.md`](../docs/事件状态与读取.md) 的“回忆”一节。
+续聊加载 `messages.json`（含 tool calls）；旧未归档场没有
 messages 日志时，按 `状态` 里的 user/assistant 重建，无法保证工具上下文逐字一致。
 
 ## 一句一发的入口
@@ -101,11 +102,14 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8765/send' `
 ## 测试
 
 ```powershell
-python memory_v2/tests/check.py
+python check_all.py                   # 全部离线自测，CI 跑的就是这条
+python memory_v2/tests/check.py       # 也可以单跑
 python memory_v2/tests/replay_check.py
-python -m loop.selfcheck      # 循环那层的 227 项（不联网、不用凭证）
+python -m loop.selfcheck              # 循环那层（不联网、不用凭证）
 python tools/文档/check_docs.py
 ```
+
+新增入口加进 `check_all.py` 的 `ENTRIES`。
 
 `check.py` 不需要网络和凭证，模型调用走脚本桩；覆盖事件网络、一轮多事件、孤立节点、
 同名按已有节点标、skip / hold / 挂起恢复、改名与断边、读取、编写、编写时不含正文、

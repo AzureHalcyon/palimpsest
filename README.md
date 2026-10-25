@@ -1,5 +1,7 @@
 # palimpsest
 
+[![自测](https://github.com/AzureHalcyon/palimpsest/actions/workflows/checks.yml/badge.svg)](https://github.com/AzureHalcyon/palimpsest/actions/workflows/checks.yml)
+
 <u>*我要给她完整的一生！——图恒宇*</u>
 
 大模型每次对话都从零开始。把聊天记录塞回上下文，模型只是“查文本”；把角色卡交给大模型，角色卡很快会过时；把语义检索接入 AI 的记忆文档，这些文档也会很快腐化。
@@ -62,8 +64,8 @@ recollect：按顺序重建，写成一段第一人称回忆
 - 跑一次重放：像睡眠一样，不均匀地点亮当天的事；常走的连接加强，所有非结构连接整体衰减，
   太弱的剪掉；
 - 原文、状态记录、事件图、编写日志分别落盘；
-- 归档把 live 图写成下一版冻结；下一场开场从冻结副本读，不读本场 live 图；
-- 未归档的场续聊时恢复本场 frozen 和完整 messages，和第一次完全一样。
+- 归档把 live 图写成下一版冻结；回忆始终读 live 图（本场和旧场都在里面），冻结只当起点；
+- 未归档的场续聊时恢复完整 messages，和第一次完全一样。
 
 ## 为什么不直接塞记忆条目/历史记录？
 
@@ -159,8 +161,8 @@ python -m memory_v2 replay --session first --credentials .local/credentials.yaml
 不调模型、只验逻辑：
 
 ```powershell
-python memory_v2/tests/check.py
-python -m loop.selfcheck          # 227 项：上下文、压缩、等待、网页、设置、上网、删改
+python check_all.py               # 全部离线自测（CI 跑的就是这条）
+python -m loop.selfcheck          # 只跑循环那层：上下文、压缩、等待、网页、设置、上网、删改
 ```
 
 给外部程序用，一句一发：

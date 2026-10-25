@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -18,6 +17,7 @@ from memory_v2.read.search import expand
 from memory_v2.store.graph import Graph, GraphError
 from memory_v2.store.session import SessionStore, SessionSealed
 from memory_v2.store.vectors import VectorStore
+from testsupport import tempdir
 
 
 class FakeClient:
@@ -60,7 +60,7 @@ except ValueError:
     pass
 else:
     raise AssertionError("cosine must reject different dimensions")
-cache_dir = tempfile.mkdtemp()
+cache_dir = tempdir("mv2-cache-")
 cache_path = os.path.join(cache_dir, "vectors.json")
 cache = VectorStore(cache_path, model="m", dim=2)
 cache.put("e", "h", [1.0, 2.0])
@@ -98,7 +98,7 @@ class _RecordingEmbedder:
         return [[1.0, 0.0] for _ in texts]
 
 
-vector_dir = tempfile.mkdtemp()
+vector_dir = tempdir("mv2-vector-")
 text_store = VectorStore(os.path.join(vector_dir, "vectors.json"), model="m", dim=2)
 recorder = _RecordingEmbedder()
 loaded = event_vectors(None, vector_dir, {"a": "有正文", "b": "", "c": "   "},
@@ -107,7 +107,7 @@ assert recorder.seen == [["有正文"]], recorder.seen
 assert loaded["a"] == [1.0, 0.0] and loaded["b"] == [] and loaded["c"] == [], loaded
 shutil.rmtree(vector_dir, ignore_errors=True)
 
-data = tempfile.mkdtemp()
+data = tempdir("mv2-data-")
 os.makedirs(os.path.join(data, "状态"), exist_ok=True)
 
 write_session(data, "s1", [
@@ -251,7 +251,7 @@ old["event_id"] = "e-555555555555"
 write_session(data, "s2", [old])
 assert SessionStore(data, "s2").turns()[-1]["event_id"] == "e-555555555555"
 
-bad = tempfile.mkdtemp()
+bad = tempdir("mv2-bad-")
 with open(os.path.join(bad, "graph.json"), "w", encoding="utf-8") as handle:
     handle.write("{not json")
 try:
@@ -266,7 +266,7 @@ assert not os.path.exists(os.path.join(bad, "graph.json")), names
 shutil.rmtree(bad, ignore_errors=True)
 
 # 一轮里：skip 不建节点；hold 先挂着，下一轮落盘时并进去；重启后挂起还在。
-data2 = tempfile.mkdtemp()
+data2 = tempdir("mv2-hold-")
 write_session(data2, "k1", [])
 client2 = FakeClient([
     call("recall", {"keywords": ["开场"]}),

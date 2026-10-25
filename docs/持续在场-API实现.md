@@ -79,7 +79,8 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
   写的材料，存进事件，**不进当前上下文**——写多了上下文也不涨。
 - **契约**：名字是检索键；`note` 是以后编写模型的材料；`links` 连关系。名字要能搜到。
 - **读**：`recall` 联想（候选、激活、光标）+ `recollect` 取具体；编写模型把 `note` 写成一段
-  第一人称回忆，只有回忆进上下文。`recall` 读「最新冻结 + live」，检索默认只用嵌入；
+  第一人称回忆，只有回忆进上下文。`recall` 只读 live 图（启动时把 `冻结/` 并进来补齐旧事件，
+  live 优先），检索默认只用嵌入；
   词面是开关，默认关（`--lexical`）。冻结 / 重放只留手工命令，不作为模型工具。
 - **临时/永久**：事件带 `scope=short/long`；`short` 到期（默认 3 天）就**搬出图**：
   压成一行（模型压，压不动取最后一条 note 的第一句）写进 `memory/archive.jsonl`，
@@ -107,7 +108,7 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - 运行时日志另存 `data/loop/loop.log`（轮转），只记发生了什么，正文在 `entries` 里。
 - **当前块也存**：它就是上下文，不存就接不上。
 - memory_v2：事件加 `notes`（模型写的材料）、`scope`、`expires_at`；旧场次段兼容；
-  读取合并最新冻结与 live。不在 SQLite 里。
+  回忆读 live 图（启动时并入 `冻结/`）。不在 SQLite 里。
 - 不再需要 chunks / day RAG。
 - TTL：上下文 24 小时；memory_v2 的 `short` 默认 3 天，`long` 持久。
 
@@ -156,7 +157,7 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 1. **压缩（已完成）**：一块一次，只压刚结束的那一块；第一块满了先不动，第二块满才压
    第一块。实跑 10 步 2 次压缩；摘要失败保留原文，等块再长一点再试。
 2. **memory_v2（循环路径已接）**：`remember` 写 note、`recall` 联想 + 光标、`recollect`
-   编写；`short/long`；读取合并冻结 + live。最近 N 步过滤、去重、来源标还没做。
+   编写；`short/long`；回忆读 live 图（启动时并入 `冻结/`）。最近 N 步过滤、去重、来源标还没做。
 3. **长跑（待做）**：实跑或模拟几小时到几天；验证“3 小时前做了什么”能通过 recall 查到；
    确认上下文丢掉的内容确实不在；看压缩质量够不够、额度刹车与重启恢复稳不稳。
 4. **恢复（已完成）**：`blocks` + `entries` 按条落盘，重启恢复上一块和当前块；
@@ -176,8 +177,8 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - `loop/store.py`：SQLite 三张表；
 - `loop/memory_bridge.py`：工具面（remember / recall / recollect）与 memory_v2 的图。
 
-memory_v2 侧只改两处：`read/activate.py` 的读集（冻结 + live）、`chat/loop.py` /
-`chat/tools.py` 的 event 调用改为可选；不动归档、重放与长期语义。
+memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻结/` 的那张 live 图）、
+`chat/loop.py` / `chat/tools.py` 的 event 调用改为可选；不动归档、重放与长期语义。
 
 ### 7.1 实现注记
 
@@ -198,7 +199,7 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（冻结 + live）、`c
 - 网页：`loop/web.py` 只读库、只往 `inbox` 写，界面是单个 `loop/web/index.html`；令牌走
   Bearer（`<data>/web-token`），默认只绑 `127.0.0.1`。
 - 记忆：事件带 `notes` / `scope` / `expires_at` / `step`；写入的 note 是编写模型的材料；
-  读取合并最新冻结与 live；嵌入用百炼，词面默认关（`--lexical` 开）；最近 N 步是默认关
+  回忆只读 live 图（启动时并入 `冻结/`）；嵌入用百炼，词面默认关（`--lexical` 开）；最近 N 步是默认关
   的开关（`--recent-steps`）；冻结 / 重放只手工跑，不给模型工具；去重、来源标不做。
 - 落盘：`bands` / `blocks`（open / previous / compressed）/ `entries` / `recall_log` /
   `usage`；上一块与当前块的原文按条存，重启接上。

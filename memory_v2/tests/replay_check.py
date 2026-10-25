@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import memory_v2.consolidate.replay as replay
 from memory_v2.store.graph import Graph
 from memory_v2.store.session import SessionStore
+from testsupport import tempdir
 
 
 def write_turn(data, session, user, assistant):
@@ -27,7 +27,7 @@ def check(condition, message):
 
 
 def main():
-    data = tempfile.mkdtemp(prefix="replay-check-")
+    data = tempdir("replay-check-")
     try:
         graph = Graph(os.path.join(data, "graph.json"))
         write_turn(data, "s0", "旧事", "旧答")
@@ -74,7 +74,7 @@ def main():
         shutil.rmtree(data, ignore_errors=True)
 
     # 一场归档远远不够：证据不到阈值就不建 replay 边。
-    data2 = tempfile.mkdtemp(prefix="replay-early-")
+    data2 = tempdir("replay-early-")
     try:
         graph2 = Graph(os.path.join(data2, "graph.json"))
         write_turn(data2, "s0", "旧事", "旧答")

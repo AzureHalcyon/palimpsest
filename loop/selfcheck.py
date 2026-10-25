@@ -14,8 +14,8 @@ import shutil
 import sys
 import threading
 import time
-import uuid
 
+from testsupport import tempdir
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
 from . import control
 from . import prompt_files
@@ -40,18 +40,6 @@ def check(condition, message: str) -> None:
     CHECKS[0] += 1
     if not condition:
         raise AssertionError(message)
-
-
-def _tempdir(prefix: str) -> str:
-    """临时库放在仓库的 data/ 里：系统临时目录可能不在可写范围内。
-
-    不用 tempfile.mkdtemp：它按 0o700 建目录，受限令牌下连自己都写不进去。
-    """
-    parent = os.path.abspath("data")
-    os.makedirs(parent, exist_ok=True)
-    path = os.path.join(parent, prefix + uuid.uuid4().hex[:8])
-    os.makedirs(path)
-    return path
 
 
 def _loop_config(**kwargs) -> LoopConfig:
@@ -182,7 +170,7 @@ def check_context_limits() -> None:
 
 
 def check_two_blocks() -> None:
-    workdir = _tempdir("loop-two-")
+    workdir = tempdir("loop-two-")
     try:
         config = _loop_config(name="自检", block_tokens=50, max_steps=8,
                             park_seconds=0.001)
@@ -204,7 +192,7 @@ def check_two_blocks() -> None:
 
 
 def check_loop() -> None:
-    workdir = _tempdir("loop-selfcheck-")
+    workdir = tempdir("loop-selfcheck-")
     try:
         config = _loop_config(name="自检", block_tokens=50, context_budget=80000,
                             band_budget=3000, band_chars=(300, 600, 1200, 2400),
@@ -256,7 +244,7 @@ def check_loop() -> None:
 
 
 def check_compress_failure() -> None:
-    workdir = _tempdir("loop-failure-")
+    workdir = tempdir("loop-failure-")
     try:
         config = _loop_config(name="自检", block_tokens=30, max_steps=12,
                             park_seconds=0.001)
@@ -276,7 +264,7 @@ def check_compress_failure() -> None:
 
 
 def check_tools() -> None:
-    workdir = _tempdir("loop-tools-")
+    workdir = tempdir("loop-tools-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, max_steps=4,
                             park_seconds=0.001)
@@ -301,7 +289,7 @@ def check_tools() -> None:
 
 
 def check_memory() -> None:
-    workdir = _tempdir("loop-memory-")
+    workdir = tempdir("loop-memory-")
     try:
         bridge = MemoryBridge(
             os.path.join(workdir, "memory"),
@@ -352,7 +340,7 @@ def check_memory() -> None:
 
 
 def check_usage() -> None:
-    workdir = _tempdir("loop-usage-")
+    workdir = tempdir("loop-usage-")
     try:
         config = _loop_config(name="自检", block_tokens=50, max_steps=10,
                             park_seconds=0.001)
@@ -471,7 +459,7 @@ def check_tool_fold() -> None:
 
 def check_speak_with_calls() -> None:
     """有工具调用的那条回复里，正文也得投递——不然模型以为说了，人没听到。"""
-    workdir = _tempdir("loop-both-")
+    workdir = tempdir("loop-both-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, max_steps=1,
                             park_seconds=0.001)
@@ -519,7 +507,7 @@ def check_wait_text() -> None:
 
 def check_wait_runtime() -> None:
     """真等：消息先到就醒，到点就报没等到。"""
-    workdir = _tempdir("loop-wait-")
+    workdir = tempdir("loop-wait-")
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
         config = _loop_config(name="自检", block_tokens=100000, standby=True,
@@ -556,7 +544,7 @@ def check_wait_runtime() -> None:
 
 def check_wait_resume() -> None:
     """重启时块里挂着没结果的 wait：接着等，醒了补上结果。"""
-    workdir = _tempdir("loop-resume-")
+    workdir = tempdir("loop-resume-")
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
         config = _loop_config(name="自检", block_tokens=100000, standby=True,
@@ -602,7 +590,7 @@ class TwoWaitsClient(FakeClient):
 
 def check_one_blocking_call() -> None:
     """阻塞的工具一个回复只能调一个；多出来的拒掉，并说清怎么办。"""
-    workdir = _tempdir("loop-blocking-")
+    workdir = tempdir("loop-blocking-")
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
         config = _loop_config(name="自检", block_tokens=100000, standby=True,
@@ -650,7 +638,7 @@ class FlakyClient(FakeClient):
 
 def check_retry() -> None:
     """模型调不通就一直试，循环不能因此停。"""
-    workdir = _tempdir("loop-retry-")
+    workdir = tempdir("loop-retry-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, max_steps=1,
                               retry_delay=0.01)
@@ -672,7 +660,7 @@ def check_retry() -> None:
 
 def check_watchdog() -> None:
     """连着几步没有外界动静：问一句「还在做事吗」，不硬停；提醒只留最近两条。"""
-    workdir = _tempdir("loop-watchdog-")
+    workdir = tempdir("loop-watchdog-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, watchdog_idle=2,
                               max_steps=5, park_seconds=0.001)
@@ -703,7 +691,7 @@ def check_watchdog() -> None:
 
 def check_archive() -> None:
     """短期记忆过期：压成一行搬进 archive.jsonl，图里删掉、召回不到。"""
-    workdir = _tempdir("loop-archive-")
+    workdir = tempdir("loop-archive-")
     try:
         data_dir = os.path.join(workdir, "memory")
         bridge = MemoryBridge(data_dir, lexical=True)
@@ -764,7 +752,7 @@ def check_usage_report() -> None:
 
 def check_recall_log() -> None:
     """每次 recall 记一行：以后调检索质量要用。"""
-    workdir = _tempdir("loop-recalllog-")
+    workdir = tempdir("loop-recalllog-")
     try:
         seen = []
         bridge = MemoryBridge(os.path.join(workdir, "memory"), lexical=True)
@@ -781,7 +769,7 @@ def check_recall_log() -> None:
 
 def check_inbox_trim() -> None:
     """进件表只留最近几条已读的，别一直涨。"""
-    workdir = _tempdir("loop-inbox-")
+    workdir = tempdir("loop-inbox-")
     try:
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         for index in range(5):
@@ -809,7 +797,7 @@ def check_prompts() -> None:
     for key in prompt_files.META:
         check(prompt_files.text(key).strip(), "每份提示词都要有内容：%s" % key)
 
-    workdir = _tempdir("loop-prompts-")
+    workdir = tempdir("loop-prompts-")
     try:
         path = os.path.join(workdir, "prompts.json")
         with open(path, "w", encoding="utf-8") as handle:
@@ -831,7 +819,7 @@ def check_prompts() -> None:
 
 def check_budget() -> None:
     """成本上限：撞到上限就停（没有输入通道时），撞到提醒线只提一句。"""
-    workdir = _tempdir("loop-budget-")
+    workdir = tempdir("loop-budget-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, max_steps=5,
                               park_seconds=0.001, daily_token_cap=1)
@@ -849,7 +837,7 @@ def check_budget() -> None:
         used = store.usage_today()
         check(used["total"] > 0, "今天的用量要算得出来：%r" % used)
 
-        warn_dir = _tempdir("loop-warn-")
+        warn_dir = tempdir("loop-warn-")
         try:
             config2 = _loop_config(name="自检", block_tokens=100000, max_steps=2,
                                    park_seconds=0.001, daily_token_warn=1)
@@ -876,7 +864,7 @@ def check_web() -> None:
     import urllib.error
     import urllib.request
 
-    workdir = _tempdir("loop-web-")
+    workdir = tempdir("loop-web-")
     httpd = None
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
@@ -960,7 +948,7 @@ def check_settings() -> None:
     import urllib.error
     import urllib.request
 
-    workdir = _tempdir("loop-set-")
+    workdir = tempdir("loop-set-")
     httpd = None
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
@@ -1053,7 +1041,7 @@ def check_settings() -> None:
 
 def check_boot_idle() -> None:
     """刚起来没人说话：先等着，不许自己开口；有人说了才走第一步。"""
-    workdir = _tempdir("loop-boot-")
+    workdir = tempdir("loop-boot-")
     timer = None
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
@@ -1088,7 +1076,7 @@ def check_boot_idle() -> None:
 
 def check_delete() -> None:
     """删一条原文：连它的工具结果一起删；压过的块不给删。"""
-    workdir = _tempdir("loop-del-")
+    workdir = tempdir("loop-del-")
     try:
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         block_id = store.open_block("2026-01-01 00:00:00")
@@ -1125,7 +1113,7 @@ def check_delete() -> None:
 
 def check_stop_raises() -> None:
     """要重启时直接在等里退出：记录里一个字都不留。"""
-    workdir = _tempdir("loop-stop-")
+    workdir = tempdir("loop-stop-")
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
         config = _loop_config(name="自检", block_tokens=100000, standby=True,
@@ -1151,7 +1139,7 @@ def check_stop_raises() -> None:
 
 def check_reload() -> None:
     """网页删了一条：不重启，循环在下个安全点自己重读。"""
-    workdir = _tempdir("loop-reload-")
+    workdir = tempdir("loop-reload-")
     try:
         db_path = os.path.join(workdir, "loop.sqlite3")
         config = _loop_config(name="自检", block_tokens=100000, data_dir=workdir)
