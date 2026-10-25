@@ -187,6 +187,9 @@ class Loop:
         self._warn_day = ""
         # 摘要失败后别每步都重试：等当前块再长一点。
         self._compress_after = 0
+        # 连着几步「只说了话、没调工具」：第 1 次之后在末尾问一句还要不要继续，
+        # 问了还是只说话就停下（不再问第二遍，免得提问本身变成复读机）。
+        self._quiet = 0
 
     # ── 工具面 ────────────────────────────────────────────────────────────
     def tools(self) -> List[dict]:
@@ -208,6 +211,8 @@ class Loop:
         got = self._drain_inbox()
         if got:
             self.since_external = 0
+            # 有新的话进来：这一步该接话，不是问它要不要继续。
+            self._quiet = 0
         else:
             self.since_external += 1
         idle = int(getattr(self.config, "watchdog_idle", 0) or 0)
@@ -217,7 +222,12 @@ class Loop:
             return "park"
         self._compress_if_needed()
         tools = self.tools()
+        # 上一轮说了话、没调工具：这一步末尾问一句「还要继续吗」，问得中性、
+        # 不带"该做什么"的提示——它自己决定调工具继续还是 wait 停下。
+        self.context.asking = self._quiet == 1
         messages = self.context.messages()
+        # 心跳那句只在注入的那一步出现一次：它说完就清掉，不进历史。
+        self.context.reminder = ""
         self.store.set_status("thinking")
         message = self._chat(messages, tools)
         usage = dict(getattr(self.client, "last_usage", None) or {})
@@ -235,10 +245,20 @@ class Loop:
         if calls:
             self._dispatch_calls(calls)
             kind = "call"
+            self._quiet = 0
         elif content:
-            kind = "speak"
+            if self._quiet >= 1:
+                # 问过了「还要继续吗」，它还是只说话：那就当它说完了，停下等。
+                self._quiet = 0
+                kind = "speak"
+                self._park("问过了，没有要接着做的事")
+            else:
+                # 说了话、没调工具：下一步问一次要不要继续，不直接替它续。
+                self._quiet = 1
+                kind = "speak"
         else:
             # 没有内容也没有调用：不说了，等有动静。
+            self._quiet = 0
             self._park("没有动作")
             kind = "park"
 
@@ -332,9 +352,10 @@ class Loop:
         """
         steps = self.since_external
         self.echo("[提醒] 连续 %d 步没有外界动静" % steps)
-        self._append({"role": "note",
-                      "content": prompt_files.render("watchdog.txt", steps=steps)},
-                     meta={"kind": "watchdog"})
+        text = prompt_files.render("watchdog.txt", steps=steps)
+        # 库里留一行备查（渲染时会被跳过），真正起作用的是这一步的瞬时注入。
+        self._append({"role": "note", "content": text}, meta={"kind": "watchdog"})
+        self.context.reminder = text
         self.since_external = 0
 
     # ── 校准 ──────────────────────────────────────────────────────────────

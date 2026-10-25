@@ -677,15 +677,16 @@ def check_retry() -> None:
 
 
 def check_watchdog() -> None:
-    """连着几步没有外界动静：问一句「还在做事吗」，不硬停；提醒只留最近两条。"""
+    """连着几步没有外界动静：当场提一句，不硬停；它不进历史。"""
     workdir = tempdir("loop-watchdog-")
     try:
         config = _loop_config(name="自检", block_tokens=100000, watchdog_idle=2,
                               max_steps=5, park_seconds=0.001)
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = FakeClient()
         loop = Loop(config, credentials=None, store=store,
                     compressor=Compressor(config, summarizer=fake_summarizer),
-                    memory=MemoryBridge.disabled(), client=FakeClient())
+                    memory=MemoryBridge.disabled(), client=client)
         logs = []
         loop.echo = logs.append
         loop.on_speak = lambda text: None
@@ -695,9 +696,10 @@ def check_watchdog() -> None:
         alarms = [entry for entry in loop.context.current.entries
                   if entry.meta.get("kind") == "watchdog"]
         check(len(alarms) >= 1, "报警要落成提醒记录")
-        rendered = loop.context.current_text()
-        check(rendered.count("没有外界的动静") <= 2,
-              "提醒最多留两条在上下文里：%d" % rendered.count("没有外界的动静"))
+        check(any("没有外界的动静" in prompt for prompt in client.prompts),
+              "提醒要在注入的那一步出现在输入里")
+        check("没有外界的动静" not in loop.context.block_text(),
+              "提醒不该进历史（它是当时的提醒，不是发生过的事）")
 
         loop.since_external = 5
         loop.inject_user("在吗")
@@ -1146,6 +1148,183 @@ def check_delete() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+class TalkOnlyClient(FakeClient):
+    """只会说话、永远不调工具：问它「还要继续吗」也还是说话。"""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    def chat(self, messages, tools=None, on_delta=None):
+        tail = str(messages[-1].get("content") or "")
+        self.asked.append("还要继续吗" in tail)
+        return super().chat(messages, tools, on_delta)
+
+    @staticmethod
+    def _reply(number: int):
+        return "第 %d 句。" % number, None
+
+
+class WaitAfterAskClient(FakeClient):
+    """说完一句，被问「还要继续吗」就调 wait 停下。"""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = 0
+
+    def chat(self, messages, tools=None, on_delta=None):
+        tail = str(messages[-1].get("content") or "")
+        if "还要继续吗" in tail:
+            self.asked += 1
+            self.calls += 1
+            self.last_usage = {"prompt_tokens": 10, "completion_tokens": 1}
+            return {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "wait-1", "type": "function",
+                                    "function": {"name": "wait",
+                                                 "arguments": "{\"until\": \"1s\"}"}}]}
+        return super().chat(messages, tools, on_delta)
+
+    @staticmethod
+    def _reply(number: int):
+        return "说完了。", None
+
+
+def check_ask() -> None:
+    """说了话、没调工具：先问一次要不要继续；问了还只说话就停。"""
+    context = Context(_loop_config(name="自检"))
+    context.current = Block([
+        BlockEntry({"role": "user", "content": "在吗"}, "2026-10-25 15:00:00"),
+        BlockEntry({"role": "assistant", "content": "在。"}, "2026-10-25 15:00:05"),
+    ], "2026-10-25 15:00:00", "2026-10-25 15:00:05")
+    plain = context.messages()[-1]["content"]
+    check("还要继续吗" not in plain, "不问的时候不该挂这句")
+    context.asking = True
+    asked = context.messages()[-1]["content"]
+    check(asked.rstrip().endswith("</system-reminder>"),
+          "问了就该在末尾那一帧里：%r" % asked[-60:])
+    check("还要继续吗" in asked, "问的话要写清在问什么")
+    check("还要继续吗" not in context.block_text(), "提问不该进记录")
+
+    # 只会说话：说一句 → 问一次 → 还只说 → 停。
+    workdir = tempdir("loop-ask-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=6)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = TalkOnlyClient()
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=client)
+        loop.echo = lambda line: None
+        loop.on_speak = lambda text: None
+        loop.inject_user("在吗")
+        loop.step()                       # 接话 → 说了，没调工具
+        check(client.asked == [False], "头一步不该自问自答")
+        loop.step()                       # 问了它一句
+        check(client.asked == [False, True], "说了话没调工具，下一步该问")
+        loop.step()                       # 还是只说话 → 停下
+        check(client.asked.count(True) == 1, "只问一次，不连问：%r" % client.asked)
+        check(loop.steps == 3, "三步之后该停：%d" % loop.steps)
+        check(loop.parked, "问了还只说话就该挂起")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    # 问它，它就调 wait：停得干净，记录里看得见这个决定。
+    workdir = tempdir("loop-ask-wait-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, standby=True,
+                              max_steps=6)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = WaitAfterAskClient()
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=client)
+        loop.echo = lambda line: None
+        loop.on_speak = lambda text: None
+        loop.inject_user("在吗")
+        loop.step()                       # 说了话
+        loop.step()                       # 被问一句 → 它调 wait(1s) 停下
+        check(client.asked == 1, "该问它一次：%d" % client.asked)
+        check("调用 wait" in loop.context.block_text(), "停下这个决定要进记录")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    # 问之前正好有人说话：这一步该接话，不该问要不要继续。
+    workdir = tempdir("loop-ask-input-")
+    try:
+        config = _loop_config(name="自检", block_tokens=100000, max_steps=6)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        client = TalkOnlyClient()
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=MemoryBridge.disabled(), client=client)
+        loop.echo = lambda line: None
+        loop.on_speak = lambda text: None
+        loop.inject_user("在吗")
+        loop.step()                       # 说了话
+        store.push("user", "我再说一句")   # 下一步开始前就有新话
+        loop.step()
+        check(client.asked == [False, False], "有新话进来就不该问要不要继续")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_record_marks() -> None:
+    """谁说的由角色分：对方是 user，自己是 assistant，系统提醒单立一条 user。
+
+    这条是服务器上真出过的事：整段记录塞进一条 user 消息、只标「对方：」，自己那几段
+    没标，它就把自己刚问的那句当成对方问的，顺着答了一遍。
+    """
+    entries = [
+        BlockEntry({"role": "user", "content": "在吗"}, "2026-10-25 15:00:00"),
+        BlockEntry({"role": "assistant", "content": "在。"}, "2026-10-25 15:00:05"),
+        BlockEntry({"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "wait",
+                                                 "arguments": "{\"until\": \"10m\"}"}}]},
+                   "2026-10-25 15:00:06"),
+        BlockEntry({"role": "tool", "tool_call_id": "c1", "content": "好"},
+                   "2026-10-25 15:00:07"),
+        BlockEntry({"role": "note", "content": "任务回来了"},
+                   "2026-10-25 15:00:08", {"kind": "task"}),
+        BlockEntry({"role": "note", "content": "已经连着 7 步没有外界的动静了。"},
+                   "2026-10-25 15:00:09", {"kind": "watchdog"}),
+    ]
+    context = Context(_loop_config(name="自检"))
+    context.current = Block(entries, "2026-10-25 15:00:00", "2026-10-25 15:00:09")
+    messages = context.messages()
+    roles = [m["role"] for m in messages]
+    check(roles[0] == "system", "第一条是 system")
+    check(roles[1] == "user" and "在吗" in messages[1]["content"],
+          "对方的话是 user：%r" % messages[1])
+    check(roles[2] == "assistant" and "在。" in messages[2]["content"],
+          "自己的话是 assistant：%r" % messages[2])
+    check("调用 wait" in messages[2]["content"] and "结果：好" in messages[2]["content"],
+          "调用和结果并进它自己那条：%r" % messages[2]["content"])
+    check(roles[3] == "system" and "任务回来了" in messages[3]["content"],
+          "系统动静走 system：%r" % messages[3])
+    check(messages[3]["content"].startswith("<system-reminder>"),
+          "系统注入要套标签：%r" % messages[3]["content"])
+    check(not any("没有外界的动静" in str(m["content"]) for m in messages),
+          "心跳提醒不该进上下文（它是当时的提醒，不是发生过的事）")
+    joined = "\n".join(str(m["content"]) for m in messages[1:])
+    check("我：" not in joined and "对方：" not in joined,
+          "原生消息里不该有前缀：%r" % joined[:80])
+    check(messages[-1]["role"] == "user" and "现在 10-25" in messages[-1]["content"],
+          "墙钟是末尾单独那一帧（带 tools 时端点不接受末尾 system）")
+    check(messages[-1]["content"].startswith("<system-reminder>"),
+          "末尾那帧也要套标签：%r" % messages[-1]["content"])
+    check(roles.count("user") == 2, "user 只有两条：对方的话 + 末尾那帧：%r" % roles)
+
+    # 纯文本渲染（压缩模型看的）还是要标：它没有 role 可读。
+    text = serialize_entries(entries)
+    check("对方：在吗" in text and "我：在。" in text, "纯文本要标两边：%r" % text)
+    check("提醒：" in text, "纯文本要标系统提醒：%r" % text)
+    check("\n\n" not in text, "纯文本里一条话不留空行，免得下一段像别人接的")
+
+
 def check_stop_raises() -> None:
     """要重启时直接在等里退出：记录里一个字都不留。"""
     workdir = tempdir("loop-stop-")
@@ -1380,6 +1559,8 @@ def main() -> int:
     check_reload()
     check_web_tools()
     check_shell()
+    check_ask()
+    check_record_marks()
     print("ok: %d checks" % CHECKS[0])
     return 0
 

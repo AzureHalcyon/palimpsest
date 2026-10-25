@@ -31,11 +31,15 @@ META = {
                  "一块记录怎么压成一段摘要：越早越略、保留专名数字、结尾写“现在到哪了”。",
                  "compress.txt"),
     "tools": ("工具说明",
-              "remember / recall / recollect / wait 四个工具的说明文字（`## 键` 分段，键名不能改）。",
+              "工具面的说明文字（`## 键` 分段，键名不能改）：remember / recall / recollect /"
+              " wait / fetch / search / run。",
               "tools.txt"),
     "watchdog": ("心跳提醒",
                  "连着几步没有外界动静时问的那一句。改的是语气，不是逻辑。",
                  "watchdog.txt"),
+    "ask": ("问要不要继续",
+            "上一轮说了话、没调工具时，在记录末尾挂一句问它要不要继续。要中性，别引导。",
+            "ask.txt"),
 }
 
 _PLACEHOLDER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")

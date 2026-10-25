@@ -195,6 +195,7 @@ details.frow>summary:hover{color:var(--fg2)}
 .spin{font-variant-numeric:tabular-nums}
 .mpill{flex:none;font-size:11px;color:var(--faint);border:1px solid var(--line2);
   border-radius:8px;padding:1px 7px;font-family:var(--mono);white-space:nowrap}
+#c-model{cursor:pointer}
 .pill.mbtn{background:transparent;cursor:pointer;font-family:var(--mono)}
 .pill.mbtn:hover{color:var(--fg);border-color:var(--line3);background:var(--hover)}
 .iconbtn{width:26px;height:26px;border-radius:8px;border:1px solid var(--line2);
@@ -330,6 +331,25 @@ details.item .body{padding:0 0 9px;font-family:var(--mono);font-size:11.5px;
 #login button{width:100%;background:var(--fg);border:0;color:var(--bg);border-radius:9px;
   padding:9px;font:inherit;font-weight:600;cursor:pointer}
 @media (max-width:860px){#side{display:none}}
+/* 手机宽度：顶栏那几个药丸会互相挤，「对话」被折成两行。窄屏就收紧、去掉重复的
+   状态细节（「在等：任何动静」下面那行已经说了），模型名超长截断。 */
+@media (max-width:600px){
+  #top{padding:8px 12px;gap:6px;font-size:12.5px}
+  #top .tabs{gap:12px;white-space:nowrap;flex:none}
+  #top .tabs span{padding-bottom:8px;margin-bottom:-9px;white-space:nowrap}
+  #top .right{gap:6px;min-width:0}
+  #top .right .pill{padding:2px 7px;font-size:11px;white-space:nowrap}
+  #h-detail{display:none}
+  /* 顶栏那个模型药丸在窄屏只够写一半，会把 flash / reasoner 这类区分度截掉；
+     底下状态行本来就写着完整模型名，把它变成入口。 */
+  #h-model{display:none}
+  .pill.mbtn{max-width:104px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    display:block}
+  .iconbtn{width:24px;height:24px;flex:none}
+  #statusline{overflow:hidden;white-space:nowrap}
+  .wrap{padding:0 14px}
+  #bottom{padding:0 14px 8px}
+}
 </style>
 </head>
 <body>
@@ -448,6 +468,11 @@ function isDark() {
 function applyTheme() {
   const dark = isDark();
   document.documentElement.dataset.theme = dark ? "dark" : "light";
+  // 手机壳（`:webview` 那个 APK）给系统栏让位，那一条是它自己的窗口底色，
+  // 页面换主题得告诉它一声，不然顶上会留一条对不上的黑边。浏览器里没有这个对象。
+  if (window.palimpsestShell && window.palimpsestShell.theme) {
+    window.palimpsestShell.theme(dark);
+  }
   const btn = $("theme");
   if (btn) {
     btn.textContent = dark ? "☀" : "☾";
@@ -744,6 +769,8 @@ async function poll() {
     for (const e of feed.entries) addEntry(e);
     if (feed.entries.length) S.since = feed.cursor.block + ":" + feed.cursor.seq;
     paint(st);
+    const empty = $("empty");
+    if (empty && empty.textContent !== "还没有记录。") empty.textContent = "还没有记录。";
     if ($("drawer").classList.contains("open") && Date.now() - S.ctxAt > 2500) {
       S.ctxAt = Date.now();
       renderContext(await api("/context"));
@@ -850,7 +877,7 @@ $("into").onclick = () => {
   localStorage.setItem("palimpsest.token", S.token);
   $("login").style.display = "none";
   S.since = "0:0"; S.step = 0; S.lastStep = -1; S.calls.clear();
-  $("thread").innerHTML = '<div class="wrap"><div class="empty">载入中…</div></div>';
+  $("thread").innerHTML = '<div class="wrap"><div class="empty" id="empty">载入中…</div></div>';
   poll();
 };
 /* ── 选模型 ───────────────────────────────────────────────────────────── */
@@ -927,6 +954,7 @@ $("picker").onclick = (ev) => {
   if (ev.target.id === "picker") $("picker").classList.remove("open");
 };
 $("h-model").onclick = () => openPicker("chat", null);
+$("c-model").onclick = () => openPicker("chat", null);   // 窄屏上顶栏那个藏了，这里还能换
 
 /* ── 设置 ─────────────────────────────────────────────────────────────── */
 let SET_FIELDS = [];

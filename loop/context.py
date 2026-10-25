@@ -216,17 +216,41 @@ def _recall_stub(content: str) -> str:
     return "结果：%s（已折叠）：%s" % (head, "、".join(items))
 
 
-# 心跳提醒：连着几步没有外界动静时问一句「还在做事吗」。它不是发生过的事，
-# 所以只留最近两条，更早的直接不渲染（数据还在，只是不进上下文）。
-_ALARM_KEEP = 2
+# 心跳提醒：连着几步没有外界动静时的一句系统动静。它不是发生过的事，所以库里
+# 只留一行、**不进上下文**；真要让它当场起作用，走 `Context.reminder` 的瞬时注入。
 
 
-def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0) -> str:
-    """把块写成记录：对白、调用、结果都用自然写法，不用方括号标记。
+_BLANK_LINES = re.compile(r"\n[ \t]*(?:\n[ \t]*)+")
+
+
+def _one_turn(text: str) -> str:
+    """纯文本渲染时，把一条话里的空行并成一个换行。
+
+    文本渲染靠行首的「对方：」「我：」认是谁在说；一条话里留着空行，下一段看起来
+    就像另一个人接的话了。原生消息（`Context._turns`）不用它——role 已经说明白了，
+    段落想留就留。
+    """
+    return _BLANK_LINES.sub("\n", str(text or "").strip())
+
+
+def _reminder(text: str) -> str:
+    """系统注入的东西套一层标签：环境、心跳提醒、那句提问都走这里。
+
+    它们混在 user 帧里（末尾那条帧只能是 user，见 `Context.messages`），套上标签
+    才和对方说的话分得开；sink 里也写了「套着标签的都是系统注入，不是对方说的」。
+    """
+    return "<system-reminder>%s</system-reminder>" % str(text or "").strip()
+
+
+def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
+    """每条记录 → (角色, 文本, 是不是“说的话”)。
+
+    角色用 api 那三种：`user` 是对方、`assistant` 是自己、`note` 是系统提醒。
+    工具调用与结果都算它自己的动作（assistant），但不是"说的话"，纯文本渲染时
+    不加前缀。两个渲染入口（原生消息 / 纯文本）都吃这一份，不会各说各的。
 
     remember 的 note 不写进记录：只留“写下了记忆：名字”，内容在记忆里。
-    `fold_keep` > 0 时按上面的保留模板处理工具结果（越旧越短）；调用行一律不动，
-    所以还看得出当时问的是什么。压缩走默认值，读的是原文。
+    `fold_keep` > 0 时按保留模板处理工具结果（越旧越短）；调用行一律不动。
     """
     folded = set()
     fresh = set()
@@ -244,11 +268,8 @@ def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0) -> str:
             if tool in _FOLDABLE_TOOLS and len(body) > _FOLD_MIN_CHARS:
                 folded.add(index)
 
-    alarms = [index for index, entry in enumerate(entries)
-              if str(entry.meta.get("kind") or "") == "watchdog"]
-    quiet = set(alarms[:max(0, len(alarms) - _ALARM_KEEP)])
 
-    lines = []
+    items = []
     for index, entry in enumerate(entries):
         message = entry.message
         role = str(message.get("role") or "")
@@ -256,28 +277,50 @@ def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0) -> str:
         calls = message.get("tool_calls") or []
         if role == "tool":
             tool = names.get(str(message.get("tool_call_id") or ""), "")
-            lines.append("结果：%s" % _result_text(
-                tool, content, index in fresh or fold_keep <= 0, index in folded))
+            items.append(("assistant", "结果：%s" % _result_text(
+                tool, content, index in fresh or fold_keep <= 0, index in folded),
+                False))
             continue
         if role == "user":
-            lines.append("对方：%s" % content)
+            items.append(("user", content, True))
             continue
         if role == "note":
-            if index in quiet:
+            # 心跳是当时的提醒，不是发生过的事：库里记着，但不进上下文
+            # （它的旧文案还会和现在的规矩打架）。新的一版走瞬时注入。
+            if str(entry.meta.get("kind") or "") == "watchdog":
                 continue
-            lines.append("提醒：%s" % content)
+            items.append(("note", content, True))
             continue
         if content:
-            lines.append(content)
+            items.append(("assistant", content, True))
         for call in calls:
             function = call.get("function") or {}
             name = str(function.get("name") or "")
             arguments = str(function.get("arguments") or "{}")
             if name == "remember":
-                lines.append("写下了记忆：%s" % _remember_name(arguments))
+                items.append(("assistant",
+                              "写下了记忆：%s" % _remember_name(arguments), False))
             else:
-                lines.append("调用 %s %s" % (name, arguments))
-    return "\n".join(line for line in lines if line.strip())
+                items.append(("assistant", "调用 %s %s" % (name, arguments), False))
+    return items
+
+
+def serialize_entries(entries: List[BlockEntry], fold_keep: int = 0) -> str:
+    """纯文本版：压缩模型只看得到字，所以两边都标前缀（对方：/ 我：/ 提醒：）。"""
+    lines = []
+    for role, text, spoken in _entry_lines(entries, fold_keep):
+        body = str(text or "").strip()
+        if not body:
+            continue
+        if not spoken:
+            lines.append(body)
+        elif role == "user":
+            lines.append("对方：%s" % _one_turn(body))
+        elif role == "note":
+            lines.append("提醒：%s" % _one_turn(body))
+        else:
+            lines.append("我：%s" % _one_turn(body))
+    return "\n".join(lines)
 
 
 class Context:
@@ -286,6 +329,11 @@ class Context:
         self.bands: List[Band] = []
         self.previous = Block()
         self.current = Block()
+        # 这一步要不要在末尾问一句「还要继续吗」：只在上一轮说了话、没调工具时置位。
+        # 和墙钟一样只拼进输入，不落库——它是一句提问，不是谁说的话。
+        self.asking = False
+        # 这一步要顺带说一句系统动静（心跳）。只进这一步的输入，下一步清空。
+        self.reminder = ""
 
     # ── 状态 ──────────────────────────────────────────────────────────────
     def set_state(self, bands: List[Band], previous: Block, current: Block) -> None:
@@ -346,6 +394,7 @@ class Context:
             raise ValueError("sink 第一句要名字，但 config.name 是空的")
         return prompt_files.render("sink.txt", name=name,
                                    recall=self.config.recall_tool,
+                                   wait=self.config.wait_tool,
                                    today=time.strftime("%Y-%m-%d")).strip()
 
     def _render_band(self, band: Band) -> str:
@@ -387,12 +436,52 @@ class Context:
                 parts.append("%s %s" % (label, humanize(delta)))
         return "（%s）" % "；".join(parts)
 
+    def _turns(self) -> List[dict]:
+        """两块原文拼成原生消息：谁在说话由 role 说，不再靠行首前缀。
+
+        工具调用与结果并进做那件事的那条 assistant 消息——那是它自己的动作和环境
+        的回话；放进 user 就变成"对方说的"，正是要修的毛病。以心跳提醒为代表的
+        系统动静走 `system`（实测 deepseek-flash 接受中途插的 system，而且会读），
+        它与前后都不合并。
+        """
+        fold_keep = int(getattr(self.config, "tool_fold_keep", 0) or 0)
+        turns: List[dict] = []
+        for role, text, _spoken in _entry_lines(
+                list(self.previous.entries) + list(self.current.entries), fold_keep):
+            body = str(text or "").strip()
+            if not body:
+                continue
+            if role == "note":
+                turns.append({"role": "system", "content": _reminder(body),
+                              "_own": False})
+                continue
+            target = "user" if role == "user" else "assistant"
+            last = turns[-1] if turns else None
+            if last is not None and last["role"] == target and last.get("_own", True):
+                last["content"] = "%s\n%s" % (last["content"], body)
+            else:
+                turns.append({"role": target, "content": body})
+        for turn in turns:
+            turn.pop("_own", None)
+        return turns
+
     def messages(self) -> List[dict]:
-        block = self.block_text().strip()
-        if not block:
-            block = "（接着上面。）" if self.bands or self.previous.entries else "（还没有记录。）"
-        block = "%s\n\n%s" % (block, self.clock_text())
-        return [
-            {"role": "system", "content": self.system_text()},
-            {"role": "user", "content": block},
-        ]
+        """按角色拼消息：对方说的话、自己说过的、系统动作各归各位。
+
+        末尾那一帧是环境（墙钟，要问时带上「还要继续吗」），用 `user` 是因为**带
+        tools 时端点不接受末尾是 system**（deepseek-flash 直接 400；中间的 system
+        可以）。所以它单独成一帧、括号包着，不并进对方的话里。
+        """
+        turns = self._turns()
+        tail = []
+        if not turns:
+            tail.append("（接着上面。）" if self.bands or self.previous.entries
+                        else "（还没有记录。）")
+        if self.reminder:
+            tail.append(self.reminder)
+        tail.append(self.clock_text())
+        if self.asking:
+            tail.append(prompt_files.render("ask.txt"))
+        return ([{"role": "system", "content": self.system_text()}]
+                + turns
+                + [{"role": "user", "content": _reminder("\n".join(tail))}])

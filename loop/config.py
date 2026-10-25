@@ -64,6 +64,7 @@ def load_credentials(path: str = "") -> LoopCredentials:
 class LoopConfig:
     name: str = ""                    # sink 第一句的名字；空就是没定 persona
     recall_tool: str = "recall"       # sink 里写的搜索工具名
+    wait_tool: str = "wait"           # sink 里写的「停下等」工具名
     lexical: bool = False             # 词面检索；默认关，只用嵌入
     recent_steps: int = 0             # 最近 N 步不入召回；0=关
     model: str = "deepseek-flash"
