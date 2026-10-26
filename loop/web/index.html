@@ -493,7 +493,7 @@ details.sub .sb{padding:4px 0 2px 8px;border-left:2px solid var(--line);
 const $ = (id) => document.getElementById(id);
 const S = {token: localStorage.getItem("palimpsest.token") || "",
   since: "0:0", step: 0, lastStep: -1, pinned: true, sending: false, models: null,
-  usage: new Map(), calls: new Map(), ctxAt: 0, cache: null};
+  usage: new Map(), calls: new Map(), ctxAt: 0, cache: null, statusKind: ""};
 
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -545,7 +545,13 @@ async function api(path, opts) {
   opts.headers = Object.assign({"Authorization": "Bearer " + S.token}, opts.headers || {});
   const res = await fetch(path, opts);
   if (res.status === 401) { $("login").style.display = "flex"; throw new Error("401"); }
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  if (!res.ok) {
+    // 服务端把原因放在 {"error": …} 里；不读出来，界面上就只剩一个 HTTP 400，
+    // 谁知道是哪一项不合法。
+    let why = "";
+    try { why = String((await res.json()).error || ""); } catch (e) { }
+    throw new Error(why || ("HTTP " + res.status));
+  }
   return res.json();
 }
 const wrap = () => { const w = document.createElement("div"); w.className = "wrap"; return w; };
@@ -983,6 +989,7 @@ function paint(st) {
   paintDraft(st);
   $("s-name").textContent = st.name || "palimpsest";
   const kinds = {thinking: "在想", waiting: "在等", parked: "挂着", retry: "重试", idle: "闲"};
+  S.statusKind = (st.status && st.status.kind) || "";
   $("h-status").textContent = kinds[st.status.kind] || "—";
   $("h-detail").textContent = st.status.detail || "";
   S.models = st.models || S.models;
@@ -1506,8 +1513,18 @@ $("set-restart").onclick = async () => {
 };
 $("tab-set").onclick = openSettings;
 if (!S.token) $("login").style.display = "flex";
-poll();
-setInterval(poll, 1000);
+/* 轮询：平时一秒一次；她在想的时候提到 300ms。一秒就回完的那些句子，
+   一秒一次的轮询连一帧都抓不到，看上去就跟没有流式一样。长请求再补一次。 */
+let pollTimer = 0;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const delay = S.statusKind === "thinking" ? 300 : 1000;
+  pollTimer = setTimeout(async () => {
+    await poll();
+    schedulePoll();
+  }, delay);
+}
+(async () => { await poll(); schedulePoll(); })();
 </script>
 </body>
 </html>

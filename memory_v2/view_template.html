@@ -1164,7 +1164,7 @@ function pick(wx, wy) {
 
 /* ------------------------------------------------------------------ 编辑
  * 页面只攒改动，不写库：改名 / 删事件 / 剪边都先在本页生效（看得见结果），
- * 导出 edits.json 之后再 `python -m memory_v2 apply` 落到 graph.json。
+ * 点「存到服务器」把它交给循环，下一步由循环落到 graph.json。
  * 这样记忆图仍然只有一个写者（循环进程），页面这边永远只读。
  */
 function pushEdit(op) {
@@ -1264,7 +1264,10 @@ async function saveEditsToServer() {
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
-    if (note) note.textContent = "已存到 " + data.path + "；再跑 python -m memory_v2 apply --file 那个文件";
+    if (note) note.textContent = "存下了 " + data.count + " 处，循环下一步就落到图里（几秒），这页等会儿自己刷新";
+    S.edits = [];
+    refreshEditBadge();
+    setTimeout(function () { location.reload(); }, 2500);
   } catch (error) {
     if (note) note.textContent = "存不进去（" + error.message + "）：用「导出编辑清单」下载文件也一样。";
   }
@@ -1572,8 +1575,8 @@ function renderPanel() {
       '<div class="edname" id="nameBox" style="display:none">' +
       '<input id="nameInput" type="text" placeholder="新名字">' +
       '<button id="nameOk">确定</button></div>' +
-      '<div class="note" style="margin-top:6px">改动只攒在这一页；导出（或在网页里「存到服务器」）' +
-      "后跑 <code>python -m memory_v2 apply --file edits.json</code> 才写库。</div>" +
+      '<div class="note" style="margin-top:6px">改动先攒在这一页；点「存到服务器」，循环下一步' +
+      "就落到图里。「导出清单」只是下载一份 JSON。" + "</div>" +
       '<div class="note" id="saveNote" style="color:#8cffcd"></div>' +
       '<div class="note" style="margin-top:6px">连着的边（点 × 剪断）</div>' +
       '<div class="edlist" id="edgeList">' + edgeRows + "</div>" +

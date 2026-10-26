@@ -250,6 +250,9 @@ def _reminder(text: str) -> str:
 
 
 _FAKE_CALL = re.compile(r"^\s*调用\s+\S+\s+\{")
+# 调用协议漏进正文的特殊 token（`<｜｜DSML｜｜ calls>` 那种）。正常文字里不会有 `｜`
+# 和尖括号的这个组合，按行丢最省事。
+_LEAKED_MARK = re.compile(r"<｜|｜｜DSML｜｜")
 
 
 def strip_fake_calls(text: str) -> str:
@@ -261,7 +264,12 @@ def strip_fake_calls(text: str) -> str:
 
     `结果：…` 不单独删：它完全可能是她自己的一句话（"结果：他们没来"）。
     只有这条正文已经被判定成"抄记录"（出现了伪造的调用行）时，才把结果行一起清掉。
+
+    另外整行丢掉**调用协议漏出来的标记**：模型偶尔把工具调用写成正文里的
+    `<｜｜DSML｜｜ calls>` 那种特殊 token，是协议没走 `tool_calls` 而是漏进了话里。
+    正常文字里不会出现 `<｜` 或 `｜｜DSML｜｜`，所以按行丢不会误伤。
     """
+    text = _drop_leaked_marks(text)
     lines = str(text or "").splitlines()
     faked = any(_FAKE_CALL.match(line) for line in lines)
     if not faked:
@@ -274,6 +282,13 @@ def strip_fake_calls(text: str) -> str:
             continue
         kept.append(line)
     return "\n".join(kept).strip()
+
+
+def _drop_leaked_marks(text: str) -> str:
+    """把夹着调用协议标记的行整行删掉，别的行原样留着。"""
+    lines = [line for line in str(text or "").splitlines()
+             if not _LEAKED_MARK.search(line)]
+    return "\n".join(lines).strip()
 
 
 def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:

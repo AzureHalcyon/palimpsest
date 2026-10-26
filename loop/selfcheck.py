@@ -1131,6 +1131,34 @@ def check_settings() -> None:
         else:
             raise AssertionError("下拉的野值也存进去了")
 
+        # 400 要带原因：页面把它原样显示出来，不然只剩「HTTP 400」谁知道错在哪。
+        try:
+            call("/settings", {"values": {"max_tokens": "abc"}}, "PUT")
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8") or "{}")
+            check(exc.code == 400 and str(body.get("error") or "").strip(),
+                  "400 要带一句人话：%r" % body)
+        else:
+            raise AssertionError("非数字的 max_tokens 也存进去了")
+
+        # 整张表一起存（页面就是这么发的）：空着的「整理用的模型」必须放行。
+        # 它空着 = 跟主模型走，以前漏了 optional，于是整页保存一律 400——
+        # 线上表现为「改思考强度回传 HTTP 400」，其实跟那一项无关。
+        check(fields["persona_model"].get("optional") is True,
+              "整理用的模型空着是合法的（空 = 跟主模型走）")
+        whole = dict(payload["values"])
+        whole["user_name"] = whole.get("user_name") or "对方"   # 名字空着不是这次的考点
+        whole["persona_model"] = ""
+        whole["reasoning_effort"] = "high"
+        try:
+            call("/settings", {"values": whole}, "PUT")
+        except urllib.error.HTTPError as exc:
+            raise AssertionError("整页保存被拒：%s %s" % (
+                exc.code, exc.read().decode("utf-8", "replace"))) from None
+        check(config.reasoning_effort == "high", "整页保存要能把思考强度改掉")
+        check(settings.load(workdir).get("reasoning_effort") == "high",
+              "思考强度要落盘：%r" % settings.load(workdir).get("reasoning_effort"))
+
         # 换嵌入模型：得当场重建嵌入器（它是造好就带着模型名的）。
         import types
         made = []
@@ -1451,6 +1479,17 @@ def check_record_marks() -> None:
     prose = "我问了一圈。\n结果：他们还是没来。"
     check(strip_fake_calls(prose) == prose, "正常的「结果：」不该被吃掉：%r"
           % strip_fake_calls(prose))
+    # 调用协议漏进正文（线上真出现过）：带特殊标记的那几行整行丢，别的话留着
+    leaked = ("我这边其实不用睡，等你走了我就停下来歇着。\n\n"
+              "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"wait\">\n"
+              "<｜｜DSML｜｜ parameter name=\"kinds\">[\"user\"]</｜｜DSML｜｜ parameter>")
+    fixed = strip_fake_calls(leaked)
+    check("｜" not in fixed and "DSML" not in fixed,
+          "漏出来的调用标记要删干净：%r" % fixed)
+    check(fixed == "我这边其实不用睡，等你走了我就停下来歇着。",
+          "标记旁边的话要原样留着：%r" % fixed)
+    check(strip_fake_calls("<｜｜DSML｜｜ calls>") == "",
+          "整条都是标记时，正文就该是空的")
     check(not any("没有外界的动静" in str(m["content"]) for m in messages),
           "心跳提醒不该进上下文（它是当时的提醒，不是发生过的事）")
     joined = "\n".join(str(m["content"]) for m in messages[1:])
@@ -1597,6 +1636,47 @@ def check_memory_tools() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def check_page_edits() -> None:
+    """页面上改完点「存到服务器」：清单进 `edits/`，循环下一步就落到图上。
+
+    以前是让人照着提示去跑 `python -m memory_v2 apply --file …`——网页上的人根本没
+    这个入口。
+    """
+    workdir = tempdir("loop-page-edits-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        bridge = MemoryBridge(os.path.join(workdir, "memory"), lexical=True)
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=bridge, client=FakeClient())
+        loop.echo = lambda line: None
+        bridge.call("remember", json.dumps({"name": "甲 记了一件事", "note": "内容"}))
+        event_id = bridge.graph.resolve("甲 记了一件事")
+
+        folder = os.path.join(workdir, "edits")
+        os.makedirs(folder)
+        path = os.path.join(folder, "edits-1.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"ops": [{"op": "rename", "id": event_id, "name": "甲 改了名"}]},
+                      handle, ensure_ascii=False)
+        loop._apply_edits()
+        check(bridge.graph.events[event_id]["name"] == "甲 改了名",
+              "页面上的改名要落到图上：%r" % bridge.graph.events[event_id])
+        check(not os.path.exists(path)
+              and os.path.exists(os.path.join(folder, "applied", "edits-1.json")),
+              "落完的清单要挪进 applied/，别重复应用")
+
+        bad = os.path.join(folder, "edits-bad.json")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write("{不是 json")
+        loop._apply_edits()
+        check(os.path.exists(bad), "坏清单留在原地，下次还能看")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def check_inbox_repair() -> None:
     """进件对账：已读但记录里没有的，要能查出来并补回去。"""
     workdir = tempdir("loop-repair-")
@@ -1621,7 +1701,7 @@ def check_inbox_repair() -> None:
 
 
 def check_call_cap() -> None:
-    """同一个工具一轮里连调超过上限：给一句话挡住，别一直写同一段记忆。"""
+    """同一个工具一轮里连调超过上限：问一句「还要接着用吗」，再调就照跑。"""
     workdir = tempdir("loop-cap-")
     try:
         config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
@@ -1629,22 +1709,50 @@ def check_call_cap() -> None:
         loop = Loop(config, LoopCredentials(chat_key="k"), store=store,
                     compressor=Compressor(config, summarizer=fake_summarizer),
                     memory=MemoryBridge.disabled(), client=FakeClient())
-        calls = [{"id": "c%d" % i, "type": "function",
-                  "function": {"name": "remember",
-                               "arguments": json.dumps({"name": "同一段"})}}
-                 for i in range(5)]
-        loop._dispatch_calls(calls)
-        texts = [entry.message.get("content") for entry in loop.context.current.entries
-                 if entry.message.get("role") == "tool"]
-        blocked = [t for t in texts if "这次没执行" in str(t)]
-        check(len(blocked) == 2, "第 4、5 次该被挡：%r" % texts)
-        check(loop._turn_calls["remember"] == 5, "计数要照常累加")
+
+        def dispatch(times: int) -> list:
+            before = len([entry for entry in loop.context.current.entries
+                          if entry.message.get("role") == "tool"])
+            calls = [{"id": "c%d-%d" % (len(loop.context.current.entries), i),
+                      "type": "function",
+                      "function": {"name": "remember",
+                                   "arguments": json.dumps({"name": "同一段"})}}
+                     for i in range(times)]
+            loop._dispatch_calls(calls)
+            texts = [entry.message.get("content") for entry in loop.context.current.entries
+                     if entry.message.get("role") == "tool"]
+            return texts[before:]
+
+        texts = dispatch(3)
+        check(all("再调一次" not in str(t) for t in texts), "前三次照跑：%r" % texts)
+        check(loop._turn_calls["remember"] == 3, "计数要累加：%r" % loop._turn_calls)
+
+        # 第 4 次不硬挡，只问一句；它再调（第 5 次）就照跑，计数收回 1
+        texts = dispatch(2)
+        asked = [t for t in texts if "再调一次" in str(t)]
+        ran = [t for t in texts if "记忆还没接上" in str(t)]
+        check(len(asked) == 1, "第 4 次该问一句（不执行）：%r" % texts)
+        check("这次照跑" in str(asked[0]), "问话要说清再调就放行：%r" % asked[0])
+        check(len(ran) == 1, "确认后的那次要真执行：%r" % texts)
+        check(loop._turn_calls["remember"] == 1, "确认后计数重新起算：%r"
+              % loop._turn_calls)
+        check(loop._turn_confirm == set(), "确认完要把「问过了」清掉：%r"
+              % loop._turn_confirm)
+
+        # 重新起算之后照样三次一停：先两次照跑，第三次到点又问一遍（不会一直挡死）
+        texts = dispatch(2)
+        check(all("再调一次" not in str(t) for t in texts),
+              "确认后还能接着用：%r" % texts)
+        texts = dispatch(1)
+        check(len([t for t in texts if "再调一次" in str(t)]) == 1,
+              "再满三次还要问一遍：%r" % texts)
 
         # 对方说话之后计数清零：人叫她重试一次，不能还拿上一轮的次数挡回去。
         loop.store.push("user", "你试一次")
         check(loop._wait('{"kinds": ["user"]}') != "", "等到人的话要有个结果")
         loop._flush_after_tool()
         check(loop._turn_calls == {}, "对方说话后计数要清零：%r" % loop._turn_calls)
+        check(loop._turn_confirm == set(), "「问过了」也要清掉：%r" % loop._turn_confirm)
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -2239,6 +2347,7 @@ def main() -> int:
     check_stream()
     check_inbox_repair()
     check_memory_tools()
+    check_page_edits()
     check_call_cap()
     check_effort()
     print("ok: %d checks" % CHECKS[0])

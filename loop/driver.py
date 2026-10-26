@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -205,6 +206,7 @@ class Loop:
         # 墙钟：上一次带上它的时刻；`_woke` 记着"上一个工具是不是等到动静了"。
         self._clock_at = 0.0
         self._turn_calls = {}          # 这一轮各工具调了几次（外部一动就清零）
+        self._turn_confirm = set()     # 这一轮已经问过「还要接着用吗」的工具
         self._next_persona = 0.0
         # 流式的草稿：只给界面看，不进记录（记录只认最后那条完整消息）
         self.draft_text = ""
@@ -229,6 +231,7 @@ class Loop:
         if control.stop_requested():
             raise control.StopRequested()
         self._maybe_reload()
+        self._apply_edits()
         self.turn = self.store.next_turn()
         if hasattr(self.memory, "step"):
             self.memory.step = self.turn
@@ -456,8 +459,8 @@ class Loop:
             # 模型手写的“调用 x {...}”“结果：…”一律去掉：真调用走 tool_calls，
             # 真结果走 role=tool 的消息；正文里这两种行只能是它照着旧格式仿的。
             cleaned = strip_fake_calls(message.get("content") or "")
-            if cleaned != str(message.get("content") or "") and cleaned:
-                self.log("[修] 正文里有手写的调用/结果行，已去掉")
+            if cleaned != str(message.get("content") or "").strip():
+                self.log("[修] 正文里有手写的调用/结果行或协议标记，已去掉")
             message = dict(message)
             message["content"] = cleaned
         think = str(message.get("reasoning_content") or "").strip()
@@ -478,18 +481,28 @@ class Loop:
             name = str(function.get("name") or "")
             arguments = str(function.get("arguments") or "{}")
             content = ""
-            # 同一个工具在一轮（没有外界输入的一串步）里连调太多次：说明它在打转，
-            # 挡一下并把话说明白，别让它一直写同一段记忆（服务器上真发生过，7 步）。
-            self._turn_calls[name] = self._turn_calls.get(name, 0) + 1
-            if self._turn_calls[name] > _TURN_CALL_CAP:
-                content = ("（%s 这一轮已经调了 %d 次，这次没执行。同一条事不用反复记："
-                           "要说就说，要等就 wait；对方再说话之后计数清零，那时再调。）"
-                           % (name, _TURN_CALL_CAP))
+            # 同一个工具在一轮（没有外界输入的一串步）里连调太多次：说明它在打转。
+            # 不硬挡：第 4 次先问一句「还要接着用就再调一次」，它再调就照跑、计数
+            # 重新起算——人叫它做事的时候不该被次数卡死（挡死过一次，它想重试都不行）。
+            count = self._turn_calls.get(name, 0) + 1
+            self._turn_calls[name] = count
+            ask = ""
+            if count > _TURN_CALL_CAP:
+                if name in self._turn_confirm:
+                    self._turn_confirm.discard(name)
+                    self._turn_calls[name] = 1
+                    self.log("[确认] %s 这一轮第 %d 次照跑，计数重新起算" % (name, count))
+                else:
+                    ask = ("（%s 这一轮已经调了 %d 次。还要接着用就再调一次，这次照跑；"
+                           "不用了就说话，或者 wait。）" % (name, _TURN_CALL_CAP))
             if name in _BLOCKING_TOOLS:
                 if name in used:
                     content = ("一次只能调一个 %s：这个回复里已经调过了，这条没执行。"
                                "要同时等几类动静，用 %s 的 kinds。" % (name, name))
                 used.add(name)
+            if ask and not content:
+                content = ask
+                self._turn_confirm.add(name)
             text = content or self._call_tool(name, arguments)
             self._append({"role": "tool", "tool_call_id": call.get("id") or "",
                           "content": text})
@@ -510,6 +523,7 @@ class Loop:
             if entry.get("inbox_id"):
                 self.store.consume(int(entry["inbox_id"]))
                 self._turn_calls = {}
+                self._turn_confirm = set()
         self._after_tool = []
 
     def _call_tool(self, name: str, arguments: str) -> str:
@@ -541,6 +555,7 @@ class Loop:
             self._append(_inbox_entry(item), meta=meta)   # 落进记录
             self.store.consume(item["id"])                # 落住了才标已读
             self._turn_calls = {}
+            self._turn_confirm = set()
             taken += 1
             self.since_external = 0
 
@@ -589,8 +604,9 @@ class Loop:
             self._breathe(deadline)
 
     def _breathe(self, deadline: Optional[float]) -> None:
-        """等的时候顺手做维护：块满了就压，过期的短期记忆归档。"""
+        """等的时候顺手做维护：块满了就压，过期的短期记忆归档，页面上的改动落地。"""
         self._maintain()
+        self._apply_edits()
         self._maybe_reload()
         span = _POLL_SECONDS
         if deadline is not None:
@@ -619,6 +635,42 @@ class Loop:
             self.store.trim_inbox()
         except Exception as exc:
             self.log("[清进件失败] %s" % exc)
+
+    def _apply_edits(self) -> None:
+        """把页面「存到服务器」的改动落到图上。
+
+        网页那边是只读的（图只有循环这一个写者），所以它只把清单写进
+        `<数据>/edits/*.json`；这里在两步之间（和等的时候）取出来应用，落完把文件
+        挪进 `edits/applied/`，失败就留在原地下次再试。
+        """
+        folder = os.path.join(str(self.config.data_dir or ""), "edits")
+        if not os.path.isdir(folder) or self.memory.graph is None:
+            return
+        from memory_v2 import edits as memory_edits
+
+        done = os.path.join(folder, "applied")
+        targets = sorted(name for name in os.listdir(folder) if name.endswith(".json"))
+        for name in targets:
+            path = os.path.join(folder, name)
+            try:
+                payload = memory_edits.load(path)
+                if not payload["ops"]:
+                    raise memory_edits.EditError("清单里没有 ops")
+                result = memory_edits.apply(self.memory.graph, payload["ops"])
+                if result["changed"]:
+                    saved = memory_edits.backup(self.memory.graph.path)
+                    self.memory.graph.save()
+                    self.log("[页面改动] %d 处生效（备份 %s）" % (result["changed"],
+                                                                os.path.basename(saved)))
+                for line in result["log"]:
+                    self.log("[页面改动] %s" % line)
+                for line in result["skipped"]:
+                    self.log("[页面改动] 跳过：%s" % line)
+                os.makedirs(done, exist_ok=True)
+                os.replace(path, os.path.join(done, name))
+            except Exception as exc:       # 一条清单坏了不能把循环带下去
+                self.log("[页面改动] 这次没落成：%s（%s）" % (exc, name))
+                return
 
     def _maybe_rewrite_persona(self) -> None:
         """到点就重写一次自我描述：内容归她，时机归这里。

@@ -79,16 +79,17 @@ python -m memory_v2 restore --snapshot memory.psnap --to <dir>
 python -m memory_v2 view --data data/memory
 python -m memory_v2 view --data data/memory --label Rin --png
 
-# 改图：把页面上攒的编辑清单落到 graph.json（先备份；--dry-run 只说不写）
+# 改图：把页面上攒的编辑清单落到 graph.json（循环在跑时会自己应用，这是离线时的入口）
 python -m memory_v2 apply --data data/memory --file edits.json
 python -m memory_v2 apply --data data/memory --file edits.json --dry-run
 ```
 
 **改图走"清单"这条路**：页面是只读的（记忆图只有一个写者——循环进程），所以
-改名 / 删事件 / 剪边都在页面上先攒成一份 `edits.json`（选节点 → 面板里改名或删掉、
-边列表里点 × 剪断 → 顶栏「导出编辑清单」），再用 `apply` 落库。它会**先备份**
-`graph.json.bak-<时间>`，并且**只在循环挂起或停下时跑**（两个写者同时改会互相覆盖）。
-`apply` 只改图、不动 `状态/*.jsonl`：`ingest` / `ingest --rebuild` 会照状态记录把
+改名 / 删事件 / 剪边都在页面上先攒成一份清单（选节点 → 面板里改名或删掉、
+边列表里点 × 剪断 → 顶栏「存到服务器」）。**循环在跑就不用管**：`loop/driver.py`
+的 `_apply_edits` 会在两步之间把 `<数据>/edits/*.json` 取出来应用，先备份
+`graph.json.bak-<时间>`，落完挪进 `edits/applied/`。循环没在跑（或者想离线改）才用
+`apply` 那个命令。`apply` 只改图、不动 `状态/*.jsonl`：`ingest` / `ingest --rebuild` 会照状态记录把
 事件补回来，改名也只活在 `graph.json` 里。
 
 `view` 只用只读地读 `<dir>/graph.json`（有 `content-index.json` 时会画内容近邻），

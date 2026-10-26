@@ -566,7 +566,11 @@ class _Handler(BaseHTTPRequestHandler):
                     % (folder, exc))
 
     def _save_edits(self) -> None:
-        """页面里攒的改名/删除/剪边清单：存成文件，等人工 apply（不直接写图）。"""
+        """页面里攒的改名/删除/剪边：写进 `<数据>/edits/`，由循环在下一步落到图上。
+
+        网页是只读的（图只有循环一个写者），所以这里只排队；`_apply_edits` 取走并
+        挪进 `edits/applied/`。
+        """
         payload = self._body()
         ops = payload.get("ops")
         if not isinstance(ops, list) or not ops:
@@ -578,7 +582,8 @@ class _Handler(BaseHTTPRequestHandler):
         with open(path, "w", encoding="utf-8") as handle:
             json.dump({"data": self.server.memory_dir, "ops": ops},
                       handle, ensure_ascii=False, indent=2)
-        return self._send(200, {"ok": True, "path": path, "count": len(ops)})
+        return self._send(200, {"ok": True, "path": path, "count": len(ops),
+                                "note": "存下了，循环下一步就落到图里"})
 
     def _feed(self, query: dict) -> dict:
         store = _store_of(self.server)

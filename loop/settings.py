@@ -21,6 +21,8 @@ import time
 GROUPS = ("模型", "接口", "上下文", "记忆", "命令", "成本", "节奏")
 
 # 网页表单就按这张表画。加一个旋钮 = 在这里加一行 + `LoopConfig` 里加字段。
+# 空着是有意义的（空 = 跟主模型走、空 = 用凭证文件）就写 `"optional": True`：
+# 页面是**整张表一起存**的，漏一个就会让每次保存都 400（`persona_model` 踩过）。
 FIELDS = (
     {"key": "name", "group": "模型", "label": "名字", "type": "text",
      "help": "sink 第一句里的名字；改完重启生效"},
@@ -31,6 +33,7 @@ FIELDS = (
     {"key": "summary_model", "group": "模型", "label": "摘要模型", "type": "text",
      "picker": "summary", "help": "压旧块用的模型，可以比主模型便宜"},
     {"key": "persona_model", "group": "模型", "label": "整理用的模型", "type": "text",
+     "optional": True,
      "help": "写自我描述那次整理用哪个模型；空 = 跟主模型走（填便宜的就省主模型额度）"},
     {"key": "summary_provider", "group": "模型", "label": "摘要走哪家", "type": "select",
      "options": ["auto", "deepseek", "bailian"],
