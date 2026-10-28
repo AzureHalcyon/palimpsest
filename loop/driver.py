@@ -154,12 +154,31 @@ def _source_label(item: dict) -> str:
     return ("%s %s" % (head, sender)).strip() if sender else head
 
 
+def via_of(item: dict) -> dict:
+    """这条外部消息是**谁说给她的**：她说的话就打上这个标记，回给同一个会话。
+
+    本机直投的（`direct`：人就在这一头跟她说话，网页或命令行）没有"回给谁"可言，
+    返回空字典——没有这个标记，通道适配器就不会把话复述到别处去。
+    """
+    source = str(item.get("source") or "").strip()
+    if not source or item.get("direct"):
+        return {}
+    return {"source": source,
+            "chat_type": str(item.get("chat_type") or "private"),
+            "chat_id": str(item.get("chat_id") or ""),
+            "chat_name": str(item.get("chat_name") or "")}
+
+
+
 def _inbox_entry(item: dict) -> dict:
-    """一条进件写成记录：人说的话带来源前缀（群里连发言人），别的动静是提醒。"""
+    """一条进件写成记录：外部来的带来源前缀（群里连发言人），本机直投的原样进。"""
     kind = str(item.get("kind") or "user")
     text = str(item.get("text") or "").strip()
     if kind != "user":
         return {"role": "note", "content": "%s：%s" % (kind, text or "（没有内容）")}
+    if item.get("direct"):
+        # 本机对话：来源（网页 / 命令行）只是给仪表盘看的标签，不该每句都盖在她面前
+        return {"role": "user", "content": text}
     label = _source_label(item)
     if not label:
         return {"role": "user", "content": text}
@@ -167,7 +186,11 @@ def _inbox_entry(item: dict) -> dict:
 
 
 def _unread_text(summary: dict) -> str:
-    """攒着的那批：一行数字 + 每个会话几条 + 谁说得最多。"""
+    """攒着的那批：一行数字 + 每个会话几条 + 谁说得最多。
+
+    只陈述事实（几条、谁说的），不写"请调用某工具"——能不能读、怎么读，
+    在 `messages` 自己的说明里；把工具名塞进别人的话里，读起来像系统提示。
+    """
     parts = []
     for chat in summary.get("chats") or []:
         name = chat.get("chat_name") or chat.get("chat_id") or "某个会话"
@@ -178,7 +201,32 @@ def _unread_text(summary: dict) -> str:
     chat_total = int(summary.get("chat_total") or 0)
     if chat_total > len(summary.get("chats") or []):
         head += "（共 %d 个会话）" % chat_total
-    return "，".join([head] + parts) + "。要看就说 messages。"
+    return "，".join([head] + parts) + "。"
+
+
+def _one_via(came: dict) -> dict:
+    """这一步只有**一个**外部会话在叫她时，才立"回给谁"；几个一起就立不了。"""
+    real = {key: via for key, via in (came or {}).items()
+            if via and via.get("chat_id")}
+    if len(real) == 1:
+        return dict(next(iter(real.values())))
+    return {}
+
+
+def _ring_text(item: dict) -> str:
+    """有人来找她：谁、在哪儿。一句话就够。
+
+    群里的唤醒只有一种来路——被 @：别的群消息默认不叫醒（会话策略是 batch），
+    所以那儿写「@你」。
+    """
+    sender = str(item.get("sender_name") or "").strip()
+    chat_name = (str(item.get("chat_name") or "").strip()
+                 or str(item.get("chat_id") or "").strip() or "?")
+    source = str(item.get("source") or "").strip() or "外面"
+    who = (sender + " ") if sender else "有人"
+    if str(item.get("chat_type") or "private") == "group":
+        return "%s在群「%s」里 @ 你。" % (who, chat_name)
+    return "%s在 %s 上私聊你。" % (who, source)
 
 
 def _inbox_tools(text: dict) -> List[dict]:
@@ -270,6 +318,10 @@ class Loop:
         self._unread_total = 0
         # 距上一次外部输入过了几步：用来拦「自己在跟自己转」。
         self.since_external = 0
+        # 这一串话是回给谁的：外部消息把她叫醒时记下来（`via_of`），她说的话
+        # 就带着这个标记落库，通道那边照它定向回发；网页里说的话不带，也就不会
+        # 被复述到别的通道上去。等回去没事（wait 到点）就清掉。
+        self.via: dict = {}
         self.retries = 0
         self._next_archive = 0.0
         self._cap_day = ""
@@ -280,6 +332,9 @@ class Loop:
         self._clock_at = 0.0
         self._turn_calls = {}          # 这一轮各工具调了几次（外部一动就清零）
         self._turn_confirm = set()     # 这一轮已经问过「还要接着用吗」的工具
+        # 这一次工具调用的 meta：`messages` 靠它记下"读走的是哪几条进件"，
+        # 对账才不会把"她已经读进记录"的消息当成丢了、又插成一条 user
+        self._tool_meta: dict = {}
         self._next_persona = 0.0
         # 流式的草稿：只给界面看，不进记录（记录只认最后那条完整消息）
         self.draft_text = ""
@@ -546,6 +601,9 @@ class Loop:
         elif str(message.get("role") or "") == "assistant":
             # 有就存，没有就记一笔——"这一步为什么没有思考行"能查
             self.log("[思考] 这一步模型没给 reasoning")
+        if str(message.get("role") or "") == "assistant" and self.via:
+            # 这句话是回给谁的：通道那边照它定向回发（网页也照它画「→ 去哪儿」）
+            meta["via"] = dict(self.via)
         entry = self.context.append(message, meta)
         self.store.append_entry(self.current_id, entry, step=self.turn)
         return entry
@@ -580,9 +638,11 @@ class Loop:
             if ask and not content:
                 content = ask
                 self._turn_confirm.add(name)
+            self._tool_meta = {}
             text = content or self._call_tool(name, arguments)
             self._append({"role": "tool", "tool_call_id": call.get("id") or "",
-                          "content": text})
+                          "content": text}, meta=self._tool_meta or None)
+            self._tool_meta = {}
             self.log("[调用] %s %s" % (name, arguments))
             self.log("[结果] %s" % str(text)[:300].replace("\n", " / "))
         self._flush_after_tool()
@@ -596,9 +656,15 @@ class Loop:
         计数永远清不掉——人叫她重试一次，工具还会拿上一轮的次数挡回去。
         """
         for entry in self._after_tool:
+            inbox_id = int(entry.get("inbox_id") or 0)
+            if inbox_id and self.store.inbox_in_record(inbox_id):
+                # 记录里已经有这条了（崩在"落记录"和"标已读"之间、重启又走到这
+                # 一步）：只把已读补上，别把同一句话再插一遍。
+                self.store.consume(inbox_id)
+                continue
             self._append(entry["message"], meta=entry.get("meta") or {})
-            if entry.get("inbox_id"):
-                self.store.consume(int(entry["inbox_id"]))
+            if inbox_id:
+                self.store.consume(inbox_id)
                 self._turn_calls = {}
                 self._turn_confirm = set()
         self._after_tool = []
@@ -638,25 +704,37 @@ class Loop:
 
     # ── 等 ────────────────────────────────────────────────────────────────
     def _drain_inbox(self) -> int:
-        """每步开始先把攒着的消息读进来：人在你说话的时候插一句也得看到。"""
+        """每步开始先把攒着的消息读进来：人在你说话的时候插一句也得看到。
+
+        `via`（这句话是回给谁的）只在**一个**会话叫她的时候才立：几个会话同时
+        说话的时候挑不出来，宁可不立——立错了会把回答发给另一个人。
+        """
         taken = 0
+        came: dict = {}              # chat_id -> via；本机直投记成空
         while True:
             item = self.store.peek(policies=["wake"], unnotified=True)
             if item is None:
-                return taken
+                break
             # 带来源的（通道转进来的）只响铃：正文留在表里，等她的 messages 来取。
-            # 没有来源的是本机对话（网页 / 标准输入），正文直接进记录。
-            if str(item.get("source") or "").strip():
-                self.store.mark_notified(item["id"])
-            else:
-                self._append(_inbox_entry(item), meta=in_meta(item))
+            # 本机直投的（网页 / 命令行，`direct`）正文直接进记录。
+            if item.get("direct"):
+                if not self.store.inbox_in_record(item["id"]):
+                    self._append(_inbox_entry(item), meta=in_meta(item))
                 self.store.consume(item["id"])
+                came[str(item.get("chat_id") or "")] = {}
+            else:
+                self.store.mark_notified(item["id"])
+                came[str(item.get("chat_id") or "")] = via_of(item)
             self._turn_calls = {}
             self._turn_confirm = set()
             taken += 1
             self.since_external = 0
+        if taken:
+            self.via = _one_via(came)
+        return taken
 
     def _show_channels(self) -> str:
+        """会话台账：谁来过、几条没读、什么策略。只列事实。"""
         rows = self.store.channels()
         if not rows:
             return "还没有任何会话给你发过消息。"
@@ -668,7 +746,6 @@ class Loop:
             lines.append("%s · %s %s「%s」· 未读 %d · 策略 %s" % (
                 row.get("chat_id"), source, kind, name,
                 int(row.get("unread") or 0), row.get("policy") or "wake"))
-        lines.append("要读攒着的用 messages；改策略用 channels_set。")
         return "\n".join(lines)
 
     def _set_channel(self, arguments: str) -> str:
@@ -682,12 +759,15 @@ class Loop:
             return "channels_set 需要 chat 和 policy。"
         try:
             changed = self.store.set_policy(chat, policy)
+        except KeyError:
+            return "没有这个会话：%s。" % chat
         except ValueError as exc:
             return "改策略失败：%s" % exc
-        if not changed:
-            return "没有这个会话，或者它已经没有未读消息：%s。" % chat
         if policy == "wake":
             self._unread_total = 0        # 策略变了，下一行数字重新拼
+        if not changed:
+            return "把 %s 改成 %s 了（它现在没有未读的消息，往后进来的按新策略）。" % (
+                chat, policy)
         return "把 %s 改成 %s 了，影响到 %d 条没读的。" % (chat, policy, changed)
 
     def _read_messages(self, arguments: str) -> str:
@@ -708,7 +788,16 @@ class Loop:
         if not rows:
             return "没有攒着的消息（或者这个会话没有）。"
         self.store.consume_many([row["id"] for row in rows])
+        # 这几条的正文是作为**这条工具结果**进记录的：记下编号，对账时才不会
+        # 把它们当成"丢了"，从而又插一条 user 消息（2026-10-28 就这么窜过一次）。
+        self._tool_meta = {"inbox_ids": [int(row["id"]) for row in rows]}
         self._unread_total = 0
+        # 读完在跟谁说话：这批同属一个外部会话时，她接下来的话就该回到那儿
+        # （不然 batch 积压读回来再回答，回答根本发不出去）。
+        chats = {str(row.get("chat_id") or "") for row in rows
+                 if not row.get("direct") and str(row.get("source") or "")}
+        chats.discard("")
+        self.via = via_of(rows[-1]) if len(chats) == 1 else {}
         lines = ["读到 %d 条：" % len(rows)]
         lines.extend(_message_line(row) for row in rows)
         if len(rows) >= limit:
@@ -741,23 +830,26 @@ class Loop:
             # 只有 wake 的能把她叫醒；batch / mute 的留在表里，不打断这次等。
             item = self.store.peek(kinds or None, policies=["wake"], unnotified=True)
             if item is not None:
-                if str(item.get("source") or "").strip():
+                if not item.get("direct"):
                     # 通道来的：响铃，正文等她自己读。
                     self.store.mark_notified(item["id"])
+                    self.via = via_of(item)
                     self.since_external = 0
                     self._woke = True
                     self.store.set_status("thinking")
-                    return "有人找你（%s %s）；要看正文就说 messages。" % (
-                        item.get("source") or "外部",
-                        item.get("sender_name") or item.get("chat_name") or "")
+                    return _ring_text(item)
                 self._after_tool.append({"message": _inbox_entry(item),
                                          "meta": in_meta(item),
                                          "inbox_id": item["id"]})
+                self.via = {}
                 self.since_external = 0
                 self._woke = True
                 self.store.set_status("thinking")
                 return _woke_text(str(item["kind"]), time.time() - started)
             if deadline is not None and time.time() >= deadline:
+                # 等回去没事：上一句外部消息的回复窗口到此为止。否则过一阵她
+                # 自己想说的话，还会被当成在回那个会话。
+                self.via = {}
                 self._woke = True
                 self.store.set_status("thinking")
                 return _timeout_text(spec, time.time() - started)
@@ -892,7 +984,10 @@ class Loop:
         并记一条日志——补得回来的就不要再丢第二次。
         """
         try:
-            missing = self.store.inbox_unappended()
+            # 只看最近两小时的：重启时的洞就在眼前，别把傍晚的老消息翻出来重插
+            cutoff = time.strftime("%Y-%m-%d %H:%M:%S",
+                                   time.localtime(time.time() - _REPAIR_WINDOW))
+            missing = self.store.inbox_unappended(since=cutoff)
         except Exception as exc:
             self.log("[对账] 查不了进件：%s" % exc)
             return
@@ -900,11 +995,6 @@ class Loop:
         existing = {str(entry.message.get("content") or "").strip()
                     for entry in self.context.current.entries + self.context.previous.entries
                     if str(entry.message.get("role") or "") == "user"}
-        # 只看最近两小时的：重启时的洞就在眼前，别把傍晚的老消息翻出来重插
-        cutoff = time.strftime("%Y-%m-%d %H:%M:%S",
-                               time.localtime(time.time() - _REPAIR_WINDOW))
-        missing = [item for item in missing
-                   if str(item.get("ts") or "") >= cutoff]
         for item in missing:
             text = str(item.get("text") or "").strip()
             if text and text in existing:
@@ -914,6 +1004,7 @@ class Loop:
             try:
                 self._append(_inbox_entry(item), meta=in_meta(item))
                 existing.add(text)
+                self._fresh_input = True      # 补回来的话也要有一步，别只躺着等
                 self.log("[对账] 补回一条没落库的消息（%d 字）" % len(str(item.get("text") or "")))
             except Exception as exc:
                 self.log("[对账] 补不回去：%s" % exc)

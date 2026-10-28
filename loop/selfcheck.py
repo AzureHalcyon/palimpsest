@@ -26,7 +26,7 @@ from . import prompt_files
 from .config import LoopConfig, LoopCredentials
 from .context import (strip_fake_calls, Band, Block, BlockEntry, Context, estimate_tokens,
                       serialize_entries, time_range)
-from .driver import Loop, _timeout_text, _woke_text, parse_until
+from .driver import Loop, _ring_text, _timeout_text, _unread_text, _woke_text, parse_until
 from .store import LoopStore
 from .usage import collect, render
 from memory_v2.api import Memory
@@ -1286,6 +1286,20 @@ def check_inbox_channels() -> None:
         read = loop._read_messages(json.dumps({"chat": "g1"}))
         check("外部·群「群甲」 甲：在吗" in read, "读回来要带发言人：%r" % read)
         check(store.unread_batches()["total"] == 0, "读完就没未读了")
+        # 读完的正文是作为那条工具结果进记录的：编号要记在 meta 里，
+        # 否则重启对账会当成"丢了"，又插一条 user 消息（窜到网页对话里）
+        check(loop._tool_meta.get("inbox_ids"), "读回来的编号要跟着工具结果走：%r"
+              % loop._tool_meta)
+        loop._append({"role": "tool", "tool_call_id": "c1", "content": read},
+                     meta=loop._tool_meta)
+        loop._tool_meta = {}
+        check(store.inbox_unappended() == [],
+              "读进工具结果也算落库，对账不该再报它：%r" % store.inbox_unappended())
+        # 本机直投的不用对账：它是"先落记录再标已读"，漏了也轮不到补插一条 user
+        store.push("user", "网页这边的一句", source="网页", direct=True)
+        store.consume(store.inbox_recent(1)[0]["id"])
+        check(store.inbox_unappended() == [],
+              "本机直投不该出现在对账清单里：%r" % store.inbox_unappended())
 
         # batch：不响铃，只计数
         store.set_policy("g1", "batch")
@@ -1296,6 +1310,38 @@ def check_inbox_channels() -> None:
         check(store.unread_batches()["total"] == 1, "batch 记为未读")
         check("乙" in json.dumps(store.unread_batches(), ensure_ascii=False),
               "计数要带谁说的")
+
+        # mute：不提示，但点名那个会话仍然读得到（"不提示"不是"锁起来"）
+        # 新会话的默认策略按类型分：群 batch（自己去看），私聊 wake
+        store.push("user", "私聊的第一句", source="QQ", chat_type="private",
+                   chat_id="p9", chat_name="某甲", sender_name="甲")
+        store.push("user", "群里的第一句", source="QQ", chat_type="group",
+                   chat_id="g9", chat_name="群乙", sender_name="丁")
+        rows = {item["chat_id"]: item for item in store.channels()}
+        check(rows["p9"]["policy"] == "wake", "私聊默认 wake：%r" % rows["p9"])
+        check(rows["g9"]["policy"] == "batch", "群默认 batch：%r" % rows["g9"])
+        # 被 @ 的那条明确 wake：跟同一会话里攒着的分开
+        store.push("user", "@ 她的一句", source="QQ", chat_type="group",
+                   chat_id="g9", chat_name="群乙", sender_name="丁", policy="wake")
+        got = {item["text"]: item["policy"] for item in store.messages("g9")}
+        check(got.get("群里的第一句") == "batch", "没 @ 的攒着：%r" % got)
+        check(got.get("@ 她的一句") == "wake", "被 @ 的叫醒：%r" % got)
+
+        store.set_policy("g1", "mute")
+        store.push("user", "mute 之后的一句", source="外部", chat_type="group",
+                   chat_id="g1", chat_name="群甲", sender_name="丙")
+        read = loop._read_messages(json.dumps({"chat": "g1"}))
+        check("mute 之后的一句" in read, "点名会话时 mute 也读得到：%r" % read)
+        row = [item for item in store.channels() if item["chat_id"] == "g1"]
+        check(row and row[0]["unread"] == 0, "mute 的不该算未读：%r" % row)
+
+        # 改策略只影响未读，也要能把"压根没这个会话"和"改了 0 条"分开
+        raised = False
+        try:
+            store.set_policy("没有这个会话", "wake")
+        except KeyError:
+            raised = True
+        check(raised, "没有这个会话要抛 KeyError（回「改了 0 条」会让人以为失败了）")
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1304,7 +1350,7 @@ def check_inbox_channels() -> None:
 def check_unread_fade() -> None:
     """「还有 N 条」这行有保质期：刚拼上看得见，过几步就不进上下文了。"""
     config = _loop_config(name="自检")
-    line = {"role": "note", "content": "还有 3 条没看的消息。要看就说 messages。"}
+    line = {"role": "note", "content": "还有 3 条没看的消息，Ranchel 3 条。"}
     stamp = "2026-10-28 20:00:00"
 
     fresh_rows = [BlockEntry(line, stamp, {"kind": "unread", "total": 3})]
@@ -1329,11 +1375,15 @@ def check_unread_fade() -> None:
 
 
 def check_inbox_repair() -> None:
-    """进件对账：已读但记录里没有的，要能查出来并补回去。"""
+    """进件对账：已读但记录里没有的，要能查出来并补回去。
+
+    只对通道转进来的（本机直投是"先落记录再标已读"，不会只剩进件）。
+    """
     workdir = tempdir("loop-repair-")
     try:
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
-        item_id = store.push("user", "这条丢了")
+        item_id = store.push("user", "这条丢了", source="QQ", chat_id="c1",
+                            sender_name="甲")
         store.consume(item_id)               # 模拟"标了已读但没落库"
         missing = store.inbox_unappended()
         check(len(missing) == 1 and missing[0]["text"] == "这条丢了",
@@ -1346,6 +1396,131 @@ def check_inbox_repair() -> None:
         loop._repair_inbox()
         check("这条丢了" in loop.context.current_text(), "重启后要补进记录")
         check(store.inbox_unappended() == [], "补过之后对账要干净")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_ring_text() -> None:
+    """叫醒她那句话：谁、在哪儿，只陈述事实——不写"请调用某某工具"。
+
+    把工具名塞进别人的话里，读起来像系统提示；工具怎么用归工具自己的说明。
+    """
+    private = {"source": "QQ", "chat_type": "private", "chat_id": "2189761707",
+               "chat_name": "Ranchel", "sender_name": "Ranchel"}
+    ring = _ring_text(private)
+    check(ring == "Ranchel 在 QQ 上私聊你。", "私聊那句话：%r" % ring)
+    check("messages" not in ring and "工具" not in ring,
+          "叫醒那句话不该提工具名：%r" % ring)
+
+    group = {"source": "QQ", "chat_type": "group", "chat_id": "g1",
+             "chat_name": "群甲", "sender_name": "甲"}
+    ring = _ring_text(group)
+    check(ring == "甲 在群「群甲」里 @ 你。", "群里那句话：%r" % ring)
+    check("messages" not in ring, "群里那句也不该提工具名：%r" % ring)
+
+    unknown = {"source": "QQ", "chat_type": "private", "chat_id": "9"}
+    check(_ring_text(unknown) == "有人在 QQ 上私聊你。",
+          "没名字时退到「有人」：%r" % _ring_text(unknown))
+
+    note = _unread_text({"total": 3, "chat_total": 2, "chats": [
+        {"chat_id": "a", "chat_name": "Ranchel", "count": 2,
+         "senders": ["Ranchel 2"]},
+        {"chat_id": "g1", "chat_name": "群甲", "count": 1, "senders": []}]})
+    check("还有 3 条没看的消息" in note, "计数那行要留着：%r" % note)
+    check("messages" not in note, "计数那行也不该提工具名：%r" % note)
+
+
+def check_via_mark() -> None:
+    """她说的话带着「回给谁」：外部叫醒的那几轮才有，本机聊的不带。
+
+    通道适配器靠这个标记定向回发——没有它就不知道这句话该发给谁，
+    有了它，网页里跟她聊的话就不会被复述到 QQ 上去。
+    """
+    workdir = tempdir("loop-via-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=Memory.disabled(), client=FakeClient())
+
+        # 本机这边说话：正文直接进记录，来源照实记（网页 / 命令行），但不盖前缀、不带 via
+        store.push("user", "网页这边说的一句", source="网页", direct=True)
+        loop._drain_inbox()
+        check("网页这边说的一句" in loop.context.current_text(),
+              "本机直投要直接进记录：%r" % loop.context.current_text()[-60:])
+        check("网页：" not in loop.context.current_text(),
+              "本机直投不该在记录里盖来源前缀：%r" % loop.context.current_text()[-60:])
+        saved = store.inbox_recent(1)[0]
+        check(saved["source"] == "网页" and saved["direct"] == 1,
+              "来源要照实存下来（仪表盘要看）：%r" % saved)
+        check(not saved["chat_id"], "本机直投没有会话")
+        loop._append({"role": "assistant", "content": "本机这边回的一句"})
+        check(not loop.context.current.entries[-1].meta.get("via"),
+              "本机对话不该带 via：%r" % loop.context.current.entries[-1].meta)
+
+        # 通道来的：叫醒她，她说的话要带上是回给哪个会话
+        store.push("user", "在吗", source="QQ", chat_type="private",
+                   chat_id="2189761707", chat_name="她的人", sender_name="甲")
+        loop._drain_inbox()
+        loop._append({"role": "assistant", "content": "在的"})
+        via = loop.context.current.entries[-1].meta.get("via") or {}
+        check(via.get("source") == "QQ" and via.get("chat_id") == "2189761707",
+              "外部叫醒后要带 via：%r" % via)
+        check(via.get("chat_name") == "她的人" and via.get("chat_type") == "private",
+              "via 要能直接当回发地址用：%r" % via)
+
+        # 网页那边又说话：回复窗口换地方，之后的话不再算回给那个会话
+        store.push("user", "网页这边问一句")
+        loop._drain_inbox()
+        check(loop.via == {}, "本机说话要关掉回复窗口：%r" % loop.via)
+
+        # 等回去没事（到点没等到）：窗口也关掉
+        store.push("user", "再来一句", source="QQ", chat_type="private",
+                   chat_id="2189761707", chat_name="她的人", sender_name="甲")
+        loop._drain_inbox()
+        check(loop.via.get("chat_id") == "2189761707", "外部消息要开窗口")
+        loop.store.mark_notified(store.inbox_recent(1)[0]["id"])
+        said = loop._wait(json.dumps({"until": "1s"}))
+        check("到点了" in said, "应该等到点：%r" % said)
+        check(loop.via == {}, "等回去没事要关窗口：%r" % loop.via)
+
+        # 仪表盘那一份：读过的也列出来，数字对得上
+        recent = store.inbox_recent(limit=20)
+        check([row["text"] for row in recent][0] == "网页这边说的一句",
+              "最近的进件要按时间正序：%r" % [row["text"] for row in recent])
+        check(any(row["consumed"] for row in recent), "读过的也要列出来")
+        counts = store.inbox_counts()
+        check(counts["outside"] == 2, "外部来过几条要数对：%r" % counts)
+        check(counts["waiting"] >= 1, "还没读的条数要数对：%r" % counts)
+
+        # 读回积压（batch）也要立 via：不然她读完再答，回答根本发不出去
+        store.push("user", "攒着的之一", source="QQ", chat_type="private",
+                   chat_id="777", chat_name="某乙", sender_name="乙")
+        store.push("user", "攒着的之二", source="QQ", chat_type="private",
+                   chat_id="777", chat_name="某乙", sender_name="乙")
+        loop._read_messages(json.dumps({"chat": "777"}))
+        check(loop.via.get("chat_id") == "777", "读完积压要立 via：%r" % loop.via)
+
+        # 一步里两个会话同时叫她：挑不出来就别立（立错了会把话发给另一个人）
+        store.push("user", "甲这边", source="QQ", chat_type="private",
+                   chat_id="111", chat_name="甲", sender_name="甲")
+        store.push("user", "乙那边", source="QQ", chat_type="private",
+                   chat_id="222", chat_name="乙", sender_name="乙")
+        loop._drain_inbox()
+        check(loop.via == {}, "两个会话一起叫，不该立 via：%r" % loop.via)
+
+        # 外部编号：同一个编号只收一次（补拉历史、重连补漏都靠它）
+        first = store.push("user", "带编号的一条", source="QQ", chat_id="c1",
+                           ext_id="m-77")
+        again = store.push("user", "带编号的一条", source="QQ", chat_id="c1",
+                           ext_id="m-77")
+        check(first == again, "同一个 ext_id 再推要回原来那条：%r / %r" % (first, again))
+        check(store.inbox_has_ext("m-77"), "收过的编号要认得")
+        check(not store.inbox_has_ext("m-78"), "没见过的编号不该认")
+        check(store.inbox_recent(1)[0]["ext_id"] == "m-77",
+              "仪表盘那份要带出编号：%r" % store.inbox_recent(1)[0])
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1678,6 +1853,8 @@ def main() -> int:
     check_inbox_channels()
     check_unread_fade()
     check_inbox_repair()
+    check_ring_text()
+    check_via_mark()
     check_call_cap()
     check_effort()
     print("ok: %d checks" % CHECKS[0])

@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     policy TEXT NOT NULL DEFAULT 'wake',
     state TEXT NOT NULL DEFAULT 'pending',
     notified INTEGER NOT NULL DEFAULT 0,
+    direct INTEGER NOT NULL DEFAULT 0,
+    ext_id TEXT NOT NULL DEFAULT '',
     meta TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -86,6 +88,13 @@ CREATE TABLE IF NOT EXISTS chats (
     chat_name TEXT NOT NULL DEFAULT '',
     policy TEXT NOT NULL DEFAULT 'wake',
     updated TEXT NOT NULL DEFAULT ''
+);
+
+-- 收过的外部编号，只增不删（进件会被 trim 掉，这张留底）：补拉历史靠它去重。
+-- 叫 inbox_seen 不叫 inbox_ext：以前迁移建过一个同名索引，撞名起不来。
+CREATE TABLE IF NOT EXISTS inbox_seen (
+    ext_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -121,6 +130,7 @@ class LoopStore:
             self.db.execute(
                 "ALTER TABLE entries ADD COLUMN step INTEGER NOT NULL DEFAULT 0")
         inbox_columns = {row[1] for row in self.db.execute("PRAGMA table_info(inbox)")}
+        had_direct = "direct" in inbox_columns
         for name, ddl in (
                 ("source", "TEXT NOT NULL DEFAULT ''"),
                 ("chat_type", "TEXT NOT NULL DEFAULT 'private'"),
@@ -131,9 +141,34 @@ class LoopStore:
                 ("policy", "TEXT NOT NULL DEFAULT 'wake'"),
                 ("state", "TEXT NOT NULL DEFAULT 'pending'"),
                 ("notified", "INTEGER NOT NULL DEFAULT 0"),
+                ("direct", "INTEGER NOT NULL DEFAULT 0"),
+                ("ext_id", "TEXT NOT NULL DEFAULT ''"),
                 ("meta", "TEXT NOT NULL DEFAULT '{}'")):
             if name not in inbox_columns:
                 self.db.execute("ALTER TABLE inbox ADD COLUMN %s %s" % (name, ddl))
+        if "ext_id" not in inbox_columns:
+            # 老的通道进件把外部编号存在 meta.message_id 里：搬到列上，
+            # 补拉历史时才认得出"这条已经收过"。
+            try:
+                self.db.execute(
+                    "UPDATE inbox SET ext_id = COALESCE(json_extract(meta, '$.message_id'), '')"
+                    " WHERE ext_id = '' AND meta LIKE '%message_id%'")
+            except sqlite3.OperationalError:
+                pass                  # 老 sqlite 没带 JSON1：那就没有可比对的老编号
+        if not had_direct:
+            # 加 direct 那一趟顺手把旧的「没来源」补成网页：那时候只有页面的 /say
+            # 会这么写（标准输入没在这儿开过），补上标签仪表盘才说得清是谁说的。
+            with self.db:
+                self.db.execute("UPDATE inbox SET direct = 1 WHERE source = ''")
+                self.db.execute("UPDATE inbox SET source = '网页' WHERE source = ''")
+        # 编号台账：进件会被 trim 掉，收过哪些编号得留底（补拉靠它去重）。
+        # 每次都跑：新建库也要有，老库也要补上历史。
+        with self.db:
+            self.db.execute("DROP INDEX IF EXISTS inbox_ext")   # 旧版本留下的空索引
+            self.db.execute(
+                "INSERT OR IGNORE INTO inbox_seen (ext_id, ts)"
+                " SELECT source || ':' || ext_id, ts FROM inbox"
+                " WHERE ext_id != '' AND ext_id NOT LIKE '%:%'")
 
     def close(self) -> None:
         self.db.close()
@@ -433,13 +468,30 @@ class LoopStore:
     # ── 进件（谁说了一句、哪个任务回来了） ────────────────────────────────
     def push(self, kind: str, text: str, policy: str = "", source: str = "",
              chat_type: str = "", chat_id: str = "", chat_name: str = "",
-             sender_id: str = "", sender_name: str = "", meta=None) -> int:
+             sender_id: str = "", sender_name: str = "", meta=None,
+             direct: Optional[bool] = None, ext_id: str = "") -> int:
         """往 inbox 放一条。
 
         别的进程也能直接 INSERT 进来（网关的 `/inbox` 就是这么做的），这就是入口。
         `policy` 不传就继承这个会话在 `chats` 里的策略；会话没登记过就按 wake。
+
+        `source` 是"从哪儿来的"，照实写（网页 / 命令行 / QQ / …）——它只是个标签，
+        给她看、给网页看，核心不认识具体是哪个通道。
+        `direct` 是投递方式：正文直接进记录（人就在这一头跟她说话）。不传就按来源
+        推断——没有 source 的只能是人在这头说话；有 source 的走响铃那条路。
+        通道转进来的（direct 关）要先响铃、正文等她 `messages` 来取。
+        `ext_id` 是外头那条消息自己的编号，带通道前缀（`QQ:12345`）：同一个编号
+        只收一次，补拉历史、重连补漏都靠它去重；重复的返回原来那条的 id（0 = 编号
+        收过但那条进件已经被 trim 掉了）。
         """
+        ext = str(ext_id or "")
+        if ext and self.inbox_has_ext(ext):
+            row = self.db.execute("SELECT id FROM inbox WHERE ext_id = ? LIMIT 1",
+                                  (ext,)).fetchone()
+            return int(row["id"]) if row is not None else 0
         chat = str(chat_id or "")
+        if direct is None:
+            direct = not str(source or "").strip()
         policy = str(policy or "").strip().lower()
         if chat:
             self._remember_chat(str(source or ""), str(chat_type or "private"),
@@ -450,30 +502,69 @@ class LoopStore:
             policy = "wake"
         if policy not in ("wake", "batch", "mute"):
             policy = "wake"
+        stamp = now()
         with self.db:
+            if ext:
+                # 在同一个事务里抢台账：抢不到说明别人刚插过（并发补拉 + 实时事件），
+                # 回原来那条——"先查后插"中间那一下正好是重复的来源。
+                won = self.db.execute(
+                    "INSERT OR IGNORE INTO inbox_seen (ext_id, ts) VALUES (?, ?)",
+                    (ext, stamp)).rowcount
+                if not won:
+                    row = self.db.execute(
+                        "SELECT id FROM inbox WHERE ext_id = ? LIMIT 1",
+                        (ext,)).fetchone()
+                    return int(row["id"]) if row is not None else 0
             cursor = self.db.execute(
                 "INSERT INTO inbox (ts, kind, text, source, chat_type, chat_id,"
-                " chat_name, sender_id, sender_name, policy, meta)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (now(), str(kind or "user"), str(text or ""), str(source or ""),
+                " chat_name, sender_id, sender_name, policy, direct, ext_id, meta)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (stamp, str(kind or "user"), str(text or ""), str(source or ""),
                  str(chat_type or "private"), chat, str(chat_name or ""),
                  str(sender_id or ""), str(sender_name or ""), policy,
+                 1 if direct else 0, ext,
                  json.dumps(meta or {}, ensure_ascii=False)))
+            if not direct and str(source or "").strip():
+                # "外部一共来过多少"要只增：进件会被 trim 掉，数行会越数越少
+                self.db.execute(
+                    "INSERT INTO state (key, value) VALUES ('inbox_outside', '1')"
+                    " ON CONFLICT(key) DO UPDATE SET"
+                    " value = CAST(value AS INTEGER) + 1")
         return int(cursor.lastrowid)
+
+    def inbox_has_ext(self, ext_id: str) -> bool:
+        """这个外部编号收过没有：补拉历史先问一句，省得白插一条。
+
+        台账（`inbox_seen`）只增不删，进件被 trim 掉也不会忘。
+        """
+        ext = str(ext_id or "")
+        if not ext:
+            return False
+        if self.db.execute("SELECT 1 FROM inbox_seen WHERE ext_id = ? LIMIT 1",
+                           (ext,)).fetchone() is not None:
+            return True
+        return self.db.execute("SELECT 1 FROM inbox WHERE ext_id = ? LIMIT 1",
+                               (ext,)).fetchone() is not None
 
     def _remember_chat(self, source: str, chat_type: str, chat_id: str,
                        chat_name: str) -> None:
-        """登记一个会话（没有就建，有就更新来源与名字，策略不动）。"""
+        """登记一个会话（没有就建，有就更新来源与名字，策略不动）。
+
+        新会话的默认策略按类型分：**群默认 batch**（让她自己去看，别一句一句叫醒），
+        私聊默认 wake。想改就在 `channels_set` 或网页上改，之后不会被这里覆盖。
+        """
+        default = "batch" if str(chat_type) == "group" else "wake"
         with self.db:
             self.db.execute(
                 "INSERT INTO chats (chat_id, source, chat_type, chat_name, policy, updated)"
-                " VALUES (?, ?, ?, ?, 'wake', ?)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(chat_id) DO UPDATE SET"
                 " source = excluded.source, chat_type = excluded.chat_type,"
                 " chat_name = CASE WHEN excluded.chat_name != ''"
                 "                  THEN excluded.chat_name ELSE chats.chat_name END,"
                 " updated = excluded.updated",
-                (str(chat_id), str(source), str(chat_type), str(chat_name), now()))
+                (str(chat_id), str(source), str(chat_type), str(chat_name),
+                 default, now()))
 
     def chat_policy(self, chat_id: str) -> str:
         row = self.db.execute("SELECT policy FROM chats WHERE chat_id = ?",
@@ -540,6 +631,30 @@ class LoopStore:
                 " WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
         return int(cursor.rowcount or 0)
 
+    def inbox_in_record(self, item_id: int) -> bool:
+        """这条进件已经在记录里了吗（直接插成 user，或作为工具结果被读走）。"""
+        try:
+            wanted = int(item_id)
+        except (TypeError, ValueError):
+            return False
+        if not wanted:
+            return False
+        for row in self.db.execute(
+                "SELECT meta FROM entries WHERE meta LIKE ?", ("%%%d%%" % wanted,)):
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except ValueError:
+                continue
+            if int(meta.get("inbox_id") or 0) == wanted:
+                return True
+            for ident in (meta.get("inbox_ids") or []):
+                try:
+                    if int(ident) == wanted:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
     def take(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
         """peek + consume（自检和旧调用用）；正式路径请用 peek 再 consume。"""
         item = self.peek(kinds)
@@ -547,8 +662,16 @@ class LoopStore:
             self.consume(item["id"])
         return item
 
-    def inbox_unappended(self, limit: int = 20) -> list:
-        """已读、但记录里找不到的进件（按 meta.inbox_id 对账）。"""
+    def inbox_unappended(self, limit: int = 20, since: str = "") -> list:
+        """已读、但记录里找不到的进件（按 `meta.inbox_id` / `meta.inbox_ids` 对账）。
+
+        `messages` 读完的那几条正文是作为**一条工具结果**进记录的（编号记在
+        `inbox_ids` 里），跟"直接插成一条 user"一样算落库——不然重启时会被当成
+        丢了，又插一条 user 消息。
+
+        从新往旧找（`since` 之外的老账不翻）：先按 id 升序取 20 条的话，攒够一批
+        永远补不了的旧条目，新出现的洞就再也排不上了。
+        """
         seen = set()
         for row in self.db.execute("SELECT meta FROM entries WHERE meta LIKE '%inbox_id%'"):
             try:
@@ -557,24 +680,51 @@ class LoopStore:
                 continue
             if meta.get("inbox_id"):
                 seen.add(int(meta["inbox_id"]))
+            for ident in (meta.get("inbox_ids") or []):
+                try:
+                    seen.add(int(ident))
+                except (TypeError, ValueError):
+                    continue
+        sql = "SELECT * FROM inbox WHERE consumed = 1 AND direct = 0"
+        args: list = []
+        if since:
+            sql += " AND ts >= ?"
+            args.append(str(since))
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, int(limit)))
         out = []
-        for row in self.db.execute(
-                "SELECT * FROM inbox WHERE consumed = 1 ORDER BY id"):
+        for row in self.db.execute(sql, args):
             if int(row["id"]) in seen:
                 continue
             out.append(self._item(row))
-            if len(out) >= limit:
-                break
-        return out
+        return list(reversed(out))
 
-    def trim_inbox(self, keep: int = 200) -> int:
-        """删掉已读的旧进件，只留最近 keep 条已读的：长跑别让这张表一直涨。"""
+    def trim_inbox(self, keep: int = 200, keep_ext: int = 5000) -> int:
+        """删掉旧进件，别让这张表一直涨。
+
+        - 已读的留最近 `keep` 条；
+        - 设成 mute 的（她永远不会读了）另算一份，同样留最近 `keep` 条，
+          否则它们既不会被读走、也永远删不掉；
+        - 编号台账（`inbox_seen`）留最近 `keep_ext` 条：台账是去重用的，删干净了
+          补拉历史就会重复投递，但也不能无限长。
+        """
+        removed = 0
         with self.db:
             cursor = self.db.execute(
                 "DELETE FROM inbox WHERE consumed = 1 AND id NOT IN"
                 " (SELECT id FROM inbox WHERE consumed = 1 ORDER BY id DESC LIMIT ?)",
                 (max(0, int(keep)),))
-        return int(cursor.rowcount or 0)
+            removed += int(cursor.rowcount or 0)
+            cursor = self.db.execute(
+                "DELETE FROM inbox WHERE consumed = 0 AND policy = 'mute' AND id NOT IN"
+                " (SELECT id FROM inbox WHERE consumed = 0 AND policy = 'mute'"
+                "  ORDER BY id DESC LIMIT ?)", (max(0, int(keep)),))
+            removed += int(cursor.rowcount or 0)
+            self.db.execute(
+                "DELETE FROM inbox_seen WHERE rowid NOT IN"
+                " (SELECT rowid FROM inbox_seen ORDER BY rowid DESC LIMIT ?)",
+                (max(0, int(keep_ext)),))
+        return removed
 
     # ── 攒着的那些（batch）：计数、会话、读回来 ──────────────────────────────
     def unread_batches(self, chats: int = 5, senders: int = 3) -> dict:
@@ -603,14 +753,19 @@ class LoopStore:
         return {"total": total, "chats": order[:chats], "chat_total": len(grouped)}
 
     def channels(self) -> list:
-        """所有登记过的会话 + 未读数（进来过的都算，没读过几条约等于 unread）。"""
+        """所有登记过的会话 + 未读数。
+
+        `unread` 与 `unread_batches()` 一个口径：`consumed = 0 且策略不是 mute`
+        —— 设成 mute 的消息她自己根本读不到，不能算在"还有几条没看"里。
+        """
         out = []
         for row in self.db.execute(
                 "SELECT * FROM chats ORDER BY updated DESC"):
             chat_id = str(row["chat_id"])
             unread = self.db.execute(
                 "SELECT COUNT(*) AS n FROM inbox"
-                " WHERE consumed = 0 AND chat_id = ?", (chat_id,)).fetchone()
+                " WHERE consumed = 0 AND policy != 'mute' AND chat_id = ?",
+                (chat_id,)).fetchone()
             out.append({
                 "chat_id": chat_id, "source": str(row["source"] or ""),
                 "chat_type": str(row["chat_type"] or "private"),
@@ -622,10 +777,19 @@ class LoopStore:
         return out
 
     def set_policy(self, chat_id: str, policy: str) -> int:
-        """改一个会话的策略；还没读的进件跟着改（已经进过记录的不动）。"""
+        """改一个会话的策略；还没读的进件跟着改。
+
+        返回"跟着改的未读条数"（0 是正常的：这个会话没有未读）。
+        没有这个会话的时候抛 KeyError——"改了 0 条"和"压根没这个会话"
+        是两件事，别让调用方猜。
+        """
         policy = str(policy or "").strip().lower()
         if policy not in ("wake", "batch", "mute"):
             raise ValueError("policy 只认 wake / batch / mute：%s" % policy)
+        row = self.db.execute("SELECT 1 FROM chats WHERE chat_id = ?",
+                              (str(chat_id),)).fetchone()
+        if row is None:
+            raise KeyError(str(chat_id))
         with self.db:
             self.db.execute(
                 "UPDATE chats SET policy = ?, updated = ? WHERE chat_id = ?",
@@ -635,13 +799,63 @@ class LoopStore:
                 (policy, str(chat_id)))
         return int(cursor.rowcount or 0)
 
+    def inbox_recent(self, limit: int = 60) -> list:
+        """最近的进件，不管读没读、什么策略——给网页当仪表盘看。
+
+        她自己只看得见 `messages` 里还没读的那些；这一条是**给人看**的视角：
+        外部说过的话、哪条还在等她、哪条已经并进记录了，一眼能对上。
+        """
+        rows = self.db.execute("SELECT * FROM inbox ORDER BY id DESC LIMIT ?",
+                               (max(1, int(limit)),)).fetchall()
+        out = []
+        for row in reversed(rows):
+            item = self._item(row)
+            for key in ("notified", "consumed"):
+                try:
+                    item[key] = int(row[key])
+                except (IndexError, KeyError, TypeError):
+                    item[key] = 0
+            out.append(item)
+        return out
+
+    def inbox_counts(self) -> dict:
+        """大盘上的两个数：还在等她读的、从外面进来过的总数。
+
+        `waiting` 与 `unread_batches()` 同口径（mute 不算——她读不到）；
+        `outside` 数的是"历来从外面进来过多少"，进件会被 trim 掉，
+        所以拿 push 时累加的计数，别去数行。
+        """
+        row = self.db.execute(
+            "SELECT COUNT(*) AS n FROM inbox"
+            " WHERE consumed = 0 AND policy != 'mute'").fetchone()
+        waiting = int(row["n"]) if row else 0
+        row = self.db.execute("SELECT value FROM state WHERE key = 'inbox_outside'").fetchone()
+        if row is None:
+            row = self.db.execute(
+                "SELECT COUNT(*) AS n FROM inbox WHERE source != '' AND direct = 0").fetchone()
+            outside = int(row["n"]) if row else 0
+            # 第一次问就把底数记下来：不然下一条消息会把计数器从 1 重新起算
+            with self.db:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO state (key, value)"
+                    " VALUES ('inbox_outside', ?)", (str(outside),))
+        else:
+            outside = int(str(row["value"]) or 0)
+        return {"waiting": waiting, "outside": outside}
+
     def messages(self, chat_id: str = "", limit: int = 20, before: int = 0) -> list:
-        """把攒着的读回来：按时间正序，最多 limit 条，可往前翻页（before=id）。"""
-        sql = "SELECT * FROM inbox WHERE consumed = 0 AND policy != 'mute'"
+        """把攒着的读回来：按时间正序，最多 limit 条，可往前翻页（before=id）。
+
+        点名某个会话时不排除 mute：策略是"不主动提示"，不是"锁起来"——
+        她自己想起来要看，就该看得到。
+        """
+        sql = "SELECT * FROM inbox WHERE consumed = 0"
         args: list = []
         if chat_id:
             sql += " AND chat_id = ?"
             args.append(str(chat_id))
+        else:
+            sql += " AND policy != 'mute'"
         if before:
             sql += " AND id < ?"
             args.append(int(before))
@@ -658,7 +872,8 @@ class LoopStore:
         for key, fallback in (("source", ""), ("chat_type", "private"),
                               ("chat_id", ""), ("chat_name", ""),
                               ("sender_id", ""), ("sender_name", ""),
-                              ("policy", "wake"), ("state", "pending")):
+                              ("policy", "wake"), ("state", "pending"),
+                              ("ext_id", "")):
             try:
                 item[key] = str(row[key])
             except (IndexError, KeyError):
@@ -667,6 +882,14 @@ class LoopStore:
             item["meta"] = json.loads(row["meta"] or "{}")
         except (IndexError, KeyError, TypeError, ValueError):
             item["meta"] = {}
+        # 旧库没这一列、或者调用方压根没写来源：都按"本机直投"算（以前就是这么判的）
+        try:
+            stored = int(row["direct"] or 0)
+        except (IndexError, KeyError, TypeError, ValueError):
+            stored = 0
+        # 只认列值：写入时已经归一（没来源的就是直投）。这里再"按有没有来源"
+        # 猜一遍，会和 SQL 那边的口径打架。
+        item["direct"] = stored
         return item
 
     # ── 检索记录 ──────────────────────────────────────────────────────────
