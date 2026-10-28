@@ -139,13 +139,80 @@ def in_meta(item: dict) -> dict:
         return {}
 
 
+def _source_label(item: dict) -> str:
+    """进件的来源标签：`外部·群「群甲」 甲`、`外部 甲`；没有来源就是空串。"""
+    source = str(item.get("source") or "").strip()
+    sender = str(item.get("sender_name") or "").strip()
+    chat_type = str(item.get("chat_type") or "private")
+    chat_name = str(item.get("chat_name") or "").strip()
+    chat_id = str(item.get("chat_id") or "").strip()
+    if not source and not sender:
+        return ""
+    head = source or "外部"
+    if chat_type == "group" and (chat_name or chat_id):
+        head += "·群「%s」" % (chat_name or chat_id)
+    return ("%s %s" % (head, sender)).strip() if sender else head
+
+
 def _inbox_entry(item: dict) -> dict:
-    """一条进件写成记录：对方说的话是 `对方：`，别的动静是 `提醒：`。"""
+    """一条进件写成记录：人说的话带来源前缀（群里连发言人），别的动静是提醒。"""
     kind = str(item.get("kind") or "user")
     text = str(item.get("text") or "").strip()
-    if kind == "user":
+    if kind != "user":
+        return {"role": "note", "content": "%s：%s" % (kind, text or "（没有内容）")}
+    label = _source_label(item)
+    if not label:
         return {"role": "user", "content": text}
-    return {"role": "note", "content": "%s：%s" % (kind, text or "（没有内容）")}
+    return {"role": "user", "content": "%s：%s" % (label, text)}
+
+
+def _unread_text(summary: dict) -> str:
+    """攒着的那批：一行数字 + 每个会话几条 + 谁说得最多。"""
+    parts = []
+    for chat in summary.get("chats") or []:
+        name = chat.get("chat_name") or chat.get("chat_id") or "某个会话"
+        who = "、".join(chat.get("senders") or [])
+        parts.append("%s %d 条%s" % (name, int(chat.get("count") or 0),
+                                     ("（%s）" % who) if who else ""))
+    head = "还有 %d 条没看的消息" % int(summary.get("total") or 0)
+    chat_total = int(summary.get("chat_total") or 0)
+    if chat_total > len(summary.get("chats") or []):
+        head += "（共 %d 个会话）" % chat_total
+    return "，".join([head] + parts) + "。要看就说 messages。"
+
+
+def _inbox_tools(text: dict) -> List[dict]:
+    """收件箱的三个工具：看会话、改策略、读攒着的。"""
+    return [
+        {"type": "function",
+         "function": {"name": "channels", "description": text["channels"],
+                      "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function",
+         "function": {"name": "channels_set", "description": text["channels_set"],
+                      "parameters": {"type": "object", "properties": {
+                          "chat": {"type": "string",
+                                   "description": text["channels_set.chat"]},
+                          "policy": {"type": "string",
+                                     "enum": ["wake", "batch", "mute"],
+                                     "description": text["channels_set.policy"]},
+                      }, "required": ["chat", "policy"]}}},
+        {"type": "function",
+         "function": {"name": "messages", "description": text["messages"],
+                      "parameters": {"type": "object", "properties": {
+                          "chat": {"type": "string",
+                                   "description": text["messages.chat"]},
+                          "limit": {"type": "number",
+                                    "description": text["messages.limit"]},
+                          "before": {"type": "number",
+                                     "description": text["messages.before"]},
+                      }}}},
+    ]
+
+
+def _message_line(item: dict) -> str:
+    label = _source_label(item)
+    text = str(item.get("text") or "").strip().replace("\n", " ")
+    return ("%s：%s" % (label, text)) if label else text
 
 
 class Loop:
@@ -199,6 +266,8 @@ class Loop:
         # 刚起来就有人说话（`--say` 或入口先塞一句）：这时候不该再"等动静"，
         # 否则那句话躺在记录里，人得再发一条才会被看见。
         self._fresh_input = False
+        # 上一次报给她的「攒了多少条」；同一个数字不重复拼，变了才拼。
+        self._unread_total = 0
         # 距上一次外部输入过了几步：用来拦「自己在跟自己转」。
         self.since_external = 0
         self.retries = 0
@@ -225,6 +294,7 @@ class Loop:
         tools = list(self.memory.tools())
         text = prompt_files.tool_texts()
         tools.append(_wait_tool(text))
+        tools.extend(_inbox_tools(text))
         for toolset in self.toolsets:
             tools.extend(toolset.tools())
         return tools
@@ -245,6 +315,7 @@ class Loop:
             self._quiet = 0
         else:
             self.since_external += 1
+        self._unread_note()
         idle = int(getattr(self.config, "watchdog_idle", 0) or 0)
         if idle and self.since_external >= idle:
             self._nudge()
@@ -532,10 +603,29 @@ class Loop:
                 self._turn_confirm = set()
         self._after_tool = []
 
+    def _unread_note(self) -> None:
+        """被叫醒时把「攒了多少」拼一行进记录；同一批只拼一次，随后按步数过期。"""
+        summary = self.store.unread_batches()
+        total = int(summary.get("total") or 0)
+        if not total:
+            self._unread_total = 0
+            return
+        if total == self._unread_total:
+            return
+        self._unread_total = total
+        self._append({"role": "note", "content": _unread_text(summary)},
+                     meta={"kind": "unread", "total": total})
+
     def _call_tool(self, name: str, arguments: str) -> str:
         try:
             if name == "wait":
                 return self._wait(arguments)
+            if name == "channels":
+                return self._show_channels()
+            if name == "channels_set":
+                return self._set_channel(arguments)
+            if name == "messages":
+                return self._read_messages(arguments)
             for toolset in self.toolsets:
                 if toolset.owns(name):
                     return toolset.call(name, arguments)
@@ -551,16 +641,79 @@ class Loop:
         """每步开始先把攒着的消息读进来：人在你说话的时候插一句也得看到。"""
         taken = 0
         while True:
-            item = self.store.peek()
+            item = self.store.peek(policies=["wake"], unnotified=True)
             if item is None:
                 return taken
-            meta = in_meta(item)
-            self._append(_inbox_entry(item), meta=meta)   # 落进记录
-            self.store.consume(item["id"])                # 落住了才标已读
+            # 带来源的（通道转进来的）只响铃：正文留在表里，等她的 messages 来取。
+            # 没有来源的是本机对话（网页 / 标准输入），正文直接进记录。
+            if str(item.get("source") or "").strip():
+                self.store.mark_notified(item["id"])
+            else:
+                self._append(_inbox_entry(item), meta=in_meta(item))
+                self.store.consume(item["id"])
             self._turn_calls = {}
             self._turn_confirm = set()
             taken += 1
             self.since_external = 0
+
+    def _show_channels(self) -> str:
+        rows = self.store.channels()
+        if not rows:
+            return "还没有任何会话给你发过消息。"
+        lines = ["%d 个会话：" % len(rows)]
+        for row in rows:
+            name = row.get("chat_name") or row.get("chat_id") or "?"
+            source = row.get("source") or "外部"
+            kind = "群" if row.get("chat_type") == "group" else "私聊"
+            lines.append("%s · %s %s「%s」· 未读 %d · 策略 %s" % (
+                row.get("chat_id"), source, kind, name,
+                int(row.get("unread") or 0), row.get("policy") or "wake"))
+        lines.append("要读攒着的用 messages；改策略用 channels_set。")
+        return "\n".join(lines)
+
+    def _set_channel(self, arguments: str) -> str:
+        try:
+            payload = json.loads(arguments or "{}")
+        except ValueError:
+            return "channels_set 的参数不是 JSON。"
+        chat = str(payload.get("chat") or "").strip()
+        policy = str(payload.get("policy") or "").strip().lower()
+        if not chat or not policy:
+            return "channels_set 需要 chat 和 policy。"
+        try:
+            changed = self.store.set_policy(chat, policy)
+        except ValueError as exc:
+            return "改策略失败：%s" % exc
+        if not changed:
+            return "没有这个会话，或者它已经没有未读消息：%s。" % chat
+        if policy == "wake":
+            self._unread_total = 0        # 策略变了，下一行数字重新拼
+        return "把 %s 改成 %s 了，影响到 %d 条没读的。" % (chat, policy, changed)
+
+    def _read_messages(self, arguments: str) -> str:
+        try:
+            payload = json.loads(arguments or "{}")
+        except ValueError:
+            return "messages 的参数不是 JSON。"
+        chat = str(payload.get("chat") or "").strip()
+        try:
+            limit = int(payload.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        try:
+            before = int(payload.get("before") or 0)
+        except (TypeError, ValueError):
+            before = 0
+        rows = self.store.messages(chat, limit=min(50, max(1, limit)), before=before)
+        if not rows:
+            return "没有攒着的消息（或者这个会话没有）。"
+        self.store.consume_many([row["id"] for row in rows])
+        self._unread_total = 0
+        lines = ["读到 %d 条：" % len(rows)]
+        lines.extend(_message_line(row) for row in rows)
+        if len(rows) >= limit:
+            lines.append("（还有更早的；要往前翻把 before 设成 %d）" % rows[0]["id"])
+        return "\n".join(lines)
 
     def _wait(self, arguments: str) -> str:
         """等到有动静或者到点；返回一行结果，动静本身跟在结果后面进记录。"""
@@ -585,8 +738,18 @@ class Loop:
                 # 不再编一句「要重启，先停。」塞进记录：那会让模型以为有人跟它说话，
                 # 于是留下两句道别。直接退，没答完的调用留给下次起来接着等。
                 raise control.StopRequested()
-            item = self.store.peek(kinds or None)
+            # 只有 wake 的能把她叫醒；batch / mute 的留在表里，不打断这次等。
+            item = self.store.peek(kinds or None, policies=["wake"], unnotified=True)
             if item is not None:
+                if str(item.get("source") or "").strip():
+                    # 通道来的：响铃，正文等她自己读。
+                    self.store.mark_notified(item["id"])
+                    self.since_external = 0
+                    self._woke = True
+                    self.store.set_status("thinking")
+                    return "有人找你（%s %s）；要看正文就说 messages。" % (
+                        item.get("source") or "外部",
+                        item.get("sender_name") or item.get("chat_name") or "")
                 self._after_tool.append({"message": _inbox_entry(item),
                                          "meta": in_meta(item),
                                          "inbox_id": item["id"]})

@@ -65,7 +65,27 @@ CREATE TABLE IF NOT EXISTS inbox (
     ts TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'user',
     text TEXT NOT NULL DEFAULT '',
-    consumed INTEGER NOT NULL DEFAULT 0
+    consumed INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT '',
+    chat_type TEXT NOT NULL DEFAULT 'private',
+    chat_id TEXT NOT NULL DEFAULT '',
+    chat_name TEXT NOT NULL DEFAULT '',
+    sender_id TEXT NOT NULL DEFAULT '',
+    sender_name TEXT NOT NULL DEFAULT '',
+    policy TEXT NOT NULL DEFAULT 'wake',
+    state TEXT NOT NULL DEFAULT 'pending',
+    notified INTEGER NOT NULL DEFAULT 0,
+    meta TEXT NOT NULL DEFAULT '{}'
+);
+
+-- 每个会话一条：策略（wake / batch / mute）在这里，进件继承它。
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT '',
+    chat_type TEXT NOT NULL DEFAULT 'private',
+    chat_name TEXT NOT NULL DEFAULT '',
+    policy TEXT NOT NULL DEFAULT 'wake',
+    updated TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -100,6 +120,20 @@ class LoopStore:
             # 旧库的原文不知道是哪一步写的；补 0，网页上归到「没有步号」那一档。
             self.db.execute(
                 "ALTER TABLE entries ADD COLUMN step INTEGER NOT NULL DEFAULT 0")
+        inbox_columns = {row[1] for row in self.db.execute("PRAGMA table_info(inbox)")}
+        for name, ddl in (
+                ("source", "TEXT NOT NULL DEFAULT ''"),
+                ("chat_type", "TEXT NOT NULL DEFAULT 'private'"),
+                ("chat_id", "TEXT NOT NULL DEFAULT ''"),
+                ("chat_name", "TEXT NOT NULL DEFAULT ''"),
+                ("sender_id", "TEXT NOT NULL DEFAULT ''"),
+                ("sender_name", "TEXT NOT NULL DEFAULT ''"),
+                ("policy", "TEXT NOT NULL DEFAULT 'wake'"),
+                ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+                ("notified", "INTEGER NOT NULL DEFAULT 0"),
+                ("meta", "TEXT NOT NULL DEFAULT '{}'")):
+            if name not in inbox_columns:
+                self.db.execute("ALTER TABLE inbox ADD COLUMN %s %s" % (name, ddl))
 
     def close(self) -> None:
         self.db.close()
@@ -397,47 +431,114 @@ class LoopStore:
                 "completion": completion, "total": prompt + completion}
 
     # ── 进件（谁说了一句、哪个任务回来了） ────────────────────────────────
-    def push(self, kind: str, text: str) -> int:
-        """往 inbox 放一条；别的进程也能直接 INSERT 进来，这就是入口。"""
+    def push(self, kind: str, text: str, policy: str = "", source: str = "",
+             chat_type: str = "", chat_id: str = "", chat_name: str = "",
+             sender_id: str = "", sender_name: str = "", meta=None) -> int:
+        """往 inbox 放一条。
+
+        别的进程也能直接 INSERT 进来（网关的 `/inbox` 就是这么做的），这就是入口。
+        `policy` 不传就继承这个会话在 `chats` 里的策略；会话没登记过就按 wake。
+        """
+        chat = str(chat_id or "")
+        policy = str(policy or "").strip().lower()
+        if chat:
+            self._remember_chat(str(source or ""), str(chat_type or "private"),
+                                chat, str(chat_name or ""))
+            if not policy:
+                policy = self.chat_policy(chat)
+        if not policy:
+            policy = "wake"
+        if policy not in ("wake", "batch", "mute"):
+            policy = "wake"
         with self.db:
             cursor = self.db.execute(
-                "INSERT INTO inbox (ts, kind, text) VALUES (?, ?, ?)",
-                (now(), str(kind or "user"), str(text or "")))
+                "INSERT INTO inbox (ts, kind, text, source, chat_type, chat_id,"
+                " chat_name, sender_id, sender_name, policy, meta)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now(), str(kind or "user"), str(text or ""), str(source or ""),
+                 str(chat_type or "private"), chat, str(chat_name or ""),
+                 str(sender_id or ""), str(sender_name or ""), policy,
+                 json.dumps(meta or {}, ensure_ascii=False)))
         return int(cursor.lastrowid)
 
-    def has_pending(self, kinds: Optional[List[str]] = None) -> bool:
+    def _remember_chat(self, source: str, chat_type: str, chat_id: str,
+                       chat_name: str) -> None:
+        """登记一个会话（没有就建，有就更新来源与名字，策略不动）。"""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO chats (chat_id, source, chat_type, chat_name, policy, updated)"
+                " VALUES (?, ?, ?, ?, 'wake', ?)"
+                " ON CONFLICT(chat_id) DO UPDATE SET"
+                " source = excluded.source, chat_type = excluded.chat_type,"
+                " chat_name = CASE WHEN excluded.chat_name != ''"
+                "                  THEN excluded.chat_name ELSE chats.chat_name END,"
+                " updated = excluded.updated",
+                (str(chat_id), str(source), str(chat_type), str(chat_name), now()))
+
+    def chat_policy(self, chat_id: str) -> str:
+        row = self.db.execute("SELECT policy FROM chats WHERE chat_id = ?",
+                              (str(chat_id),)).fetchone()
+        return str(row["policy"]) if row else "wake"
+
+    def has_pending(self, kinds: Optional[List[str]] = None,
+                    policies: Optional[List[str]] = None) -> bool:
         """有没有还没读的进件——启动时用它判断「该不该开口」。"""
         sql = "SELECT 1 FROM inbox WHERE consumed = 0"
         args: list = []
         if kinds:
             sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
-            args = list(kinds)
+            args += list(kinds)
+        if policies:
+            sql += " AND policy IN (%s)" % ",".join("?" * len(policies))
+            args += list(policies)
         sql += " LIMIT 1"
         return self.db.execute(sql, args).fetchone() is not None
 
-    def peek(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
-        """看最早一条没读过的，**不**标已读；kinds 是白名单。
+    def peek(self, kinds: Optional[List[str]] = None,
+             policies: Optional[List[str]] = None,
+             unnotified: bool = False) -> Optional[dict]:
+        """看最早一条没读过的，**不**标已读；kinds / policies 是白名单。
 
         分开 peek/consume 是为了不让消息丢：先把它落进记录，再标已读。
         以前 take() 一步就标已读，而记录要等到这一步的模型调用之后才写——
         中途重启（改代码、崩了）就会出现"人说了话，进了进件，但记录里没有"。
         """
-        sql = "SELECT id, ts, kind, text FROM inbox WHERE consumed = 0"
+        sql = "SELECT * FROM inbox WHERE consumed = 0"
         args: list = []
         if kinds:
             sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
-            args = list(kinds)
+            args += list(kinds)
+        if policies:
+            sql += " AND policy IN (%s)" % ",".join("?" * len(policies))
+            args += list(policies)
+        if unnotified:
+            sql += " AND notified = 0"
         sql += " ORDER BY id LIMIT 1"
         row = self.db.execute(sql, args).fetchone()
-        if row is None:
-            return None
-        return {"id": int(row["id"]), "ts": str(row["ts"]),
-                "kind": str(row["kind"]), "text": str(row["text"])}
+        return self._item(row) if row is not None else None
+
+    def mark_notified(self, item_id: int) -> None:
+        """响过铃了：不重复响，但正文还没被读走（consumed 仍为 0）。"""
+        with self.db:
+            self.db.execute("UPDATE inbox SET notified = 1 WHERE id = ?",
+                            (int(item_id),))
 
     def consume(self, item_id: int) -> None:
-        """标已读：只在这条消息真的写进记录之后调。"""
+        """标已读：只在这条消息真的写进记录（或被她读到）之后调。"""
         with self.db:
-            self.db.execute("UPDATE inbox SET consumed = 1 WHERE id = ?", (int(item_id),))
+            self.db.execute(
+                "UPDATE inbox SET consumed = 1, state = 'surfaced' WHERE id = ?",
+                (int(item_id),))
+
+    def consume_many(self, ids) -> int:
+        ids = [int(item) for item in (ids or [])]
+        if not ids:
+            return 0
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE inbox SET consumed = 1, state = 'surfaced'"
+                " WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
+        return int(cursor.rowcount or 0)
 
     def take(self, kinds: Optional[List[str]] = None) -> Optional[dict]:
         """peek + consume（自检和旧调用用）；正式路径请用 peek 再 consume。"""
@@ -458,11 +559,10 @@ class LoopStore:
                 seen.add(int(meta["inbox_id"]))
         out = []
         for row in self.db.execute(
-                "SELECT id, ts, kind, text FROM inbox WHERE consumed = 1 ORDER BY id"):
+                "SELECT * FROM inbox WHERE consumed = 1 ORDER BY id"):
             if int(row["id"]) in seen:
                 continue
-            out.append({"id": int(row["id"]), "ts": str(row["ts"]),
-                        "kind": str(row["kind"]), "text": str(row["text"])})
+            out.append(self._item(row))
             if len(out) >= limit:
                 break
         return out
@@ -475,6 +575,99 @@ class LoopStore:
                 " (SELECT id FROM inbox WHERE consumed = 1 ORDER BY id DESC LIMIT ?)",
                 (max(0, int(keep)),))
         return int(cursor.rowcount or 0)
+
+    # ── 攒着的那些（batch）：计数、会话、读回来 ──────────────────────────────
+    def unread_batches(self, chats: int = 5, senders: int = 3) -> dict:
+        """batch 积压的概况：总共几条、每个会话几条、谁说得最多。
+
+        只给数字和名字，不给正文——正文要她自己调 `messages` 才拿。
+        """
+        rows = self.db.execute(
+            "SELECT source, chat_type, chat_id, chat_name, sender_name, COUNT(*) AS n"
+            " FROM inbox WHERE consumed = 0 AND policy != 'mute'"
+            " GROUP BY chat_id, sender_name ORDER BY chat_id, n DESC").fetchall()
+        total = 0
+        grouped: dict = {}
+        for row in rows:
+            count = int(row["n"])
+            total += count
+            key = str(row["chat_id"] or "")
+            entry = grouped.setdefault(key, {
+                "chat_id": key, "source": str(row["source"] or ""),
+                "chat_type": str(row["chat_type"] or "private"),
+                "chat_name": str(row["chat_name"] or ""), "count": 0, "senders": []})
+            entry["count"] += count
+            if len(entry["senders"]) < senders and row["sender_name"]:
+                entry["senders"].append("%s %d" % (str(row["sender_name"]), count))
+        order = sorted(grouped.values(), key=lambda item: -item["count"])
+        return {"total": total, "chats": order[:chats], "chat_total": len(grouped)}
+
+    def channels(self) -> list:
+        """所有登记过的会话 + 未读数（进来过的都算，没读过几条约等于 unread）。"""
+        out = []
+        for row in self.db.execute(
+                "SELECT * FROM chats ORDER BY updated DESC"):
+            chat_id = str(row["chat_id"])
+            unread = self.db.execute(
+                "SELECT COUNT(*) AS n FROM inbox"
+                " WHERE consumed = 0 AND chat_id = ?", (chat_id,)).fetchone()
+            out.append({
+                "chat_id": chat_id, "source": str(row["source"] or ""),
+                "chat_type": str(row["chat_type"] or "private"),
+                "chat_name": str(row["chat_name"] or ""),
+                "policy": str(row["policy"] or "wake"),
+                "unread": int(unread["n"]) if unread else 0,
+                "updated": str(row["updated"] or ""),
+            })
+        return out
+
+    def set_policy(self, chat_id: str, policy: str) -> int:
+        """改一个会话的策略；还没读的进件跟着改（已经进过记录的不动）。"""
+        policy = str(policy or "").strip().lower()
+        if policy not in ("wake", "batch", "mute"):
+            raise ValueError("policy 只认 wake / batch / mute：%s" % policy)
+        with self.db:
+            self.db.execute(
+                "UPDATE chats SET policy = ?, updated = ? WHERE chat_id = ?",
+                (policy, now(), str(chat_id)))
+            cursor = self.db.execute(
+                "UPDATE inbox SET policy = ? WHERE chat_id = ? AND consumed = 0",
+                (policy, str(chat_id)))
+        return int(cursor.rowcount or 0)
+
+    def messages(self, chat_id: str = "", limit: int = 20, before: int = 0) -> list:
+        """把攒着的读回来：按时间正序，最多 limit 条，可往前翻页（before=id）。"""
+        sql = "SELECT * FROM inbox WHERE consumed = 0 AND policy != 'mute'"
+        args: list = []
+        if chat_id:
+            sql += " AND chat_id = ?"
+            args.append(str(chat_id))
+        if before:
+            sql += " AND id < ?"
+            args.append(int(before))
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        rows = self.db.execute(sql, args).fetchall()
+        return [self._item(row) for row in reversed(rows)]
+
+    @staticmethod
+    def _item(row) -> dict:
+        """一行进件 → 字典；旧库没有的列按默认值兜住。"""
+        item = {"id": int(row["id"]), "ts": str(row["ts"]),
+                "kind": str(row["kind"]), "text": str(row["text"])}
+        for key, fallback in (("source", ""), ("chat_type", "private"),
+                              ("chat_id", ""), ("chat_name", ""),
+                              ("sender_id", ""), ("sender_name", ""),
+                              ("policy", "wake"), ("state", "pending")):
+            try:
+                item[key] = str(row[key])
+            except (IndexError, KeyError):
+                item[key] = fallback
+        try:
+            item["meta"] = json.loads(row["meta"] or "{}")
+        except (IndexError, KeyError, TypeError, ValueError):
+            item["meta"] = {}
+        return item
 
     # ── 检索记录 ──────────────────────────────────────────────────────────
     def add_recall(self, question: str, event_ids: List[str]) -> None:

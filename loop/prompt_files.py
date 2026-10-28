@@ -106,6 +106,14 @@ _register_tool("wait", "工具 · wait",
                "停在这儿等对方的动静，或者等到某个时间点。",
                ["until", "kinds"], _DIR)
 
+_register_tool("channels", "工具 · channels",
+               "看一眼有哪些会话在给你发消息，各自什么策略。", [], _DIR)
+_register_tool("channels_set", "工具 · channels_set",
+               "改一个会话的策略：立刻叫醒 / 只攒着 / 不提示。",
+               ["chat", "policy"], _DIR)
+_register_tool("messages", "工具 · messages",
+               "把攒着没读的消息读回来。", ["chat", "limit", "before"], _DIR)
+
 
 def use_overrides(data_dir: str) -> None:
     """从这儿之后用 `<data_dir>/prompts.json` 里的覆盖；仓库里的文件当默认。"""

@@ -1252,6 +1252,82 @@ def check_note_fade() -> None:
 
 
 
+def check_inbox_channels() -> None:
+    """通道来的只响铃（正文走 messages），本机对话（没 source）直接进记录。"""
+    workdir = tempdir("loop-inbox-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=Memory.disabled(), client=FakeClient())
+
+        # 本机对话：没有 source，正文直接进记录
+        store.push("user", "本机这边的一句话")
+        loop._drain_inbox()
+        check("本机这边的一句话" in loop.context.current_text(),
+              "本机对话直接进记录")
+
+        # 通道来的：只响铃，正文不进记录
+        store.push("user", "在吗", source="外部", chat_type="group", chat_id="g1",
+                   chat_name="群甲", sender_name="甲")
+        loop._drain_inbox()
+        check("在吗" not in loop.context.current_text(),
+              "通道来的正文不该直接进记录：%r" % loop.context.current_text()[-60:])
+        loop._unread_note()
+        tail = loop.context.current_text()
+        check("还有 1 条没看的消息" in tail, "要响一声：%r" % tail[-90:])
+
+        # 同一个铃不重复响，但没读走就还算未读
+        loop._drain_inbox()
+        check(store.unread_batches()["total"] == 1, "响过铃、没读，仍算未读")
+
+        # 读回来：带发言人，读完就没未读了
+        read = loop._read_messages(json.dumps({"chat": "g1"}))
+        check("外部·群「群甲」 甲：在吗" in read, "读回来要带发言人：%r" % read)
+        check(store.unread_batches()["total"] == 0, "读完就没未读了")
+
+        # batch：不响铃，只计数
+        store.set_policy("g1", "batch")
+        store.push("user", "晚上吃啥", source="外部", chat_type="group", chat_id="g1",
+                   chat_name="群甲", sender_name="乙")
+        loop._drain_inbox()
+        check("晚上吃啥" not in loop.context.current_text(), "batch 不进上下文")
+        check(store.unread_batches()["total"] == 1, "batch 记为未读")
+        check("乙" in json.dumps(store.unread_batches(), ensure_ascii=False),
+              "计数要带谁说的")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_unread_fade() -> None:
+    """「还有 N 条」这行有保质期：刚拼上看得见，过几步就不进上下文了。"""
+    config = _loop_config(name="自检")
+    line = {"role": "note", "content": "还有 3 条没看的消息。要看就说 messages。"}
+    stamp = "2026-10-28 20:00:00"
+
+    fresh_rows = [BlockEntry(line, stamp, {"kind": "unread", "total": 3})]
+    for index in range(2):
+        fresh_rows.append(BlockEntry({"role": "assistant", "content": "第 %d 步" % index},
+                                     "2026-10-28 20:00:0%d" % index))
+    context = Context(config)
+    context.current = Block(fresh_rows, stamp, "2026-10-28 20:01:00")
+    fresh = json.dumps(context.messages(), ensure_ascii=False)
+    check("还有 3 条没看的消息" in fresh,
+          "刚拼上要看得到：%r" % fresh[-120:])
+
+    stale_rows = [BlockEntry(line, stamp, {"kind": "unread", "total": 3})]
+    for index in range(8):
+        stale_rows.append(BlockEntry({"role": "assistant", "content": "第 %d 步" % index},
+                                     "2026-10-28 20:00:0%d" % (index % 10)))
+    context = Context(config)
+    context.current = Block(stale_rows, stamp, "2026-10-28 20:01:00")
+    stale = json.dumps(context.messages(), ensure_ascii=False)
+    check("还有 3 条没看的消息" not in stale,
+          "过了保质期不该再出现：%r" % stale[-120:])
+
+
 def check_inbox_repair() -> None:
     """进件对账：已读但记录里没有的，要能查出来并补回去。"""
     workdir = tempdir("loop-repair-")
@@ -1599,6 +1675,8 @@ def main() -> int:
     check_inbox()
     check_persona()
     check_stream()
+    check_inbox_channels()
+    check_unread_fade()
     check_inbox_repair()
     check_call_cap()
     check_effort()

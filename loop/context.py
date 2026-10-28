@@ -32,6 +32,10 @@ _KEEP_FULL_TOOLS = ("recollect",)
 # 再往后换成一句占位（note 本身从记忆里取，不靠记录重复）。
 NOTE_KEEP_STEPS = 10
 _NOTE_STUB = "（已写进记忆；要看内容用 recollect）"
+
+# 「还有 N 条没看」这行也是一时的：被叫醒时现拼一个数字，几步之后就该消失，
+# 不然一条早就读过的计数会一直躺在上下文里。
+UNREAD_KEEP_STEPS = 6
 _HINT_LINES = ("看具体用", "先 recall 再 recollect", "（嵌入")
 _HINT_INLINE = ("换个关键词再试",)
 
@@ -590,7 +594,10 @@ class Context:
             if role == "note":
                 # 心跳是当时的提醒，不是发生过的事：库里记着，但不进上下文
                 # （它的旧文案还会和现在的规矩打架）。新的一版走瞬时注入。
-                if str(entry.meta.get("kind") or "") == "watchdog":
+                kind = str(entry.meta.get("kind") or "")
+                if kind == "watchdog":
+                    continue
+                if kind == "unread" and steps_after[index] > UNREAD_KEEP_STEPS:
                     continue
                 turns.append({"role": "system", "content": _reminder(content),
                               "_own": False})
