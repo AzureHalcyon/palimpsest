@@ -1,8 +1,12 @@
-# loop —— 持续在线的循环运行时
+# loop —— 循环引擎
 
 设计见 [`../docs/持续在场-API实现.md`](../docs/持续在场-API实现.md)。
 上下文是 sink + 四段旧摘要 + 两块原文（上一块、当前块）：当前块满了先升成上一块，
 下一块满时才压上一块。历史交给 [`../memory_v2/`](../memory_v2/README.md)。
+
+**这个包里只有引擎**：它不认识具体工具、不认识 HTTP、不认识她的人设。网关、设置表、
+工具实现与工具描述、命令行入口都在另一个仓 `rin`，入口是那边的 `python -m rin`。
+引擎与落地之间只有一条单向的边——工具表由入口递进来（见 `toolset.py`）。
 
 | 文件 | 作用 |
 |---|---|
@@ -10,38 +14,40 @@
 | `context.py` | sink + 旧摘要 + 上一块 + 当前块；system + 一条记录 |
 | `compress.py` | 压缩：一块一次，调摘要模型（默认 deepseek-flash） |
 | `store.py` | SQLite：`bands` / `blocks` / `entries` / `recall_log` / `usage` |
-| `driver.py` | 步循环：工具、正文、停、攒块、预算 |
-| `web.py` | 网页面与接口：`/say` `/feed` `/context` `/state`（只读库、只写 inbox） |
-| `web/index.html` | 单页界面：思考-调用时间线 + 上下文分块监视 |
-| `memory_bridge.py` | 工具面：remember / recall / recollect / forget / rename |
-| `shell.py` | 命令工具 `run`：Landlock 只写工作区、走 shell、超时、输出截断、拒读凭证（默认关） |
-| `landlock.py` | 沙箱包装器：ctypes 调 Landlock syscall，只有工作区可写 |
-| `workspace.py` | 工作区 `write`：只写 `<data>/workspace`，拒绝对路径与 `..` |
+| `driver.py` | 步循环：工具分发、正文、停、攒块、预算 |
+| `toolset.py` | 工具集协议：`tools()` / `call()` / `owns()`；引擎只按名字调 |
 | `persona.py` | 自我描述：`<data>/persona.md`，定时重写、历史上限截断 |
-| `prompt_files.py` | 读 `prompts/` 下的文本，填 `$占位符` |
-| `prompts/` | 提示词：sink、压缩、`tools/<工具>.txt` 一份一个 |
+| `prompt_files.py` | 提示词登记、读取、渲染；工具文本由实现方 `register_tools` 登记进来 |
+| `prompts/` | 引擎自己的提示词：sink、压缩、watchdog、persona、ask，以及 `tools/wait.txt` |
 | `logs.py` | 运行时日志：`data/loop/loop.log`，轮转 5 MB × 5 |
 | `usage.py` | 用量仪表盘：`python -m loop.usage` |
 | `selfcheck.py` | 离线自检：假模型、假数据、临时库 |
 
+在 `rin` 仓那一侧：`gateway.py`＋`web/index.html`（网关）、`settings.py`（设置表）、
+`memory_bridge.py`（记忆工具面）、`tools/`（`run` / `fetch` / `search` / `write` 与
+它们的沙箱、正文抽取），以及 `prompts/tools/` 里其余十份工具说明。
+
 ## 提示词
 
 提示词是数据，不写在代码里：`prompts/sink.txt`、`compress-system.txt`、
-`compress.txt`、`watchdog.txt`，工具说明在 `prompts/tools/<工具>.txt`（一个工具
-一份）。占位符用 `$名字`（和 `memory_v2/prompts/date.txt` 的 `$today` 一样），
-因为正文里常有 JSON 花括号。每次调用现读文件，改完不用重启。
+`compress.txt`、`watchdog.txt`、`persona.txt`、`ask.txt`；工具说明是
+`prompts/tools/<工具>.txt`（一个工具一份），引擎自己那份只有 `wait`。
+占位符用 `$名字`（和 `memory_v2/prompts/date.txt` 的 `$today` 一样），因为正文里
+常有 JSON 花括号。每次调用现读文件，改完不用重启。
 
 **分两层，和 App 一样**：仓库里的 `prompts/*.txt` 是默认；用户在运行目录放的
 `prompts.json` 是覆盖，**不改仓库源文件**（升级不会被冲掉）。覆盖的键就是文件名
 （工具是 `remember`、`wait` 这种，不带目录）。
 
-```json
-{"sink": "我是$name。……", "remember": "把这件事写进记忆。……"}
-- `$user`：对方的名字（`user_name`，压缩文本与 sink 第一句都用它）
+**工具说明归实现方。** 核心不知道有哪些工具，所以工具那几份文本由落地侧登记：
+
+```python
+prompt_files.register_tools({"remember": ("工具 · remember", "一句话说明", ["name", "note"])},
+                            base="/path/to/rin/rin/prompts")
 ```
 
-`prompt_files.META` 是注册表：每份提示词是什么、改坏了会怎样。加新提示词要在
-`META` 里登记，自检会查目录和注册表对不对得上。
+登记之后 `tool_texts()`、网页上的提示词编辑都带着它们；`prompt_files.META` 是合并后的
+注册表。文件里 `## 段` 与登记的参数名对不上（缺了、多了、重复了）都会当场报错。
 
 工具文件的结构是固定的：**开头那段是工具描述**，`## 参数名` 段落是 schema 里的
 参数说明。文件名就是工具名，参数名改了就进不了 schema；少了、多了、同一份里写
@@ -54,8 +60,10 @@
 
 ## 跑
 
+入口在另一仓（`rin`），这一仓不提供 `__main__`。在那边装上之后：
+
 ```powershell
-python -m loop --name Rin --data data/loop --memory-data data/memory --max-steps 20
+python -m rin --name Rin --data data/loop --memory-data data/memory --max-steps 20
 ```
 
 `--block-tokens` 调小可以让压缩早点发生（调试用）；`--park-seconds 0`（默认）表示
@@ -68,46 +76,7 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --max-steps
 
 ## 网页
 
-```powershell
-python -m loop --name 小满 --http 127.0.0.1:8080
-```
-
-开了 `--http` 就等于有输入通道（和 `--stdin` 一样，让 `wait` 真的等）。首页是单文件
-`web/index.html`，不起前端工程、不加依赖。令牌自动生成在 `<data>/web-token`
-（600），也可以 `--token` 指定。**默认只绑 127.0.0.1**：对外要从隧道走，
-不是把端口开到公网。
-
-| 接口 | 作用 |
-|---|---|
-| `POST /say {"text": "…"}` | 写进 `inbox`，和 stdin 同一条路 |
-| `GET /feed?since=<block>:<seq>&step=<n>` | 增量原文 + 增量用量；断线重连带游标补齐 |
-| `GET /context` | sink、四段旧摘要、上一块、当前块的原文与 token |
-| `GET /state` | 在想还是在等、块与上下文占用、今天花了多少、三处模型名 |
-| `GET /models?kind=chat\|summary\|embed` | 问端点要一份模型清单（缓存 2 分钟）；界面上的「列表」和顶栏模型胶囊用它 |
-| `GET/PUT /settings` | 旋钮清单、当前值、改动记录；PUT 保存并当场生效 |
-| `PUT /prompts` | 改一份提示词（空 = 恢复默认） |
-| `DELETE /entries?block=&seq=` | 删一条记录（成对删工具结果）；只举 `request_reload` 旗子，不重启 |
-| `POST /restart` | 请求循环走到步与步之间退出，交回给外面的进程管理器拉起 |
-
-★ 网页这一层**只读库、只往 `inbox` 写**，不碰 `blocks` / `entries` / `bands` ——
-单写者仍然是循环那个进程，网页崩了顶多看不见，不会把记录弄坏。每条连接各开一个
-`LoopStore`（SQLite 连接不能跨线程共享），库开了 WAL，读不挡写。
-
-界面上：左边是步的时间线（每步的输入/命中/输出、说的正文、工具调用与结果），
-右边是上下文监视（当前块占多少、上一块、四段旧摘要、sink），断线重连按游标补齐，
-不重不漏。
-
-几处是照着 App 的做法搬过来的，不是另起一套：
-
-- **输入框**：左边一行号槽（按**逻辑行**编，折行的续行留空），**回车只换行**，
-  发送只有右边那个 36 圆钮；行高 22、最多 5 行，再多就在框里滚（行号跟着滚），
-  高度变化 120ms 过渡。行数靠一面隐藏的镜像墙量（`#mirror`），textarea 不会告诉你有几行。
-- **主题**：顶栏右上角 ☀/☾，或设置页最上面「外观」三选一（跟随系统 / 浅色 / 深色）。
-  浅色那套值也取自 DSH：气泡 `deepseek-50`、边框黑 10%、label 用 bluish 阶梯。
-- **换模型**：顶栏那个模型胶囊点开就是端点给的清单，挑了立刻生效（`PUT /settings`）。
-  设置里「主模型 / 摘要模型 / 嵌入模型」各有「列表」按钮，拉不到就直接手写。
-- **删记录**：确认框里写清楚**撤回不了什么**——它当时写进记忆的笔记还在、压进旧段的
-  摘要改不了、用量和步数不会退回去；删的只是「下一步起它不再看到这一行」。
+网关在另一仓：见 `rin` 仓 README 的「网页」一节（只读库、只往 `inbox` 写）。
 
 ## 等
 
@@ -152,19 +121,7 @@ CLI 的 stdin、以后的 HTTP、任务跑完自己插一行。醒来写成记�
 
 ## 工作区
 
-`<data>/workspace` 是它自己的地方：跑命令的 cwd 就在这儿，写东西也只写这儿。
-
-| 工具 | 能做什么 | 闸门 |
-|---|---|---|
-| `run` | 跑白名单里的**只读**命令 | 第一段程序名 + 不经 shell + 拒读凭证 |
-| `write` | 往工作区写文件（覆盖 / 追加） | 只写 `<data>/workspace`：绝对路径、`..`、解析后跑出工作区的都拒；单次上限 `write_max_chars`（默认 10 万字） |
-
-为什么不把写命令并进 `run`：`<data>/` 是服务用户可写的，白名单里放 `tee` / `mkdir`
-等于把改 `loop.sqlite3`、`graph.json` 的权限也交出去。`write` 只管工作区这一块，
-其余留给 `run` 的只读面。
-
-那里的 `README.md` 是给人（和它）看的约定：草稿、收件箱、脚本各放哪。它不写这个文件，
-改了也不会被覆盖——只是部署时放了一份。
+`write` 工具在另一仓：见 `rin` 仓 README 的「工作区」一节。
 
 ## 现在的边界
 
@@ -267,36 +224,16 @@ python -m loop.usage --data data/loop --days 7
 
 ## 记忆工具面
 
-五个动作分工清楚，说明文字在 `prompts/tools/<工具>.txt`：
+`remember` / `recall` / `recollect` / `forget` / `rename` 的工具面
+在另一仓（`rin:memory_bridge.py`）；判断与落盘在 `memory_v2/api.py`。用法见 `rin` 仓 README。
 
-| 工具 | 做什么 | 返回长什么样 |
-|---|---|---|
-| `remember` | 写一件事；**一件事一条笔记**，同名或给 `event` 再记就是改这条 | `已记（新建）：…（id，long，128 字）` / `已更新：…——换成了新的这 128 字，原来那句是「…」`；**一字不差时返回"没再写"** |
-| `link` | 把两件连起来，不动内容（先建再连就是两次调用） | `连上了：A — B（关联）`；连着的不再加；同一件会拒 |
-| `recall` | 按关键词找，返回 id / 名字 / 时间 | 命中列表 + "看具体用 recollect" |
-| `recollect` | 把某一件写成一段回忆（编写模型现写） | 第一人称回忆 |
-| `forget` | 删一件（连它的连接） | `忘了：名字（id）` |
-| `rename` | 改名字，不动笔记与连接 | `改名了：旧 → 新`；重名会被拒 |
+## 接口与设置
 
-**为什么关系和内容分成两个工具**：合成一个的时候，"只想把两条连起来"没有入口——它被迫
-带着 note 一起调，被"需要 note"挡下来，只好新建第三件来连（服务器上真这么演了一遍）。
-现在 `link(a, b)` 单独做一件事，不动内容。
+网页接口和设置表在另一仓：见 `rin` 仓 README 的「接口」「设置」两节。
 
-**note 只留十步**：`remember` 刚写进去的那几步，记录里原样留着 note（她要能回头看见自己
-写了什么，不然会怀疑"note 没传、内容是系统补的"）；过了 `NOTE_KEEP_STEPS`（10 步）就换成
-一句占位，要内容用 `recollect`——note 本来就不该在记录里躺到底。
+## 上网与命令
 
-**为什么要"没再写"这句话**：以前同名更新也返回"已记"，模型看到后以为没记好，于是一步一个
-`remember` 反复写同一件事（服务器上连了 7 步）。现在同内容直接告诉它"没再写"，返回里还带
-上这次写进去的那一句话，看着就知道记的是不是自己想的那条；`_TURN_CALL_CAP`（同一轮同一
-工具连调 3 次）兜底——第 4 次不执行，只问一句「还要接着用就再调一次，这次照跑」，它再调
-就真执行、计数重新起算。**不挡死**：人叫她重试或她真要多跑几条的时候，挡住了就成了死结
-（线上出过：人说「你要不要重新试试」，她还是被次数挡回去）。对方再说话计数也清零。
-
-**为什么不追加**：一件事件以前可以攒好几条笔记（每次 `remember` 加一条），结果同一件事挂
-着三条几乎一样的话，她自己都分不清哪条算数，`recollect` 也拿一堆重复材料去写回忆。
-现在一件事一条笔记：再记就是改这条，返回会说原来那句是什么。要留"我当时怎么想的"就另开
-一件（名字不同），别往同一件里追加。老数据里多于一条的，下一次 write 会收回一条。
+`fetch` / `search` / `run` 在另一仓：见 `rin` 仓 README 的「上网」「命令」两节。
 
 ## 兜底
 
@@ -314,94 +251,5 @@ python -m loop.usage --data data/loop --days 7
 
 ```powershell
 python check_all.py            # 全部离线自测，CI 用的同一条命令
-python -m loop.selfcheck       # 只跑这一层（不联网、不用凭证）
+python -m loop.selfcheck       # 只跑引擎（不联网、不用凭证）
 ```
-## 接口
-
-渠道（对话 / 嵌入的地址与密钥）有三层，从下往上盖：
-
-1. 代码默认（`DEFAULT_CHAT_URL`）；
-2. 凭证文件 `/etc/palimpsest/credentials.yaml` 的 `refs`（`LOOP_CHAT_KEY` / `LOOP_CHAT_URL`，
-   或退回 `DEEPSEEK_*`；嵌入是 `ALIYUN_MAAS_*`）；
-3. **网页设置里的「接口」组**（`chat_url` / `chat_key` / `embed_url` / `embed_key`，存在
-   `<data>/settings.json`，权限 600。里面是明文密钥，别把这个文件给别人看）。
-
-两层是互补的：凭证文件里没写的可以在网页上填；网页上留空的就用凭证文件里的。
-对话与嵌入**分开**填地址——它们常常不是同一家（对话走 freeshare、嵌入走百炼）。
-改完立刻生效：`_rebuild_channel` 重建对话客户端、摘要客户端、嵌入器，并清掉模型清单缓存。
-
-## 设置
-
-网页的「设置」页可以直接改旋钮和提示词，不用登服务器。
-
-- **参数**存 `<data>/settings.json`，**只记改过的键**（没改的跟着代码默认走，升级时默认值变了也跟得上）；
-  保存就生效，因为这些都是每步现读的。
-- **提示词**写进 `<data>/prompts.json`，每步现读，保存就生效；「恢复默认」就是删掉那条覆盖。
-- **模型**：主模型、摘要模型、嵌入模型都能改，也都能点「列表」从端点清单里挑
-  （`/models`，百炼那份 180 个模型、嵌入只筛出带 `embedding` 的）。
-  换**摘要模型**会重建摘要客户端，换**嵌入模型/维度**会重建嵌入器——都是造好就带着
-  模型名的东西，光改配置不会生效。嵌入模型和维度是一对，换一个要连另一个一起对，
-  否则向量缓存按 (model, dim) 认不出来，召回会静默变差。
-- **主题**不进 `settings.json`：那是浏览器自己的偏好，存在 localStorage，换设备各管各。
-- **删记录**也不用重启：网页只举一个 `request_reload` 旗子，循环在下一个安全点
-  （步首，或等待里每秒那次维护）按库重读两块原文。删的只是时间线那一行 ——
-  它写进记忆的笔记、已经压进旧段的摘要都不会跟着撤回（旧段整体只读）；输入框下面
-  那行用量会退，设置里的「用量总账」不退。
-
-只有改过**代码**才需要「重启进程」：`control.request_stop()` 让循环走到步与步之间
-自己退出，再由外面的进程管理器拉起来——不会留下说了一半的正文或没有结果的调用。
-
-接口：`GET/PUT /settings`、`PUT /prompts`、`POST /restart`、`DELETE /entries`、`GET /models`。
-
-## 上网
-
-两个工具，都零配置：
-
-| 工具 | 做什么 |
-|---|---|
-| `fetch(url, offset)` | 读一个公开网页的正文；默认给 3000 字，`offset` 续读 |
-| `search(query)` | 搜一下，返回标题、链接、摘要 |
-
-**抓取分两级**：先自己抓（免费、SSRF 闸门、正文抽取）；抽出来不到 300 字，
-或者根本连不上（超时、反爬），再走 DeepSeek 的 `/v1/tools/fetch`——它能把 JS
-页面渲染成 Markdown，按成功请求计费，所以只在必要时花。
-
-**搜索分三级**：
-
-1. DeepSeek `/v1/tools/search`（同一个 `DEEPSEEK_API_KEY`）：带 `rerank_score`，
-   **低于 1.0 的直接丢掉**（全是低分才退回全部），摘要用它给的 `summary`；
-2. Tavily（配了 `TAVILY_API_KEY` 才走）；
-3. Bing 的 RSS 端点（免费兜底）。
-
-免费那几条实测记录：百度跳图形验证码、搜狗给 IP 限制页、360 能给结果但链接是
-会话绑定的（打开跳回它自己的导航页）；Bing 的 RSS 偶尔**整段跑题**——问
-「阿里云 学生机 价格」会返回一堆 OPPO 手机的问题。所以免费源只当兜底，
-平时走 DeepSeek。
-
-闸门（`web_access.py`）：只允许 http/https、只走 80/443、域名必须解析到**公网**
-地址、每一跳重定向重新校验、拒绝 `localhost` / `.local` / `.internal` / 云元数据。
-抓回来的网页是**数据不是指令**，工具说明里写了这一句。
-
-正文抽取：装了 `trafilatura` 就用它，没装退回标准库那把（`HTMLParser` 扔脚本样式、
-按块级标签断行）。所以 `requirements.txt` 不必加东西。
-
-同一个链接五分钟内不重复抓（进程内缓存）。
-
-## 命令
-
-`run(command)`：在跑循环的那台机器上执行一条命令，**默认关**（设置里的「命令」组）。
-现在**不维护程序白名单**——边界交给内核：
-
-- **Landlock 沙箱**（`landlock.py`）：整台机器可读、可执行，**只有 `<data>/workspace`
-  能写**；写的动作（建/删/改/截断/改名/符号链接）在工作区外一律 `Permission denied`。
-- **走 shell**：`sh -c`（Windows 上是 `cmd /c`），所以管道、重定向都能用。
-- **单文件上限**：`run_file_mb`（默认 64 MB，`RLIMIT_FSIZE`），防止往工作区里灌满盘。
-- **超时**：默认 20 秒，超了连进程组一起杀；**输出**默认留 4000 字（头 60% + 尾 40%）。
-- **fail-closed**：装不上 Landlock 就拒跑，绝不"没沙箱也照跑"；要裸跑得在设置里
-  明确关掉「关进沙箱」（等于把整台机器交给它）。
-- **唯一剩下的规则**：命令里点到凭证/密钥（`/etc/palimpsest`、`credentials.yaml`、
-  `web-token`、`*.pem`、`.ssh`）就不跑——那不是沙箱能管的事，管的是"别把密钥念进记录"。
-
-网络不在 Landlock 的文件词表里，所以它照常能联网（要断网得用 namespace，这台机器上
-`unshare -r` 被禁）。工具名与说明在 `prompts/tools/run.txt`。
-

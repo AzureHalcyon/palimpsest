@@ -87,18 +87,24 @@ recollect：按顺序重建，写成一段第一人称回忆
 
 | 目录                                    | 是什么                                            |
 | ------------------------------------- | ---------------------------------------------- |
-| [`memory_v2/`](memory_v2/README.md)   | 记忆层：事件网络、读取、重放、实时入口                            |
-| [`loop/`](loop/README.md)             | 持续在线的循环运行时：两块原文 + 运行时压缩 + 记忆工具面 + 网页控制台 + 上网工具 |
+| [`memory_v2/`](memory_v2/README.md)   | 记忆介质：事件网络、读取、重放、巩固；六个动词在 `api.py`              |
+| [`loop/`](loop/README.md)             | 循环引擎：两块原文 + 运行时压缩 + 上下文拼装 + 工具分发（不含具体工具）         |
+| `rin`（另一个仓库）                          | 落地与配套：她的工具、网关、设置表、人格、部署                        |
 | [`archive/v1/`](archive/v1/README.md) | 上一代实现，冻结但可运行                                   |
 | [`tools/`](tools/README.md)           | 离线工具                                           |
 | `memory_v2/view.py` + `view_template.html` | 事件图查看器：`python -m memory_v2 view --data <记忆目录>` |
 | `docs/`                               | 设计、参数、决策记录                                     |
 
+分仓的判据只有一条：**算法和「循环怎么设计」留在这个仓，「这个实例怎么跑起来」在 `rin` 仓。**
+依赖是单向的——`rin` 导入这一仓，这一仓不认识 `rin`。核心自己只带一个工具（`wait`）；
+工具的描述文本随实现走，由那一侧登记进来（`prompt_files.register_tools`）。
+
 ## 文档
 
 | 想看什么                | 去哪                                   |
 | ------------------- | ------------------------------------ |
-| 循环怎么跑、网页和接口、设置、上网工具 | [`loop/README.md`](loop/README.md)   |
+| 循环引擎怎么跑：上下文、压缩、等待、心跳、流式、自检 | [`loop/README.md`](loop/README.md)   |
+| 网页接口、设置表、上网与命令、部署 | `rin` 仓的 README（另一个仓库） |
 | 设计、读取、归档，以及和大脑结构的对照 | [`docs/事件状态与读取.md`](docs/事件状态与读取.md) |
 | 解构-重构这条候选路线 | [`docs/解构与重建.md`](docs/解构与重建.md) |
 | 参数和出处               | [`docs/参数.md`](docs/参数.md)           |
@@ -127,8 +133,10 @@ refs:
 
 ### 持续循环（当前主线）
 
+入口在 `rin` 仓：那一侧装上之后跑
+
 ```powershell
-python -m loop --name Rin --data data/loop --memory-data data/memory --stdin
+python -m rin --name Rin --data data/loop --memory-data data/memory --stdin
 ```
 
 `--stdin` 接上标准输入：直接打字回车就是一句话，模型用 `wait` 等的时候会真等。
@@ -136,8 +144,10 @@ python -m loop --name Rin --data data/loop --memory-data data/memory --stdin
 
 ### 网页控制台
 
+同一侧，把 `--stdin` 换成 `--http`：
+
 ```powershell
-python -m loop --name Rin --data data/loop --memory-data data/memory --http 127.0.0.1:8080
+python -m rin --name Rin --data data/loop --memory-data data/memory --http 127.0.0.1:8080
 ```
 
 浏览器打开 `http://127.0.0.1:8080/`，第一次要贴令牌（自动生成在 `<data>/web-token`，
@@ -167,8 +177,14 @@ python -m memory_v2 replay --session first --credentials .local/credentials.yaml
 不调模型、只验逻辑：
 
 ```powershell
-python check_all.py               # 全部离线自测（CI 跑的就是这条）
-python -m loop.selfcheck          # 只跑循环那层：上下文、压缩、等待、网页、设置、上网、删改
+python check_all.py               # 这一仓全部离线自测（CI 跑的就是这条）
+python -m loop.selfcheck          # 只跑引擎：上下文、压缩、等待、预算、删改、心跳
+```
+
+落地侧（`rin` 仓）另有一条，跑工具、网关、设置与提示词：
+
+```powershell
+python checks\run.py
 ```
 
 给外部程序用，一句一发：

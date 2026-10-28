@@ -7,6 +7,9 @@
 已验证的：除离线自检外，还用一台 4 核 4G 的云主机实跑过——装上、重启、网页与设置都在
 上面用过，说明它不需要多大的机器；跨天的连续跑还没验证。
 
+代码分布在两个仓：`loop/`、`memory_v2/` 在本仓（设计与核心算法），网关、设置表、
+记忆工具面、上网与命令在另一个仓 `rin`。本文中 `rin:` 开头的路径指后者的文件。
+
 本文是 [`持续在场.md`](持续在场.md) 的 API 版：语义相同（固定 sink、越旧越淡、细节在外部、
 说话是一步），机制换成两层——**上下文**（最近，易失）与 **memory_v2**（历史，模型自愿写入）。
 不做 day RAG、不做 chunks、不做 K/V；全部走 API。
@@ -122,7 +125,7 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - 每步：先把 inbox 里的动静读进来 → 拼上下文（sink + 旧段 + 当前块 + 工具结果）→
   主模型 → 执行 → 继续。
 - 工具走原生 `tool_calls`：`remember` / `recall` / `recollect`（记忆）、`wait`（等）、
-  `fetch` / `search`（上网；取自 `loop/web_access.py`，只走公网 80/443）、`run`
+  `fetch` / `search`（上网；取自 `rin:tools/web_access.py`，只走公网 80/443）、`run`
   （宿主上的命令；走 `sh -c`、关进 Landlock「只有工作区能写」、装不上就 fail-closed、
   拒读凭证、默认关）、`write`（只写 `<data>/workspace` 的文件，绝对路径与 `..` 都拒）。
 - 正文是"说"：投递，不结束。**正文和工具调用可以同时**（原文 `tool_calls` 允许），
@@ -162,7 +165,7 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 ## 6 参数（可在网页上改）
 
 块 50k、上下文 200k、旧段 30k；四档 1200 / 2400 / 4800 / 9600 字符（逐档不超过前一档 0.8）。
-这些都进了 `loop/settings.py` 的 `FIELDS`，网页上能改、改完即生效；出处与理由见
+这些都进了 `rin:settings.py` 的 `FIELDS`，网页上能改、改完即生效；出处与理由见
 [`参数.md`](参数.md)。还没定的：五段的配比（sink ＋ 四档）、recall 的 N 与 top-k。
 
 ## 7 实现顺序
@@ -177,7 +180,7 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 4. **恢复（已完成）**：`blocks` + `entries` 按条落盘，重启恢复上一块和当前块；
    memory_v2 的重建随步骤 2。
 5. **调参**：块大小、五段配比（sink ＋ 四档）、recall N、sink 措辞。
-6. **网页与设置（已完成）**：`loop/web.py` ＋ 单文件界面（对话 / 上下文 / 设置）；
+6. **网页与设置（已完成）**：`rin:gateway.py` ＋ 单文件界面（对话 / 上下文 / 设置）；
    `/say` `/feed` `/state` `/context` `/settings` `/models` `/prompts` `/restart`
    `/entries`；旋钮、提示词、三处模型都能在线改，深浅主题在浏览器里。
 7. **上网（已完成）**：`fetch` 两级（自己抓 → 抽不出正文再走 DeepSeek 渲染）、
@@ -192,14 +195,14 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 - `loop/compress.py`：调摘要模型，一块一次；
 - `loop/driver.py`：步循环、工具、预算；
 - `loop/store.py`：SQLite 三张表；
-- `loop/memory_bridge.py`：工具面（remember / recall / recollect）与 memory_v2 的图。
+- `rin:memory_bridge.py`：工具面（remember / recall / recollect）与 memory_v2 的图。
 
 memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻结/` 的那张 live 图）、
 `chat/loop.py` / `chat/tools.py` 的 event 调用改为可选；不动归档、重放与长期语义。
 
 ### 7.1 实现注记
 
-- 代码在 `loop/`；入口 `python -m loop --name <名字> --data <目录> --memory-data <记忆目录> --max-steps N`。
+- 代码在 `loop/`；入口 `python -m rin --name <名字> --data <目录> --memory-data <记忆目录> --max-steps N`。
 - 每步按原生角色拼消息：`system`（sink + 旧段）＋ 两块原文逐条还原成 `user` / `assistant`
   （谁说的由 role 说，不靠行首标）＋ 末尾一条 `user` 帧装系统注入（墙钟，要问时带上
   「还要继续吗」）。系统注入一律套 `<system-reminder>…</system-reminder>`，sink 里写明
@@ -239,7 +242,7 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻�
   `--summary-model qwen-plus` 走百炼；失败保留原文，等块再长 1k 再试。
 - 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search` / `run` / `write`
   （`run` 默认关，开了才出现在工具面里）；正文是说，空回复即停。
-- 网页：`loop/web.py` 只读库、只往 `inbox` 写，界面是单个 `loop/web/index.html`；令牌走
+- 网页：`rin:gateway.py` 只读库、只往 `inbox` 写，界面是单个 `rin:web/index.html`；令牌走
   Bearer（`<data>/web-token`），默认只绑 `127.0.0.1`。
 - 记忆：事件带 `notes` / `scope` / `expires_at` / `step`；写入的 note 是编写模型的材料；
   回忆只读 live 图（启动时并入 `冻结/`）；嵌入用百炼，词面默认关（`--lexical` 开）；最近 N 步是默认关

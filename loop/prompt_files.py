@@ -20,6 +20,10 @@ from typing import Dict
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
 
 # 键 → (显示名, 说明, 文件名)。加提示词要在这里登记，自检会查有没有漏。
+#
+# 这里只放**引擎自己的**提示词。工具描述随工具走：谁实现工具，谁把它那几份文本
+# 登记进来（`register_tools`），核心只负责读、渲染、校验。`wait` 是唯一例外——
+# 它由引擎自己实现（等动静 / 等到点），所以描述也留在这一侧。
 META = {
     "sink": ("sink · 开场与边界",
              "常驻在 system 最前面：它是谁、怎么说话、这段历史怎么用。改坏了整个人的口吻都会变。",
@@ -41,29 +45,31 @@ META = {
             "ask.txt"),
 }
 
-# 工具说明一份一个文件（`prompts/tools/<工具>.txt`）：开头那段是工具描述，
-# `## 参数名` 段落是 schema 里的参数说明。
-# 以前十个工具挤在一个 `tools.txt` 里用 `## remember.name` 这样的键分，结果：
-# ① 同一个键写两遍，后一段静默盖掉前一段（run.command 就被过期那段盖过）；
-# ② 想改一个工具得在两千字里翻，改错一个字整个工具面都歪。
-_TOOL_FILES = {
-    "remember": "把一件事写进记忆：name 是以后搜它的键，note 是记得的内容。",
-    "recall": "按关键词联想记忆，返回 id、名字、时间。",
-    "recollect": "把某一件写成一段第一人称回忆，只有这段回忆进上下文。",
-    "forget": "删掉一件记忆（连同它的连接）。",
-    "rename": "给一件记忆改名。",
-    "wait": "停在这儿等对方的动静，或者等到某个时间点。",
-    "link": "把两件事连起来，不动内容。",
-    "fetch": "打开一个公开网页读正文。",
-    "search": "搜一下网上的东西，返回标题、链接、一小段摘要。",
-    "run": "在跑自己的那台机器上跑一条命令（沙箱里，只有工作区能写）。",
-    "write": "往工作区里写一个文件。",
-}
-for _tool_name, _tool_hint in _TOOL_FILES.items():
-    META[_tool_name] = ("工具 · %s" % _tool_name,
-                        _tool_hint + "开头那段是工具描述，`## 参数名` 段落是参数说明，键名不能改。",
-                        "tools/%s.txt" % _tool_name)
-del _tool_name, _tool_hint
+# 工具名 → 参数名。用来校验文件里的 `## 段` 不多不少；工具实现不在这一侧，
+# 参数名也只能由登记方给，核心不替它们猜。
+_TOOL_PARAMS: Dict[str, list] = {}
+
+# 键 → 文件所在目录。默认 `loop/prompts`；登记进来的工具用它自己的目录。
+_BASES: Dict[str, str] = {}
+
+
+def _register_tool(name: str, label: str, hint: str, params, base: str) -> None:
+    if name in META:
+        raise PromptError("工具登记重复：%s" % name)
+    META[name] = (label, hint + "开头那段是工具描述，`## 参数名` 段落是参数说明，键名不能改。",
+                  "tools/%s.txt" % name)
+    _TOOL_PARAMS[name] = [str(item) for item in params]
+    _BASES[name] = str(base)
+
+
+def register_tools(entries, base: str) -> None:
+    """把一组工具描述登记进来：`{工具名: (显示名, 一句话说明, 参数名列表)}`。
+
+    `base` 是这些文件的根目录（下面是 `tools/<工具>.txt`）。登记之后
+    `tool_texts()` 和网页上的提示词编辑都会带上它们；同名重复登记会被拒。
+    """
+    for name, (label, hint, params) in dict(entries).items():
+        _register_tool(str(name), str(label), str(hint), params, base)
 
 _PLACEHOLDER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _OVERRIDES_DIR = ""
@@ -71,6 +77,12 @@ _OVERRIDES_DIR = ""
 
 class PromptError(RuntimeError):
     """提示词文件缺失、读不了，或占位符对不上。"""
+
+
+# 引擎自己的工具：等动静 / 等到点。它的描述留在这一侧；别的工具由实现方登记。
+_register_tool("wait", "工具 · wait",
+               "停在这儿等对方的动静，或者等到某个时间点。",
+               ["until", "kinds"], _DIR)
 
 
 def use_overrides(data_dir: str) -> None:
@@ -117,7 +129,7 @@ def default_text(name: str) -> str:
         key = key[:-4]
     if key not in META:
         raise PromptError("没有登记的提示词：%s" % name)
-    path = os.path.join(_DIR, META[key][2])
+    path = os.path.join(_BASES.get(key, _DIR), META[key][2])
     try:
         with io.open(path, encoding="utf-8") as handle:
             return handle.read()
@@ -189,39 +201,32 @@ def sections(name: str) -> Dict[str, str]:
     return file_parts(name)[1]
 
 
-# 工具面要的每一段文字：`remember` 是工具名，`remember.note` 是它那个参数。
-# 缺一段、多一段都报错：宁可起不来，也不要静默少一句说明或者多一段没人用的。
-TOOL_KEYS = (
-    "remember", "remember.name", "remember.event", "remember.note",
-    "remember.scope",
-    "link", "link.a", "link.b", "link.relation",
-    "recall", "recall.keywords", "recall.after", "recall.before", "recall.exclude",
-    "recollect", "recollect.event",
-    "wait", "wait.until", "wait.kinds",
-    "fetch", "fetch.url", "fetch.offset",
-    "search", "search.query",
-    "run", "run.command",
-    "write", "write.path", "write.content", "write.mode",
-    "forget", "forget.event",
-    "rename", "rename.event", "rename.name",
-)
-
-
 def tool_names() -> list:
-    """工具名（`remember`、`wait`…）：TOOL_KEYS 里不带点的那几个。"""
-    return [key for key in TOOL_KEYS if "." not in key]
+    """已登记的工具名：`wait` 在前，其余按登记顺序。"""
+    return list(_TOOL_PARAMS)
+
+
+def tool_keys() -> list:
+    """工具面的全部键：`wait` 与 `wait.until` 这种（工具名 + 参数名）。"""
+    out: list = []
+    for tool in tool_names():
+        out.append(tool)
+        out.extend("%s.%s" % (tool, param) for param in _TOOL_PARAMS[tool])
+    return out
 
 
 def tool_texts() -> Dict[str, str]:
-    """一个工具一份文件：开头那段是描述，`## 参数名` 是参数说明。"""
+    """一个工具一份文件：开头那段是描述，`## 参数名` 是参数说明。
+
+    缺段、多段、重复段都在这里报错——宁可起不来，也不要让模型照着错的说明用工具。
+    """
     out: Dict[str, str] = {}
     for tool in tool_names():
         head, parts = file_parts(tool)
         if not head:
             raise PromptError("%s 开头要有工具描述（第一个 `## ` 之前那段）" % tool)
         out[tool] = head
-        wanted = {key.split(".", 1)[1] for key in TOOL_KEYS
-                  if key.startswith(tool + ".")}
+        wanted = set(_TOOL_PARAMS[tool])
         extra = sorted(set(parts) - wanted)
         if extra:
             raise PromptError("%s 里多了一段 `## %s`：schema 里没有这个参数"

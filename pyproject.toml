@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "palimpsest"
+# 单个发行名，提供 `loop`（循环引擎）与 `memory_v2`（记忆介质）两个包。
+# 0.1.0 是暂定的：真开始跨仓钉版本时，按当时的节点改成 0.x 或日期号。
+version = "0.1.0"
+description = "持续在场：循环引擎与记忆介质的设计和核心"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "见 LICENSE 与 LICENSE-DOCS" }
+dependencies = ["PyYAML>=6.0"]
+
+# 可选件不写进 dependencies：没装也能跑（向量退回词面、正文抽取退回标准库）。
+# 需要时按 requirements.txt 装。
+[project.optional-dependencies]
+full = ["numpy>=2.0", "networkx>=3.2", "trafilatura>=2.0"]
+
+[tool.setuptools.packages.find]
+# 只装这两个包。testsupport.py 是仓库根的测试小工具，不随包发。
+include = ["loop", "loop.*", "memory_v2", "memory_v2.*"]
+exclude = ["memory_v2.tests", "memory_v2.tests.*", "*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+# 提示词是代码的一部分：缺一个文件，循环就少一段口吻或一个工具说明。
+loop = ["prompts/*.txt", "prompts/tools/*.txt", "web/*.html"]
+memory_v2 = ["prompts/*.txt", "view_template.html"]

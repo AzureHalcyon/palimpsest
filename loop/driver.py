@@ -19,9 +19,6 @@ from memory_v2.core.llm import ChatClient, ChatError
 from . import control
 from . import persona
 from . import prompt_files
-from . import shell
-from . import webtools
-from . import workspace
 from .compress import CompressError, Compressor, add_band
 from .context import Context, estimate_tokens, strip_fake_calls
 from .store import LoopStore
@@ -158,7 +155,8 @@ class Loop:
                  on_speak: Optional[Callable[[str], None]] = None,
                  on_step: Optional[Callable[[dict], None]] = None,
                  echo: Optional[Callable[[str], None]] = None,
-                 log: Optional[Callable[[str], None]] = None):
+                 log: Optional[Callable[[str], None]] = None,
+                 toolsets: Optional[List] = None):
         self.config = config
         self.credentials = credentials
         self._persona_client = None
@@ -169,6 +167,9 @@ class Loop:
         self.on_step = on_step or (lambda info: None)
         self.echo = echo or (lambda text: None)
         self.log = log or (lambda text: None)
+        # 工具面归入口：引擎只认「有哪些工具」和「按名字调哪个」，不认具体是谁。
+        # 核心自己一个工具都不带（`wait` 除外），工具表全由入口递进来。
+        self.toolsets = list(toolsets or ())
         self.client = client or ChatClient(
             ChatConfig(model=config.model, temperature=config.temperature,
                        max_tokens=config.max_tokens, timeout=config.timeout,
@@ -195,6 +196,9 @@ class Loop:
         self._after_tool: List[dict] = []
         # 有没有人能把消息送进来：没有就只等时间，无上界的等就直接停。
         self.standby = bool(getattr(config, "standby", False))
+        # 刚起来就有人说话（`--say` 或入口先塞一句）：这时候不该再"等动静"，
+        # 否则那句话躺在记录里，人得再发一条才会被看见。
+        self._fresh_input = False
         # 距上一次外部输入过了几步：用来拦「自己在跟自己转」。
         self.since_external = 0
         self.retries = 0
@@ -221,9 +225,8 @@ class Loop:
         tools = list(self.memory.tools())
         text = prompt_files.tool_texts()
         tools.append(_wait_tool(text))
-        tools.extend(webtools.tools())
-        tools.extend(shell.tools(self.config))
-        tools.extend(workspace.tools(self.config))
+        for toolset in self.toolsets:
+            tools.extend(toolset.tools())
         return tools
 
     # ── 一步 ──────────────────────────────────────────────────────────────
@@ -321,10 +324,12 @@ class Loop:
         resumed = self._resume_waits()
         # 刚起来：没挂着的等、也没有人说话，就先等着。不然模型会对着块的最后
         # 一句再应一遍——每次重启都白说两句，还把记录弄脏。
-        if self.standby and not resumed and not self.store.has_pending():
+        if (self.standby and not resumed and not self.store.has_pending()
+                and not self._fresh_input):
             self._park("刚起来，没有动静")
         while not (limit and self.steps >= limit):
             self.step()
+            self._fresh_input = False
             if self.parked:
                 break
         return self.steps
@@ -333,6 +338,7 @@ class Loop:
         """外部消息进记录：下一次请求就带着它。"""
         self._append({"role": "user", "content": str(text)})
         self.since_external = 0
+        self._fresh_input = True
 
     # ── 调模型 ────────────────────────────────────────────────────────────
     def _on_delta(self, kind: str, text: str) -> None:
@@ -530,12 +536,9 @@ class Loop:
         try:
             if name == "wait":
                 return self._wait(arguments)
-            if name in webtools.NAMES:
-                return webtools.call(name, arguments)
-            if name in shell.NAMES:
-                return shell.call(name, arguments, self.config)
-            if name in workspace.NAMES:
-                return workspace.call(name, arguments, self.config)
+            for toolset in self.toolsets:
+                if toolset.owns(name):
+                    return toolset.call(name, arguments)
             return self.memory.call(name, arguments)
         except control.StopRequested:
             raise

@@ -1,6 +1,6 @@
 # 贡献指南
 
-**这个项目是研究原型**：当前主线是 `loop/`（持续循环），记忆层在 `memory_v2/`；上一代（`memory/` ＋ v1 的 App）归档在 `archive/v1/`（构建见 [`archive/v1/README.md`](archive/v1/README.md)），`tools/` 是离线工具。⇒ **文档与讨论仍然是最有用的贡献**，代码类改动也欢迎。
+**这个项目是研究原型**：当前主线是 `loop/`（循环引擎），记忆层在 `memory_v2/`；落地那一半（工具、网关、设置表、部署）在另一个仓 `rin`；上一代（`memory/` ＋ v1 的 App）归档在 `archive/v1/`（构建见 [`archive/v1/README.md`](archive/v1/README.md)），`tools/` 是离线工具。⇒ **文档与讨论仍然是最有用的贡献**，代码类改动也欢迎。
 
 ## 提问题 / 提想法
 
