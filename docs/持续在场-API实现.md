@@ -112,7 +112,11 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
   - `recall_log(id, ts, question, event_ids)`：记忆检索记录；
   - `usage(step, ts, prompt, completion, cache_hit, cache_miss, reasoning)`：每步真数，
     `python -m loop.usage` 按天汇总；
-  - `inbox(id, ts, kind, text, consumed)`：进件队列，谁都能往里写（标准输入、网页、任务结果）。
+  - `inbox(id, ts, kind, text, source, chat_type, chat_id, chat_name, sender_id,
+    sender_name, policy, state, notified, consumed, meta)`：收件箱。谁都能往里写
+    （标准输入、网页、通道适配器经 `POST /inbox`）；每条带来源与会话，按会话策略投递；
+  - `chats(chat_id, source, chat_type, chat_name, policy, updated)`：每个会话一条，
+    `policy` = wake / batch / mute，进件继承它，改策略时未读的跟着改。
 - 运行时日志另存 `data/loop/loop.log`（轮转），只记发生了什么，正文在 `entries` 里。
 - **当前块也存**：它就是上下文，不存就接不上。
 - memory_v2：事件加 `notes`（模型写的材料）、`scope`、`expires_at`；旧场次段兼容；
@@ -122,9 +126,10 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
 
 ## 5 循环
 
-- 每步：先把 inbox 里的动静读进来 → 拼上下文（sink + 旧段 + 当前块 + 工具结果）→
-  主模型 → 执行 → 继续。
+- 每步：先把 inbox 里**能叫醒她**的动静取出来（见下面「收件箱」）→
+  拼上下文（sink + 旧段 + 当前块 + 工具结果）→ 主模型 → 执行 → 继续。
 - 工具走原生 `tool_calls`：`remember` / `recall` / `recollect`（记忆）、`wait`（等）、
+  `channels` / `channels_set` / `messages`（收件箱：看会话、改策略、读积压）、
   `fetch` / `search`（上网；取自 `rin:tools/web_access.py`，只走公网 80/443）、`run`
   （宿主上的命令；走 `sh -c`、关进 Landlock「只有工作区能写」、装不上就 fail-closed、
   拒读凭证、默认关）、`write`（只写 `<data>/workspace` 的文件，绝对路径与 `..` 都拒）。
@@ -140,8 +145,18 @@ sink 只放框架、约束与上下文说明；工具 schema 走 `tools` 参数�
   `wait` 是「等完这个再等那个」，不是「或者」，多出来的不执行并说明原因。
 - 醒来的动静写成记录：`user` 是 `对方：…`，其他是 `提醒：<kind>：…`；`wait` 的结果
   只写"等了多久、为什么醒"，不重复内容。
+- **收件箱**：按会话设三条策略，`wait` 只被 `wake` 叫醒。
+  - `wake`：响铃——记录里拼一行「还有 N 条没看的消息，谁各几条」，
+    **正文不进来**，要用 `messages` 取；
+  - `batch`：只攒着，不响铃，只出现在那行计数里；
+  - `mute`：不提示，消息仍存着（`messages` 也不给）。
+  那行数字只在总数变化时重拼，`UNREAD_KEEP_STEPS`（6 步）之后离开上下文；
+  响过铃没读走的仍算未读，不重复响（`inbox.notified`）。
+- 本机对话（网页 `/say`、标准输入）没有 `source`，正文直接进记录——那是
+  "这边这个人"说的话，不是外部通道的消息。
 - 空回复（没有正文、没有工具调用）也是等：有输入通道（`--stdin` 或 `--http`）就真等，没有就停住。
-- 输入通道有两个：标准输入和网页（`--http host:port`），都只往 `inbox` 写一行；
+- 输入通道：标准输入、网页（`--http host:port`），以及任何进程的
+  `POST /inbox`（通道适配器，如 QQ）；都只往 `inbox` 写一行；
   网页那层只读库，单写者仍然是循环进程。
 - 网页还能改记录：删一条只举 `request_reload` 旗子，循环在下一个安全点（步首，或等待里
   每秒那次维护）按库重读两块原文；「重启进程」是 `request_stop()`，让它走到步与步之间
