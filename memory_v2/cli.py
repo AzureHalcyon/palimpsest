@@ -87,7 +87,7 @@ def _cmd_chat(args) -> int:
         Graph.open(data_dir),
         data_dir,
         store.session_id,
-        system_messages(),
+        system_messages(data_dir),
         embedder=_embedder(args.credentials),
         echo=lambda text: print(text, file=sys.stderr, flush=True),
     )

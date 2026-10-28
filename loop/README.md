@@ -29,11 +29,22 @@
 
 ## 提示词
 
-提示词是数据，不写在代码里：`prompts/sink.txt`、`compress-system.txt`、
-`compress.txt`、`watchdog.txt`、`persona.txt`、`ask.txt`；工具说明是
-`prompts/tools/<工具>.txt`（一个工具一份），引擎自己那份只有 `wait`。
+提示词是数据，不写在代码里。核心仓只有**机制与算法**这几份：`prompts/sink.txt`
+（记录怎么读、`wait`/`recall` 是什么、system-reminder 是什么意思、今天几号）、
+`compress-system.txt`、`compress.txt`、`watchdog.txt`、`persona.txt`（改写自我描述的任务）、
+`ask.txt`；引擎自己那份工具说明只有 `tools/wait.txt`。
 占位符用 `$名字`（和 `memory_v2/prompts/date.txt` 的 `$today` 一样），因为正文里
 常有 JSON 花括号。每次调用现读文件，改完不用重启。
+
+**声音（她是谁、怎么说话）不在这里。** 它属于实例，由落地侧登记成 `voice`：
+
+```python
+prompt_files.register_prompts({"voice": ("voice · 身份与说话方式", "一句话说明", "voice.txt")},
+                              base="/path/to/rin/rin/prompts")
+```
+
+登记了就拼在 sink 最前面（`$name`、`$user` 照常替换），没登记就只有机制那几段。
+这样"改一句口吻"不会碰核心，"改记录怎么读"不会碰落地侧。
 
 **分两层，和 App 一样**：仓库里的 `prompts/*.txt` 是默认；用户在运行目录放的
 `prompts.json` 是覆盖，**不改仓库源文件**（升级不会被冲掉）。覆盖的键就是文件名

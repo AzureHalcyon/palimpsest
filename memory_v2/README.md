@@ -37,7 +37,7 @@
 | `read/` | 落点、扩散、竞争、编写 |
 | `consolidate/` | 重放、加强、衰减、剪枝 |
 | `chat/` | 一轮的循环与工具 |
-| `prompts/` | 常驻（persona）、事件契约、sys2、编写 |
+| `prompts/` | 事件契约、编写、归档、日期。persona 与声音（`sys2`）不在仓里：部署时放进实例的 `<data>/persona.md` 与 `<data>/prompts/sys2.txt`（都已忽略） |
 | `cli.py` | 命令行 |
 | `serve.py` | 一句一发的 HTTP 入口 |
 

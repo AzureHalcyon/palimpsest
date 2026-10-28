@@ -454,12 +454,16 @@ class Context:
         name = (self.config.name or "").strip()
         if not name:
             raise ValueError("sink 第一句要名字，但 config.name 是空的")
-        return prompt_files.render("sink.txt", name=name,
-                                   user=str(getattr(self.config, "user_name", "")
-                                            or "对方"),
+        user = str(getattr(self.config, "user_name", "") or "对方")
+        # 声音（她是谁、怎么说话）由落地侧登记；没登记就是空的，sink 只有机制那几段。
+        voice = ""
+        if prompt_files.has("voice"):
+            voice = prompt_files.render("voice", name=name, user=user).strip()
+        body = prompt_files.render("sink.txt", name=name, user=user,
                                    recall=self.config.recall_tool,
                                    wait=self.config.wait_tool,
                                    today=time.strftime("%Y-%m-%d")).strip()
+        return ("%s\n\n%s" % (voice, body)).strip() if voice else body
 
     def _render_band(self, band: Band) -> str:
         return "[%s]\n%s" % (time_range(band.start_ts, band.end_ts),

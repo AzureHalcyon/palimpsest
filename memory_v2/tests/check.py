@@ -12,6 +12,7 @@ from memory_v2.chat.loop import EventChat
 from memory_v2 import edits
 from memory_v2.consolidate.replay import consolidate
 from memory_v2.core.config import ChatConfig
+from memory_v2.core import prompts
 from memory_v2.core.embed import cosine
 from memory_v2.core.think import (ThinkFilter, normalize_message, normalize_turn,
                                  split_think)
@@ -370,6 +371,27 @@ template = io.open(os.path.join(
 assert "S.nodes.length <= 40" in template, "节点少的时候要全标名字"
 assert "function drawRadius(" in template, "孤立节点要有屏幕上的最小半径"
 shutil.rmtree(data4, ignore_errors=True)
+
+
+# persona 与 sys2 都是实例内容：从实例目录读，没有就不发那一条（核心仓里不放）
+data5 = tempdir("mv2-persona-")
+assert prompts.persona_text("") == "", "没有实例就应该是空"
+assert prompts.instance_text("", "sys2.txt") == ""
+plain = prompts.system_messages("")
+assert len(plain) == 2, plain          # 事件契约 + 日期，没有 persona、没有声音
+with io.open(os.path.join(data5, "persona.md"), "w", encoding="utf-8") as handle:
+    handle.write("实例里的自我描述。")
+assert prompts.system_messages(data5)[0]["content"] == "实例里的自我描述。"
+# 给的是记忆目录（<实例>/data/memory）时，要能往上找到 persona.md 与 prompts/sys2.txt
+memory_dir = os.path.join(data5, "memory")
+os.makedirs(memory_dir, exist_ok=True)
+assert prompts.system_messages(memory_dir)[0]["content"] == "实例里的自我描述。"
+os.makedirs(os.path.join(data5, "prompts"), exist_ok=True)
+with io.open(os.path.join(data5, "prompts", "sys2.txt"), "w",
+             encoding="utf-8") as handle:
+    handle.write("实例自己的说话规矩。")
+assert len(prompts.system_messages(memory_dir)) == 4, "实例提供了 sys2 就该多一条"
+shutil.rmtree(data5, ignore_errors=True)
 
 
 print("OK")

@@ -150,6 +150,16 @@ class _StubTools:
 
 
 
+# 声音（voice）属于落地侧：核心自检自己注册一份，sink 第一句才有「我是谁」。
+# 注册一次、全局生效；文件放在仓库 data/ 下的临时目录里。
+_VOICE_DIR = tempdir("voice-fixture-")
+with open(os.path.join(_VOICE_DIR, "voice.txt"), "w", encoding="utf-8") as _handle:
+    _handle.write("我是$name。我既是$user的助手也是他的陪伴者。"
+                  "我用简体中文思考和说话。")
+prompt_files.register_prompts(
+    {"voice": ("voice · 自检", "自检用的声音", "voice.txt")}, _VOICE_DIR)
+
+
 def check_summary() -> None:
     payload = parse_summary(
         '{"summary": "b", "keywords": ["k"], "unfinished": "u"}')
@@ -416,7 +426,7 @@ def check_user_name() -> None:
     check(plain.startswith("对方："), "不给名字就退回占位：%r" % plain)
     config = _loop_config(name="自检", user_name="岚")
     sink = Context(config).sink()
-    check("岚" in sink and "Ranchel" not in sink and "$user" not in sink,
+    check("岚" in sink and "$user" not in sink,
           "sink 第一句该用名字：%r" % sink[:60])
 
 
@@ -804,9 +814,9 @@ def check_prompts() -> None:
     if os.path.isdir(tools_dir):
         found += [name[:-4] for name in os.listdir(tools_dir) if name.endswith(".txt")]
     on_disk = sorted(found)
-    check(sorted(prompt_files.META) == on_disk,
-          "prompts/ 和注册表要对得上：目录 %r，注册表 %r"
-          % (on_disk, sorted(prompt_files.META)))
+    # 目录里的每一份都要登记；反过来不要求——工具描述与声音由落地侧登记，文件在别处。
+    missing = sorted(set(on_disk) - set(prompt_files.META))
+    check(not missing, "prompts/ 里的文件没登记：%r" % missing)
     for key in prompt_files.META:
         check(prompt_files.text(key).strip(), "每份提示词都要有内容：%s" % key)
     texts = prompt_files.tool_texts()      # 缺段、多段、重复段都在这里报

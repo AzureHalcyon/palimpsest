@@ -75,7 +75,7 @@ def load_credentials(path: str = "") -> LoopCredentials:
 @dataclass
 class LoopConfig:
     name: str = ""                    # sink 第一句的名字；空就是没定 persona
-    user_name: str = "Ranchel"        # 对方的称呼：压缩文本里"它："代替"对方："，sink 第一句也用它
+    user_name: str = "对方"          # 对方的称呼：压缩文本里"它："代替"对方："，sink 第一句也用它
     recall_tool: str = "recall"       # sink 里写的搜索工具名
     wait_tool: str = "wait"           # sink 里写的「停下等」工具名
     lexical: bool = False             # 词面检索；默认关，只用嵌入

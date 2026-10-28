@@ -36,7 +36,7 @@ class ChatService:
         self.store = SessionStore(data_dir, session)
         self.chat = EventChat(
             self.client, self.store, Graph.open(data_dir), data_dir,
-            self.store.session_id, system_messages(), embedder=self.embedder,
+            self.store.session_id, system_messages(data_dir), embedder=self.embedder,
             echo=lambda text: print(text, file=sys.stderr, flush=True),
         )
         self.lock = threading.Lock()

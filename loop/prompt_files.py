@@ -71,6 +71,28 @@ def register_tools(entries, base: str) -> None:
     for name, (label, hint, params) in dict(entries).items():
         _register_tool(str(name), str(label), str(hint), params, base)
 
+
+def register_prompts(entries, base: str) -> None:
+    """登记普通提示词（不是工具）：`{键: (显示名, 一句话说明, 文件名)}`。
+
+    声音（她是谁、怎么说话）这类「实例的内容」归落地侧，由那边登记进来；
+    核心只留算法与机制的提示词。没登记就不存在——`has()` 问得到。
+    """
+    for name, (label, hint, filename) in dict(entries).items():
+        key = str(name)
+        if key in META:
+            raise PromptError("提示词登记重复：%s" % key)
+        META[key] = (str(label), str(hint), str(filename))
+        _BASES[key] = str(base)
+
+
+def has(name: str) -> bool:
+    """登记过没有（可选的提示词用它判断，别用 try/except）。"""
+    key = str(name or "")
+    if key.endswith(".txt"):
+        key = key[:-4]
+    return key in META
+
 _PLACEHOLDER = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 _OVERRIDES_DIR = ""
 
