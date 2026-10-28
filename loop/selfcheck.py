@@ -1406,7 +1406,7 @@ def check_ring_text() -> None:
 
     把工具名塞进别人的话里，读起来像系统提示；工具怎么用归工具自己的说明。
     """
-    private = {"source": "QQ", "chat_type": "private", "chat_id": "2189761707",
+    private = {"source": "QQ", "chat_type": "private", "chat_id": "10001",
                "chat_name": "Ranchel", "sender_name": "Ranchel"}
     ring = _ring_text(private)
     check(ring == "Ranchel 在 QQ 上私聊你。", "私聊那句话：%r" % ring)
@@ -1462,11 +1462,11 @@ def check_via_mark() -> None:
 
         # 通道来的：叫醒她，她说的话要带上是回给哪个会话
         store.push("user", "在吗", source="QQ", chat_type="private",
-                   chat_id="2189761707", chat_name="她的人", sender_name="甲")
+                   chat_id="10001", chat_name="她的人", sender_name="甲")
         loop._drain_inbox()
         loop._append({"role": "assistant", "content": "在的"})
         via = loop.context.current.entries[-1].meta.get("via") or {}
-        check(via.get("source") == "QQ" and via.get("chat_id") == "2189761707",
+        check(via.get("source") == "QQ" and via.get("chat_id") == "10001",
               "外部叫醒后要带 via：%r" % via)
         check(via.get("chat_name") == "她的人" and via.get("chat_type") == "private",
               "via 要能直接当回发地址用：%r" % via)
@@ -1478,9 +1478,9 @@ def check_via_mark() -> None:
 
         # 等回去没事（到点没等到）：窗口也关掉
         store.push("user", "再来一句", source="QQ", chat_type="private",
-                   chat_id="2189761707", chat_name="她的人", sender_name="甲")
+                   chat_id="10001", chat_name="她的人", sender_name="甲")
         loop._drain_inbox()
-        check(loop.via.get("chat_id") == "2189761707", "外部消息要开窗口")
+        check(loop.via.get("chat_id") == "10001", "外部消息要开窗口")
         loop.store.mark_notified(store.inbox_recent(1)[0]["id"])
         said = loop._wait(json.dumps({"until": "1s"}))
         check("到点了" in said, "应该等到点：%r" % said)
@@ -1527,7 +1527,7 @@ def check_via_mark() -> None:
 
 
 def check_call_cap() -> None:
-    """同一个工具一轮里连调超过上限：问一句「还要接着用吗」，再调就照跑。"""
+    """同一个工具连着调超过上限：回一句事实，再调就照跑。"""
     workdir = tempdir("loop-cap-")
     try:
         config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
@@ -1558,8 +1558,11 @@ def check_call_cap() -> None:
         texts = dispatch(2)
         asked = [t for t in texts if "再调一次" in str(t)]
         ran = [t for t in texts if _StubTools.ANSWER in str(t)]
-        check(len(asked) == 1, "第 4 次该问一句（不执行）：%r" % texts)
-        check("这次照跑" in str(asked[0]), "问话要说清再调就放行：%r" % asked[0])
+        check(len(asked) == 1, "第 4 次该回一句（不执行）：%r" % texts)
+        check("再调一次照跑" in str(asked[0]), "话里要说清再调就放行：%r" % asked[0])
+        # 只说事实，不指路：停是她自己的动作，不该被这句提示教出来
+        check("轮" not in str(asked[0]) and "wait" not in str(asked[0]),
+              "这句不许出现「轮」，也不许教她怎么办：%r" % asked[0])
         check(len(ran) == 1, "确认后的那次要真执行：%r" % texts)
         check(loop._turn_calls["remember"] == 1, "确认后计数重新起算：%r"
               % loop._turn_calls)
@@ -1574,7 +1577,7 @@ def check_call_cap() -> None:
         check(len([t for t in texts if "再调一次" in str(t)]) == 1,
               "再满三次还要问一遍：%r" % texts)
 
-        # 对方说话之后计数清零：人叫她重试一次，不能还拿上一轮的次数挡回去。
+        # 对方说话之后计数清零：人叫她重试一次，不能还拿之前的次数挡回去。
         loop.store.push("user", "你试一次")
         check(loop._wait('{"kinds": ["user"]}') != "", "等到人的话要有个结果")
         loop._flush_after_tool()

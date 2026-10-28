@@ -74,8 +74,11 @@ prompt_files.register_tools({"remember": ("工具 · remember", "一句话说明
 入口在另一仓（`rin`），这一仓不提供 `__main__`。在那边装上之后：
 
 ```powershell
-python -m rin --name Rin --data data/loop --memory-data data/memory --max-steps 20
+python -m rin --name Rin --data data/loop --memory-data data/memory
 ```
+
+`--max-steps` 默认 0（不设上限）：循环只有步，停是她自己的动作（`wait`）；给了数才会
+在第 N 步收尾，只在自检和手动跑短场时用。
 
 `--block-tokens` 调小可以让压缩早点发生（调试用）；`--park-seconds 0`（默认）表示
 挂起就停，给了秒数才空转等待。`--say` 塞一条开场用户消息。摘要默认走
@@ -114,6 +117,9 @@ wait(kinds=["task"])                只等某类动静
 推进循环的只有工具调用。它说了话、没调工具，就是"这一步没有要做的事"——系统**不替它
 续写**，而是在下一步的记录末尾挂一句中性的「（这一步已经说完了。还要继续吗？）」
 （`prompts/ask.txt`，和墙钟一样只拼进输入、不落库）。
+
+这里没有"轮"，也没有步数上限：循环一路走，停只有两个来源——她自己 `wait`，或者说完
+话没调工具（问一次，再只说就停）。`--max-steps` 默认 0，给了数才在第 N 步收尾。
 
 - 它调 `wait` → 停在这儿；调别的工具 → 继续做。
 - 问了它还是只说话 → 直接停下（`_park`），**不连着问**：提问本身不能变成新的复读机。

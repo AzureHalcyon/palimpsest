@@ -42,6 +42,7 @@ REASONS: Dict[str, str] = {
     "name_required": "新开一件却没给 name",
     "event_not_found": "按 id 或名字都找不到这一件",
     "duplicate_note": "note 和这件里已经记的一字不差",
+    "likely_duplicate": "已经有一件名字很像的，没新建",
     "need_two_sides": "link 少给了一头",
     "same_event": "link 的两头是同一件",
     "already_linked": "这两件已经连着",
@@ -58,6 +59,22 @@ REASONS: Dict[str, str] = {
     "bad_json": "工具参数不是 JSON 对象",
     "unknown_tool": "没有这个工具",
 }
+
+
+def _bigrams(text: str) -> set:
+    """中文按二字窗切；短到只有一个字就整体当一个。"""
+    plain = "".join(str(text or "").split()).lower()
+    if len(plain) < 2:
+        return {plain} if plain else set()
+    return {plain[index:index + 2] for index in range(len(plain) - 1)}
+
+
+def name_similarity(first: str, second: str) -> float:
+    """两个名字的相似度（Dice，0..1）。"""
+    left, right = _bigrams(first), _bigrams(second)
+    if not left or not right:
+        return 0.0
+    return 2.0 * len(left & right) / (len(left) + len(right))
 
 
 def ok(reason: str = "ok", **data) -> dict:
@@ -164,6 +181,9 @@ class Memory:
         if created:
             if not name:
                 return fail("name_required")
+            near = self._similar_names(name)
+            if near:
+                return fail("likely_duplicate", name=name, candidates=near)
             event_id = self.graph.add_event(name)
 
         scope = str(scope or "long").strip().lower()
@@ -363,6 +383,21 @@ class Memory:
         return ok(event_id=event_id, text=recollection)
 
     # ── 小工具 ────────────────────────────────────────────────────────────
+    def _similar_names(self, name: str, limit: int = 3,
+                       floor: float = 0.6) -> list:
+        """按名字找相近的已有事件：新建之前先用它查一遍。"""
+        out = []
+        for event_id, value in self.graph.events.items():
+            score = name_similarity(name, str(value.get("name") or ""))
+            if score >= floor:
+                out.append({"id": str(event_id),
+                            "name": str(value.get("name") or ""),
+                            "date": str(value.get("created")
+                                        or value.get("updated") or "")[:10],
+                            "score": round(score, 2)})
+        out.sort(key=lambda item: -item["score"])
+        return out[:limit]
+
     def _note_chars(self, event_id: str) -> int:
         """这一件有多少字：recall 只给指针，字数帮着判断要不要深挖。"""
         notes = (self.graph.events.get(event_id) or {}).get("notes") or []

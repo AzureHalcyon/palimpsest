@@ -330,8 +330,8 @@ class Loop:
         self._compress_after = 0
         # 墙钟：上一次带上它的时刻；`_woke` 记着"上一个工具是不是等到动静了"。
         self._clock_at = 0.0
-        self._turn_calls = {}          # 这一轮各工具调了几次（外部一动就清零）
-        self._turn_confirm = set()     # 这一轮已经问过「还要接着用吗」的工具
+        self._turn_calls = {}          # 连着各工具调了几次（外部一动就清零）
+        self._turn_confirm = set()     # 连着调超量时已经回过一句的工具
         # 这一次工具调用的 meta：`messages` 靠它记下"读走的是哪几条进件"，
         # 对账才不会把"她已经读进记录"的消息当成丢了、又插成一条 user
         self._tool_meta: dict = {}
@@ -616,9 +616,10 @@ class Loop:
             name = str(function.get("name") or "")
             arguments = str(function.get("arguments") or "{}")
             content = ""
-            # 同一个工具在一轮（没有外界输入的一串步）里连调太多次：说明它在打转。
-            # 不硬挡：第 4 次先问一句「还要接着用就再调一次」，它再调就照跑、计数
-            # 重新起算——人叫它做事的时候不该被次数卡死（挡死过一次，它想重试都不行）。
+            # 同一个工具连着调太多次（中间没有外界输入）：说明它在打转。
+            # 不硬挡：第 4 次先回一句事实，它再调就照跑、计数重新起算——人叫它做事的
+            # 时候不该被次数卡死（挡死过一次，它想重试都不行）。话只说事实，不指路：
+            # 停是她自己的动作（`wait`），不是被这句提示教出来的。
             count = self._turn_calls.get(name, 0) + 1
             self._turn_calls[name] = count
             ask = ""
@@ -626,10 +627,10 @@ class Loop:
                 if name in self._turn_confirm:
                     self._turn_confirm.discard(name)
                     self._turn_calls[name] = 1
-                    self.log("[确认] %s 这一轮第 %d 次照跑，计数重新起算" % (name, count))
+                    self.log("[确认] %s 连着第 %d 次照跑，计数重新起算" % (name, count))
                 else:
-                    ask = ("（%s 这一轮已经调了 %d 次。还要接着用就再调一次，这次照跑；"
-                           "不用了就说话，或者 wait。）" % (name, _TURN_CALL_CAP))
+                    ask = ("（%s 已经连着调了 %d 次。再调一次照跑。）"
+                           % (name, _TURN_CALL_CAP))
             if name in _BLOCKING_TOOLS:
                 if name in used:
                     content = ("一次只能调一个 %s：这个回复里已经调过了，这条没执行。"

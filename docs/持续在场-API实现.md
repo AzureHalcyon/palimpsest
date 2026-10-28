@@ -217,7 +217,8 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻�
 
 ### 7.1 实现注记
 
-- 代码在 `loop/`；入口 `python -m rin --name <名字> --data <目录> --memory-data <记忆目录> --max-steps N`。
+- 代码在 `loop/`；入口 `python -m rin --name <名字> --data <目录> --memory-data <记忆目录>`
+  （`--max-steps` 默认 0，不设上限；循环只有步，停是她自己的动作）。
 - 每步按原生角色拼消息：`system`（sink + 旧段）＋ 两块原文逐条还原成 `user` / `assistant`
   （谁说的由 role 说，不靠行首标）＋ 末尾一条 `user` 帧装系统注入（墙钟，要问时带上
   「还要继续吗」）。系统注入一律套 `<system-reminder>…</system-reminder>`，sink 里写明
