@@ -11,7 +11,7 @@ import os
 import sqlite3
 from typing import List, Optional
 
-from .context import Band, Block, BlockEntry, now
+from .context import Band, Block, BlockEntry, content_text, now
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bands (
@@ -261,7 +261,7 @@ class LoopStore:
                 "INSERT INTO entries (block_id, seq, role, content, tool_calls,"
                 " tool_call_id, ts, meta, step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block_id, seq, str(message.get("role") or ""),
-                 str(message.get("content") or ""),
+                 content_text(message.get("content")),
                  json.dumps(list(message.get("tool_calls") or []), ensure_ascii=False),
                  str(message.get("tool_call_id") or ""), entry.ts,
                  json.dumps(dict(entry.meta or {}), ensure_ascii=False),

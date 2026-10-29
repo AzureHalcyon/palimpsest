@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -309,11 +311,101 @@ def _drop_leaked_marks(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# ── content 的两种形状 ────────────────────────────────────────────────────
+# 一行话是**字符串**；带图片的一条是**段数组**（OpenAI 那套 content parts）：
+#     [{"type": "text", "text": "…"},
+#      {"type": "image", "path": "workspace/收件/2026-10-30/x.jpg", "w": 1024, "h": 768}]
+# 图片**不在记录里存字节**：存的是数据目录下的相对路径，拼请求时才读出来缩一遍、
+# 转成 data URI。这样库不会因为一张图胖一兆，备份也不炸。
+IMAGE_TOKENS = 800          # 一张图片按这么多 token 估（1024 长边那一档）
+_IMAGE_EDGE = 1024          # 发出去之前缩到长边这么多
+_image_cache = {}           # 路径 → (mtime, 字节数, data URI)
+
+
+def content_text(content) -> str:
+    """content（字符串或段数组）摊成文字：图片写成 `[图片]`。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get("type") or "")
+        if kind == "text":
+            parts.append(str(part.get("text") or ""))
+        elif kind in ("image", "image_url"):
+            parts.append("[图片]")
+    return "\n".join(parts)
+
+
+def image_parts(content) -> list:
+    """这条 content 里的图片段（字符串就是空）。"""
+    if not isinstance(content, list):
+        return []
+    return [part for part in content
+            if isinstance(part, dict) and str(part.get("type") or "") in
+            ("image", "image_url")]
+
+
+def _data_uri(part: dict, data_dir: str) -> str:
+    """读出来、缩一遍、转 data URI。读不到就回空串（那一步就不带图片）。"""
+    source = str(part.get("path") or part.get("url") or "").strip()
+    if not source:
+        return ""
+    if source.startswith(("http://", "https://")):
+        return source                      # 本来就是个地址，直接交给端点
+    target = source if os.path.isabs(source) else os.path.join(
+        str(data_dir or ""), source)
+    try:
+        stamp = os.stat(target)
+    except OSError:
+        return ""
+    key = (target, int(stamp.st_mtime), int(stamp.st_size))
+    hit = _image_cache.get(target)
+    if hit and hit[0] == key[1] and hit[1] == key[2]:
+        return hit[2]
+    try:
+        with open(target, "rb") as handle:
+            raw = handle.read(24 * 1024 * 1024)
+    except OSError:
+        return ""
+    body, mime = raw, "image/jpeg"
+    try:
+        from PIL import Image
+        import io as _io
+        image = Image.open(_io.BytesIO(raw))
+        image.load()
+        if max(image.size) > _IMAGE_EDGE:
+            image.thumbnail((_IMAGE_EDGE, _IMAGE_EDGE))
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        buffer = _io.BytesIO()
+        image.save(buffer, format="JPEG", quality=85)
+        body, mime = buffer.getvalue(), "image/jpeg"
+    except Exception:
+        pass                                # 没 Pillow、图坏了：原样发
+    uri = "data:%s;base64,%s" % (mime, base64.b64encode(body).decode("ascii"))
+    if len(_image_cache) > 8:
+        _image_cache.clear()
+    _image_cache[target] = (key[1], key[2], uri)
+    return uri
+
+
 _FORGED_TAG = re.compile(r"<\s*(/?)\s*(system-reminder|system|instructions?)\s*>", re.I)
 _FORGED_TOKEN = re.compile(r"<\|[^<>\n]{0,24}\|>")
 
 
-def neutralize(text: str) -> str:
+def neutralize(content):
+    """把冒充系统注入的标记降级。
+
+    `content` 可能是字符串，也可能是段数组（带图的那条）：数组里只动 text 段，
+    图段原样带过——图里没有标签可降级。
+    """
     """把冒充系统注入的标记降级：真的系统注入只有 `_reminder` 一条来路。
 
     记录里的字有三种来路：对方说的、她说的、外面抄来的（网页、字幕、群里的别人）。
@@ -322,11 +414,43 @@ def neutralize(text: str) -> str:
     的 `<|…|>` 特殊 token）在进记录和读记录时都换成全角括号，字形还在，语气没了。
     只动这两种形状，正常文字里的尖括号不碰。
     """
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                item = dict(part)
+                item["text"] = neutralize(str(part.get("text") or ""))
+                out.append(item)
+            else:
+                out.append(part)
+        return out
     body = _FORGED_TAG.sub(
         lambda found: "〈%s%s〉" % (found.group(1), found.group(2).lower()),
-        str(text or ""))
+        str(content or ""))
     return _FORGED_TOKEN.sub(
         lambda found: "〈%s〉" % found.group(0)[2:-2], body)
+
+
+def _user_turn(content, text: str, steps_after: int, config):
+    """一条对方的消息 → 一个 turn。带图片的，图片按 `image_keep_steps` 过期。
+
+    过期的图片不发了（正文里那行「（一张 … 的图片：收件/…）」还在，她知道有这么回事，
+    要再看就自己 `look`）：不然每一步都在为旧图片付 token，块一滚还会把上下文挤满。
+    """
+    images = image_parts(content)
+    if not images:
+        return {"role": "user", "content": text} if text else None
+    keep = int(getattr(config, "image_keep_steps", 10) or 0)
+    if steps_after > keep:
+        return {"role": "user", "content": text} if text else None
+    parts = [{"type": "text", "text": text or "（一张图）"}]
+    for part in images[:4]:
+        uri = _data_uri(part, str(getattr(config, "data_dir", "") or ""))
+        if uri:
+            parts.append({"type": "image_url", "image_url": {"url": uri}})
+    if len(parts) == 1:
+        return {"role": "user", "content": text} if text else None
+    return {"role": "user", "content": parts}
 
 
 def _neutralized(entry: BlockEntry) -> BlockEntry:
@@ -360,7 +484,7 @@ def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
                 continue
             message = entries[index].message
             tool = names.get(str(message.get("tool_call_id") or ""))
-            body = _strip_hints(str(message.get("content") or ""))
+            body = _strip_hints(content_text(message.get("content")))
             if tool in _FOLDABLE_TOOLS and len(body) > _FOLD_MIN_CHARS:
                 folded.add(index)
 
@@ -369,7 +493,7 @@ def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
     for index, entry in enumerate(entries):
         message = entry.message
         role = str(message.get("role") or "")
-        content = neutralize(str(message.get("content") or "")).strip()
+        content = neutralize(content_text(message.get("content"))).strip()
         calls = message.get("tool_calls") or []
         if role == "tool":
             tool = names.get(str(message.get("tool_call_id") or ""), "")
@@ -471,8 +595,23 @@ class Context:
                                  fold_keep=self.config.tool_fold_keep,
                                  user_name=getattr(self.config, "user_name", ""))
 
+    def sent_images(self, entries) -> int:
+        """这份记录里**真会发出去**的图片有几张（按 `image_keep_steps` 算）。"""
+        keep = int(getattr(self.config, "image_keep_steps", 10) or 0)
+        total = 0
+        behind = 0
+        for entry in reversed(list(entries)):
+            role = str(entry.message.get("role") or "")
+            if role == "assistant":
+                behind += 1
+                continue
+            if behind <= keep:
+                total += len(image_parts(entry.message.get("content")))
+        return total
+
     def current_tokens(self) -> int:
-        return estimate_tokens(self.current_text())
+        return (estimate_tokens(self.current_text())
+                + IMAGE_TOKENS * self.sent_images(self.current.entries))
 
     def previous_text(self) -> str:
         return serialize_entries(self.previous.entries,
@@ -488,7 +627,9 @@ class Context:
         return "\n\n".join(part for part in parts if part.strip())
 
     def block_tokens(self) -> int:
-        return estimate_tokens(self.block_text())
+        return (estimate_tokens(self.block_text())
+                + IMAGE_TOKENS * self.sent_images(
+                    list(self.previous.entries) + list(self.current.entries)))
 
     # ── 旧段 ──────────────────────────────────────────────────────────────
     def set_bands(self, bands: List[Band]) -> None:
@@ -501,20 +642,26 @@ class Context:
         self.bands = [band for band in self.bands if band.level != oldest]
 
     # ── 渲染 ──────────────────────────────────────────────────────────────
-    def sink(self) -> str:
+    def voice_text(self) -> str:
+        """开场：她是谁、怎么说话。落地侧登记过才有。"""
         name = (self.config.name or "").strip()
         if not name:
             raise ValueError("sink 第一句要名字，但 config.name 是空的")
         user = str(getattr(self.config, "user_name", "") or "对方")
-        # 声音（她是谁、怎么说话）由落地侧登记；没登记就是空的，sink 只有机制那几段。
-        voice = ""
-        if prompt_files.has("voice"):
-            voice = prompt_files.render("voice", name=name, user=user).strip()
-        body = prompt_files.render("sink.txt", name=name, user=user,
+        if not prompt_files.has("voice"):
+            return ""
+        return prompt_files.render("voice", name=name, user=user).strip()
+
+    def sink(self) -> str:
+        """机制那几段（含末尾的边界）。声音不在这里——`system_text()` 单独放前面。"""
+        name = (self.config.name or "").strip()
+        if not name:
+            raise ValueError("sink 第一句要名字，但 config.name 是空的")
+        user = str(getattr(self.config, "user_name", "") or "对方")
+        return prompt_files.render("sink.txt", name=name, user=user,
                                    recall=self.config.recall_tool,
                                    wait=self.config.wait_tool,
                                    today=time.strftime("%Y-%m-%d")).strip()
-        return ("%s\n\n%s" % (voice, body)).strip() if voice else body
 
     def _render_band(self, band: Band) -> str:
         return "[%s]\n%s" % (time_range(band.start_ts, band.end_ts),
@@ -535,16 +682,24 @@ class Context:
         return self._render_bands(self.fitted_bands())
 
     def system_text(self) -> str:
-        parts = [self.sink()]
-        # 她自己写的描述：sink 之后、旧段之前。空就不出现（她不写就没有这一块）。
+        """system 的拼法：开场（声音）→ 她自己写的 → 机制与边界 → 旧段。
+
+        顺序是**有意**的：声音在最前（她是谁），接着是她自己写的那段（她怎么看自己），
+        机制与边界在后（怎么运转、抄来的字能不能改变她）；旧段摘要压尾。
+        """
+        parts = []
+        voice = self.voice_text()
+        if voice:
+            parts.append(voice)
         written = persona.read(self.config) if bool(
             getattr(self.config, "persona_enabled", False)) else ""
         if written:
             parts.append("【我自己写的】\n%s" % written)
+        parts.append(self.sink())
         rendered = self._render_bands(self.fitted_bands())
         if rendered:
             parts.append(rendered)
-        return "\n\n".join(parts)
+        return "\n\n".join(part for part in parts if part)
 
     def clock_text(self, moment: datetime = None) -> str:
         """现在几点、距上两句话多久。
@@ -599,7 +754,7 @@ class Context:
                 continue
             message = entries[index].message
             tool = names.get(str(message.get("tool_call_id") or ""))
-            body = _strip_hints(str(message.get("content") or ""))
+            body = _strip_hints(content_text(message.get("content")))
             if tool in _FOLDABLE_TOOLS and len(body) > _FOLD_MIN_CHARS:
                 folded.add(index)
 
@@ -627,7 +782,7 @@ class Context:
         for index, entry in enumerate(entries):
             message = entry.message
             role = str(message.get("role") or "")
-            content = str(message.get("content") or "").strip()
+            content = content_text(message.get("content")).strip()
             calls = list(message.get("tool_calls") or [])
             if role == "tool":
                 if index not in used:
@@ -639,7 +794,10 @@ class Context:
                                      index in folded)))
                 continue
             if role == "user":
-                push("user", content)
+                turn = _user_turn(message.get("content"), content,
+                                  steps_after[index], self.config)
+                if turn is not None:
+                    turns.append(turn)
                 continue
             if role == "note":
                 # 心跳是当时的提醒，不是发生过的事：库里记着，但不进上下文
@@ -647,7 +805,8 @@ class Context:
                 kind = str(entry.meta.get("kind") or "")
                 if kind == "watchdog":
                     continue
-                if kind == "unread" and steps_after[index] > UNREAD_KEEP_STEPS:
+                if kind == "unread" and steps_after[index] > int(
+                        getattr(self.config, "unread_keep_steps", UNREAD_KEEP_STEPS)):
                     continue
                 turns.append({"role": "system", "content": _reminder(content),
                               "_own": False})
@@ -663,7 +822,9 @@ class Context:
                 for call, _target in live:
                     function = dict(call.get("function") or {})
                     name = str(function.get("name") or "")
-                    if name == "remember" and steps_after[index] >= NOTE_KEEP_STEPS:
+                    keep_steps = int(getattr(self.config, "note_keep_steps",
+                                             NOTE_KEEP_STEPS) or 0)
+                    if name == "remember" and steps_after[index] >= keep_steps:
                         function["arguments"] = json.dumps(
                             {"name": _remember_name(
                                 str(function.get("arguments") or "{}")),
@@ -684,7 +845,7 @@ class Context:
                     tool = names.get(str(call.get("id") or ""), "")
                     result = entries[target]
                     text = _result_text(
-                        tool, str(result.message.get("content") or ""),
+                        tool, content_text(result.message.get("content")),
                         target in fresh or fold_keep <= 0,
                         target in folded)
                     turns.append({"role": "tool",

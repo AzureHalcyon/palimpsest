@@ -22,7 +22,7 @@ from . import control
 from . import persona
 from . import prompt_files
 from .compress import CompressError, Compressor, add_band
-from .context import Context, estimate_tokens, strip_fake_calls
+from .context import Context, content_text, estimate_tokens, strip_fake_calls
 from .store import LoopStore
 
 # 一个回复里只允许调一个的工具：阻塞的、必须独占一步的。多出来的不执行，直接
@@ -172,6 +172,28 @@ def via_of(item: dict) -> dict:
 
 
 
+def _with_images(content: str, item: dict):
+    """进件里带了图，就把 content 变成段数组（图落在工作区，记录里只存路径）。
+
+    形状与 `loop.context` 认的一致：`[{"type": "text", …}, {"type": "image", …}]`。
+    存路径而不是字节：一张图一兆，库和备份都受不了；拼请求时才读出来缩一遍。
+    """
+    meta = item.get("meta") or {}
+    images = [part for part in (meta.get("images") or [])
+              if isinstance(part, dict) and part.get("path")]
+    if not images:
+        return content
+    parts = [{"type": "text", "text": content or "（一张图）"}]
+    for part in images[:4]:
+        try:
+            width, height = int(part.get("w") or 0), int(part.get("h") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        parts.append({"type": "image", "path": str(part["path"]),
+                      "w": width, "h": height})
+    return parts
+
+
 def _inbox_entry(item: dict) -> dict:
     """一条进件写成记录：外部来的带来源前缀（群里连发言人），本机直投的原样进。"""
     kind = str(item.get("kind") or "user")
@@ -180,11 +202,11 @@ def _inbox_entry(item: dict) -> dict:
         return {"role": "note", "content": "%s：%s" % (kind, text or "（没有内容）")}
     if item.get("direct"):
         # 本机对话：来源（网页 / 命令行）只是给仪表盘看的标签，不该每句都盖在她面前
-        return {"role": "user", "content": text}
+        return {"role": "user", "content": _with_images(text, item)}
     label = _source_label(item)
     if not label:
-        return {"role": "user", "content": text}
-    return {"role": "user", "content": "%s：%s" % (label, text)}
+        return {"role": "user", "content": _with_images(text, item)}
+    return {"role": "user", "content": _with_images("%s：%s" % (label, text), item)}
 
 
 def _unread_text(summary: dict) -> str:
@@ -410,7 +432,7 @@ class Loop:
         self._measure_block(tools)
         self.store.add_usage(self.turn, usage)
 
-        content = str(message.get("content") or "").strip()
+        content = content_text(message.get("content")).strip()
         calls = list(message.get("tool_calls") or [])
         self._append(message)
         self.clear_draft()
@@ -601,8 +623,8 @@ class Loop:
         if str(message.get("role") or "") == "assistant":
             # 模型手写的“调用 x {...}”“结果：…”一律去掉：真调用走 tool_calls，
             # 真结果走 role=tool 的消息；正文里这两种行只能是它照着旧格式仿的。
-            cleaned = strip_fake_calls(message.get("content") or "")
-            if cleaned != str(message.get("content") or "").strip():
+            cleaned = strip_fake_calls(content_text(message.get("content")))
+            if cleaned != content_text(message.get("content")).strip():
                 self.log("[修] 正文里有手写的调用/结果行或协议标记，已去掉")
             message = dict(message)
             message["content"] = cleaned
@@ -1044,7 +1066,7 @@ class Loop:
             self.log("[对账] 查不了进件：%s" % exc)
             return
         # 按内容去重：老数据没有 inbox_id，同一句话可能早就在记录里了
-        existing = {str(entry.message.get("content") or "").strip()
+        existing = {content_text(entry.message.get("content")).strip()
                     for entry in self.context.current.entries + self.context.previous.entries
                     if str(entry.message.get("role") or "") == "user"}
         for item in missing:
