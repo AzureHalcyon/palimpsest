@@ -535,6 +535,13 @@ class Loop:
 
         deadline = _next_midnight()
         while time.time() < deadline:
+            # 上限随时可能被人在设置里调高或者关掉（0 = 不限）。每一轮都重读一次：
+            # 以前这里一路睡到天亮，改完设置还得重启才生效——"改了还是没反应"就是这么来的。
+            cap_now = int(getattr(self.config, "daily_token_cap", 0) or 0)
+            if cap_now <= 0 or int(self.store.usage_today()["total"]) < cap_now:
+                self.echo("[上限] 额度改成 %s，接着干"
+                          % (_human_tokens(cap_now) if cap_now > 0 else "不限"))
+                return False
             self._breathe(deadline)
         return False
 
