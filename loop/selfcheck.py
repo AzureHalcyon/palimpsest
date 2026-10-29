@@ -20,6 +20,7 @@ from datetime import datetime
 
 from testsupport import tempdir
 from .compress import CompressError, Compressor, add_band, parse_summary, truncate
+from . import archive
 from . import control
 from . import persona
 from . import prompt_files
@@ -201,8 +202,12 @@ def check_compress() -> None:
     check(result["summary"] == "现在：在自检。", "压缩块应读回 summary")
     check(result["start_ts"] == block.start_ts, "压缩块应保留起始时间")
     check(truncate("abc", 10) == "abc", "没超长不该截断")
-    check(time_range("2026-10-24 09:00:00", "2026-10-24 10:00:00") == "10-24 09:00–10:00",
-          "同一天只写一次日期")
+    check(time_range("2026-10-24 09:00:00", "2026-10-24 10:00:00")
+          == "10-24 周六 09:00–10:00",
+          "同一天只写一次日期，但要带星期")
+    check(time_range("2026-10-25 23:00:00", "2026-10-26 02:00:00")
+          == "10-25 周日 23:00–10-26 周一 02:00",
+          "跨午夜两边都要日期和星期")
 
 
 def check_context_limits() -> None:
@@ -757,6 +762,192 @@ def check_archive() -> None:
             rows = [json.loads(line) for line in handle if line.strip()]
         check(rows[-1]["text"] == "结论是二十八万",
               "规则压缩留第一句：%r" % rows[-1]["text"])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_archive_run() -> None:
+    """归档一次：材料是旧段 + 上一块；补录走记忆动词；日记落文件；快照留得住。"""
+    workdir = tempdir("loop-archive-run-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        memory = Memory(os.path.join(workdir, "memory"), lexical=True)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, LoopCredentials(chat_key="k"), store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=memory, client=FakeClient())
+        loop.context.append({"role": "user", "content": "我们在说归档这件事。"})
+        loop.context.append({"role": "assistant", "content": "那就把这一段补录进去。"})
+        loop.context.promote()                 # 让它落在"上一块"
+
+        payload = {"events": [{"name": "归档这件事",
+                               "note": "归档是把旧段摘要和上一块原文补录进事件图。",
+                               "scope": "long", "merge_into": ""}],
+                   "links": [], "diary": "今天试了归档。"}
+
+        def chat(messages):
+            system = str(messages[0].get("content") or "")
+            if "JSON" in system:
+                return {"content": "```json\n%s\n```"
+                        % json.dumps(payload, ensure_ascii=False)}
+            return {"content": "我是自检。"}
+
+        report = archive.run(config, loop.context, memory, chat, log=lambda text: None)
+        check(report.get("ok"), "归档该跑通：%r" % report)
+        check(report.get("created") == 1, "该新建一件：%r" % report)
+        names = [str(event.get("name") or "") for event in memory.graph.events.values()]
+        check("归档这件事" in names, "图上该有这一件：%r" % names)
+        touched = report.get("touched") or []
+        check(len(touched) == 1, "碰到的事件 id 要报回来：%r" % touched)
+        notes = memory.graph.events[touched[0]].get("notes") or [{}]
+        check(str(notes[0].get("text") or "").startswith("归档是把"),
+              "note 要原样进图：%r" % notes[0].get("text"))
+        check((report.get("replay") or {}).get("seeds") == 1,
+              "重放种子该是这次补录的那一件：%r" % report.get("replay"))
+
+        diary_dir = os.path.join(workdir, "workspace", "日记")
+        files = os.listdir(diary_dir)
+        check(len(files) == 1, "日记一天一个文件：%r" % files)
+        with io.open(os.path.join(diary_dir, files[0]), encoding="utf-8") as handle:
+            check("今天试了归档" in handle.read(), "日记内容要写进去")
+
+        folder = report.get("folder") or ""
+        check(os.path.exists(os.path.join(folder, "material.md")),
+              "快照要有材料：%r" % folder)
+        with io.open(os.path.join(folder, "material.md"), encoding="utf-8") as handle:
+            material = handle.read()
+        check("上一块原文" in material and "我们在说归档这件事" in material,
+              "材料该是上一块原文：%r" % material[:60])
+        check(os.path.exists(os.path.join(folder, "graph-before.json")),
+              "快照要留改动前的图")
+
+        # 回的不是 JSON：一个字都不该写进去，图不许动
+        def bad(messages):
+            return {"content": "我记下了。"}
+
+        before = len(memory.graph.events)
+        failed = archive.run(config, loop.context, memory, bad, log=lambda text: None)
+        check(not failed.get("ok") and failed.get("reason") == "bad_json",
+              "解析不出来要原样返回：%r" % failed)
+        check(len(memory.graph.events) == before, "失败不该动图")
+
+        # 解析器本身：围栏、前后废话都剥掉
+        check(archive.parse_reply('```json\n{"a": 1}\n```') == {"a": 1}, "要剥代码围栏")
+        check(archive.parse_reply('好的：{"a": 2} 完') == {"a": 2}, "要能捞出 JSON")
+        try:
+            archive.parse_reply("没有 JSON")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("没有 JSON 该报错")
+
+        # 上一块还是空的：别拿当前块凑数（那是她正在用的现场）
+        empty = archive.run(config, Context(config), memory, chat, log=lambda text: None)
+        check(empty.get("reason") == "no_previous_block",
+              "没有上一块就别归档：%r" % empty)
+        check("还没滚过" in archive.summary(empty), "要说明白为什么没做：%r"
+              % archive.summary(empty))
+
+        # 手动「提前清」：开关置上 → 没有新输入的那一步把当前这块封口
+        loop.context.append({"role": "user", "content": "这一块要提前清掉"})
+        control.request_archive()
+        loop._archive_if_asked([])
+        check(not control.archive_requested(), "跑完要把开关清掉")
+        check(not loop.context.current.entries, "提前清之后当前块要空")
+        check(bool(loop.context.previous.entries), "原来那块要变成上一块")
+        # 有人刚说话：先接话，留到下一步
+        control.request_archive()
+        loop._archive_if_asked([{"role": "user"}])
+        check(control.archive_requested(), "有新输入就别抢在一句话前面")
+        control.clear_archive()
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_archive_raw() -> None:
+    """旧块原文：搬进归档文件再从库里删；两块原文（previous / open）一个不动。"""
+    workdir = tempdir("loop-archive-raw-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        first = store.open_block("2026-01-01 00:00:00")
+        store.append_entry(first, BlockEntry(
+            {"role": "user", "content": "旧的这一段"},
+            "2026-01-01 00:00:01"), step=1)
+        store.promote_block(first, "2026-01-01 00:10:00")
+        store.finish_previous(first, "压成一句了", ["关键词"], "")
+        second = store.open_block("2026-01-01 00:10:00")
+        store.append_entry(second, BlockEntry(
+            {"role": "user", "content": "上一块的话"},
+            "2026-01-01 00:10:01"), step=2)
+        store.promote_block(second, "2026-01-01 00:20:00")
+        third = store.open_block("2026-01-01 00:20:00")
+        store.append_entry(third, BlockEntry(
+            {"role": "user", "content": "现在这句"},
+            "2026-01-01 00:20:01"), step=3)
+
+        folder = os.path.join(workdir, "archive", "now")
+        os.makedirs(folder, exist_ok=True)
+        raw = archive.export_raw(store, config, folder, keep_ids={second, third})
+        check(raw.get("blocks") == 1 and raw.get("entries") == 1,
+              "只该搬滚过去、又不在两块里的那块：%r" % raw)
+        check(not store.entries(first), "旧块的原文要从库里删掉")
+        check(len(store.entries(second)) == 1 and len(store.entries(third)) == 1,
+              "两块原文一条都不能动")
+        with io.open(os.path.join(folder, "原文", "0001.json"), encoding="utf-8") as handle:
+            dumped = json.load(handle)
+        check(dumped.get("id") == first and dumped.get("summary") == "压成一句了",
+              "一块一个 JSON，摘要跟着走：%r" % list(dumped))
+        check([item["content"] for item in dumped.get("entries") or []] == ["旧的这一段"],
+              "条目要结构化存：%r" % dumped.get("entries"))
+        with io.open(os.path.join(folder, "原文", "index.json"), encoding="utf-8") as handle:
+            index = json.load(handle)
+        check(index.get("blocks") and index["blocks"][0]["id"] == first,
+              "index.json 要有清单：%r" % index)
+        rows = [row for row in store.blocks() if row["id"] == first]
+        check(rows and rows[0]["summary"] == "压成一句了",
+              "块行要留着：摘要还在，网页按块分段才不塌")
+        again = archive.export_raw(store, config, folder, keep_ids={second, third})
+        check(again.get("blocks") == 0, "搬过的就不再搬：%r" % again)
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_persona_tune() -> None:
+    """微调自我描述：改一两句就收；改得跟重写一样、或者原样返回，都不收。"""
+    workdir = tempdir("loop-tune-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir)
+        base = "我不太爱说漂亮话。\n遇到不确定的事会先问。\n"
+        persona.write(config, base)
+
+        near = base.replace("不太爱", "不爱")
+
+        def chat_near(messages):
+            return {"content": near}
+
+        check(persona.tune(chat_near, "她说自己不爱说漂亮话。", config) == near.strip(),
+              "改一两句要收下")
+
+        persona.write(config, base)
+
+        def chat_far(messages):
+            return {"content": "我是另一个人了。完全不同的说法，还有很多新的东西要说。"}
+
+        check(persona.tune(chat_far, "材料", config) == "",
+              "改得跟重写一样就不收")
+        check(persona.read(config) == base.strip(), "没收就别动原版")
+
+        def chat_same(messages):
+            return {"content": base}
+
+        check(persona.tune(chat_same, "材料", config) == "", "原样返回等于没改")
+
+        blank = _loop_config(name="自检", data_dir=os.path.join(workdir, "blank"))
+        check(persona.tune(chat_near, "材料", blank) == "",
+              "还没写过就没有微调的对象，交给「整理」写第一版")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -1839,6 +2030,9 @@ def main() -> int:
     check_retry()
     check_watchdog()
     check_archive()
+    check_archive_run()
+    check_archive_raw()
+    check_persona_tune()
     check_usage_report()
     check_inbox_trim()
     check_prompts()

@@ -196,16 +196,36 @@ def _promote(graph, event_id: str, digests: dict, stats: dict) -> None:
         stats["edges"] += linked
 
 
-def consolidate(graph, data_dir: str, session: str, sample: int = OLD_SAMPLE,
-                hops: int = 2, embedder=None) -> dict:
+def consolidate(graph, data_dir: str, session: str = "", sample: int = OLD_SAMPLE,
+                hops: int = 2, embedder=None, seeds=None, scope_ids=None) -> dict:
+    """重放一次。
+
+    种子有两种给法：
+    - `session`：老形态——那一场里标过的、引用过的事件（`_marked_seeds`）；
+    - `seeds`：新形态——"这一批"事件的 id 列表（比如归档时刚补录的那几条）。
+      给了 `seeds` 就不看 session；`scope_ids` 是"本批，不给它们记旧证据"的集合，
+      不给就当成 `seeds` 本身。
+    循环里没有场次了，走的是第二种。
+    """
+    custom = seeds is not None
     # Old replay edges are not this algorithm; rebuild them as evidence allows.
     for key, edge in list(graph.edges.items()):
         if edge.get("source") == "replay" and edge.get("v") != 3:
             del graph.edges[key]
     graph.pairs.clear()
 
-    seeds = _marked_seeds(graph, data_dir, session)
-    others = [event_id for event_id in graph.events if event_id not in seeds]
+    if custom:
+        seed_ids = []
+        for item in seeds or ():
+            target = graph.resolve(str(item or "")) or str(item or "")
+            if target in graph.events and target not in seed_ids:
+                seed_ids.append(target)
+        batch = {str(item) for item in (scope_ids if scope_ids is not None
+                                        else seed_ids)}
+    else:
+        seed_ids = _marked_seeds(graph, data_dir, session)
+        batch = set()
+    others = [event_id for event_id in graph.events if event_id not in seed_ids]
 
     texts = {event_id: event_label(graph, event_id) for event_id in graph.events}
     digests = {event_id: hashlib.sha1(text.encode("utf-8")).hexdigest()
@@ -226,9 +246,9 @@ def consolidate(graph, data_dir: str, session: str, sample: int = OLD_SAMPLE,
     edge_seeds = {}
     content_total = 0
     for pass_number in range(PASSES):
-        picker = random.Random("%s-%d" % (session, pass_number))
+        picker = random.Random("%s-%d" % (session or "batch", pass_number))
         extra = picker.sample(others, min(sample, len(others))) if others else []
-        pass_seeds = seeds + extra
+        pass_seeds = seed_ids + extra
         touched = set()
         for seed in pass_seeds:
             lit, edge_hits, content_pairs = propagate(
@@ -239,7 +259,10 @@ def consolidate(graph, data_dir: str, session: str, sample: int = OLD_SAMPLE,
                 edge_seeds.setdefault(key, set()).add(seed)
             content_total += len(content_pairs)
             for old in lit:
-                if old == seed or _in_session(graph, old, session):
+                if old == seed:
+                    continue
+                # 本批（刚补录的、或者这一场里新长出来的）不给旧证据：证据是给"旧事件"攒的
+                if (old in batch) if custom else _in_session(graph, old, session):
                     continue
                 if _same_segments(graph, old, seed) or digests.get(old) == digests.get(seed):
                     continue
@@ -295,9 +318,10 @@ def consolidate(graph, data_dir: str, session: str, sample: int = OLD_SAMPLE,
             event["archive_hits"] = int(event.get("archive_hits") or 0) + 1
 
     graph.save()
-    SessionStore(data_dir, session).archive()
+    if session:
+        SessionStore(data_dir, session).archive()
     update_global(data_dir)
-    return {"seeds": len(seeds), "lit": len(counts), "edges": stats["edges"],
+    return {"seeds": len(seed_ids), "lit": len(counts), "edges": stats["edges"],
             "reinforced": reinforced, "pruned": pruned, "content": content_total,
             "new_edges": stats["new_edges"], "passes": PASSES,
             "evidence": sum(1 for event in graph.events.values()

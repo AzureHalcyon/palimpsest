@@ -105,16 +105,30 @@ def now() -> str:
 
 
 def time_range(start_ts: str, end_ts: str) -> str:
-    """把一段记录的时间压成一行：同一天只写一次日期。"""
+    """把一段记录的时间压成一行：同一天只写一次日期，带上星期。
+
+    星期是给"昨天/上周三"这类相对说法用的：只有月日的话，跨周时她得自己算，
+    而记录里最常见的就是"那天是周几"。
+    """
     start = str(start_ts or "")
     end = str(end_ts or "")
     if not start:
         return end
     if not end:
         return start
+
+    def day_of(stamp: str) -> str:
+        try:
+            moment = datetime.strptime(stamp[:10], "%Y-%m-%d")
+        except ValueError:
+            return ""
+        return _WEEKDAYS[moment.weekday()]
+
+    first, second = day_of(start), day_of(end)
     if start[:10] == end[:10]:
-        return "%s–%s" % (start[5:16], end[11:16])
-    return "%s–%s" % (start[5:16], end[5:16])
+        return "%s %s %s–%s" % (start[5:10], first, start[11:16], end[11:16])
+    return "%s %s %s–%s %s %s" % (start[5:10], first, start[11:16],
+                                  end[5:10], second, end[11:16])
 
 
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")

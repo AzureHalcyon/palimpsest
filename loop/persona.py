@@ -24,6 +24,7 @@ from . import prompt_files
 
 DEFAULT_CHARS = 1200
 DEFAULT_HOURS = 24.0
+TUNE_FLOOR = 0.75            # 微调之后跟原来至少这么像，否则当成重写、不收
 MATERIAL_CHARS = 30000       # 喂给整理任务的上限（可被 persona_feed_chars 覆盖，0 = 全部）
 
 
@@ -168,6 +169,36 @@ def enough(context, config, budget: int = 0) -> str:
         return ""
     cap = budget or feed_chars_of(config)
     return new_material(context, config, cap)
+
+
+def tune(chat, material: str, config) -> str:
+    """微调一版：只改一两句。改得跟重写一样（跟原来不像了）就不收，返回空串。
+
+    为什么要这道门：提示词里写"只做微调"是软约束，模型经常一整篇重写。persona 挂在
+    system 上，重写一次就是一个人的口吻换了一遍——宁可这次不改，等「整理」到点整版写。
+    """
+    current = read(config)
+    body = str(material or "").strip()
+    if not current or not body:
+        return ""                     # 还没写过 / 没材料：微调没有对象
+    prompt = prompt_files.render("persona-tune.txt", limit=limit_of(config),
+                                 current=current)
+    reply = chat([{"role": "system", "content": prompt},
+                  {"role": "user", "content": body}]) or {}
+    text = str(reply.get("content") or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+    text = text.strip()
+    if not text or text == current:
+        return ""
+    if len(text) > int(len(current) * 1.3) + 200:
+        return ""                     # 长了一大截：这不是微调
+    import difflib
+    if difflib.SequenceMatcher(None, current, text).ratio() < TUNE_FLOOR:
+        return ""                     # 改得跟重写一样：不收
+    return write(config, text)
 
 
 def rewrite(chat, context, config) -> str:

@@ -16,6 +16,7 @@ from typing import Callable, List, Optional
 from memory_v2.core.config import ChatConfig, Credentials
 from memory_v2.core.llm import ChatClient, ChatError
 
+from . import archive
 from . import control
 from . import persona
 from . import prompt_files
@@ -324,6 +325,7 @@ class Loop:
         self.via: dict = {}
         self.retries = 0
         self._next_archive = 0.0
+        self.archive_last = None       # 上一次「归档」的报告（手动或层满触发）
         self._cap_day = ""
         self._warn_day = ""
         # 摘要失败后别每步都重试：等当前块再长一点。
@@ -371,6 +373,7 @@ class Loop:
         else:
             self.since_external += 1
         self._unread_note()
+        self._archive_if_asked(got)
         idle = int(getattr(self.config, "watchdog_idle", 0) or 0)
         if idle and self.since_external >= idle:
             self._nudge()
@@ -867,6 +870,10 @@ class Loop:
         self._maintain()
         self._apply_edits()
         self._maybe_reload()
+        if control.archive_requested():
+            # 网页点了「归档」而她在睡：等的时候正好是跑它的时机（没人在等她回话）。
+            self._archive_if_asked([])
+            self.store.set_status("waiting")
         span = _POLL_SECONDS
         if deadline is not None:
             span = min(span, max(0.01, deadline - time.time()))
@@ -894,6 +901,38 @@ class Loop:
             self.store.trim_inbox()
         except Exception as exc:
             self.log("[清进件失败] %s" % exc)
+
+    # ── 归档 ──────────────────────────────────────────────────────────────
+    def _archive_chat(self, messages):
+        """归档那次调用不走 `_chat`：那条会把增量写进草稿，网页上就看着她"在说" JSON。"""
+        return self.client.chat(messages, tools=None)
+
+    def _archive_if_asked(self, got) -> None:
+        """网页点了「提前清」：把当前这块**提前封口**（不等它攒满）。
+
+        走的就是滚块那条路：压缩上一块 → 补录正要失去原文的那块 → 新开一块。
+        所以它和"块满自动触发"是同一件事，只是时机由人点。
+        """
+        if not control.archive_requested():
+            return
+        if got:
+            return
+        control.clear_archive()
+        if not bool(getattr(self.config, "archive_enabled", True)):
+            self.echo("[提前清] 关着（设置里的 archive_enabled）")
+            return
+        # 额度不够就先不跑：这里只做一次便宜的判断，不叫 `_budget_guard`（它会睡到明天）
+        cap = int(getattr(self.config, "daily_token_cap", 0) or 0)
+        if cap > 0 and int(self.store.usage_today()["total"]) >= cap:
+            self.echo("[提前清] 今天的额度用完了，先不跑")
+            return
+        if not self.context.current.entries:
+            self.echo("[提前清] 当前这块是空的，没什么可清")
+            return
+        self.store.set_status("thinking", "提前清：把当前这块封口")
+        self.echo("[提前清] 开始：压缩 → 补录 → 新开一块")
+        self._roll("手动提前")
+        self.store.set_status("idle")
 
     def _apply_edits(self) -> None:
         """把页面「存到服务器」的改动落到图上。
@@ -1050,10 +1089,43 @@ class Loop:
                 self.last_prompt_tokens = 0
                 self.echo("[预算] 丢最旧的一段")
 
+    def _backfill_target(self) -> int:
+        """这一轮补录谁：最新一块"已经压过、原文还在库里"的块。
+
+        滚块时它正要失去原文，是最后的机会；搬走之后就只剩那一条摘要了。
+        """
+        for row in sorted(self.store.blocks(), key=lambda item: int(item["id"]),
+                          reverse=True):
+            block_id = int(row["id"])
+            if str(row.get("state") or "") != "compressed":
+                continue
+            if self.store.entries(block_id):
+                return block_id
+        return 0
+
     def _roll(self, reason: str) -> None:
         """当前块写满：先压上一块，再把当前块升成上一块。"""
         if not self.context.current.entries:
             return
+        # 滚块就是归档的时机：次新那块马上被压成摘要，第三新那块马上失去原文
+        target_id = self._backfill_target()
+        if target_id and self.context.previous.entries:
+            try:
+                material = archive.roll_material(self.store, self.config, target_id,
+                                                 self.previous_id)
+                report = archive.run(self.config, self.context, self.memory,
+                                     self._archive_chat, log=self.log,
+                                     store=self.store,
+                                     keep_ids={self.previous_id, self.current_id},
+                                     material=material, target_id=target_id)
+            except Exception as exc:            # 归档坏了不该挡住滚块
+                report = {"ok": False, "reason": "crashed", "error": str(exc)}
+            self.archive_last = report
+            if report.get("ok"):
+                self.echo("[归档] %s" % archive.summary(report))
+            else:
+                self.echo("[归档] 没做成：%s"
+                          % (report.get("error") or report.get("reason")))
         if self.context.previous.entries:
             try:
                 result = self.compressor.compress_block(self.context.previous)

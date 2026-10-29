@@ -14,6 +14,7 @@ class StopRequested(Exception):
 
 _STOP = threading.Event()
 _RELOAD = threading.Event()
+_ARCHIVE = threading.Event()
 
 
 def request_stop() -> None:
@@ -38,3 +39,20 @@ def reload_requested() -> bool:
 
 def clear_reload() -> None:
     _RELOAD.clear()
+
+
+def request_archive() -> None:
+    """网页上点了「归档」：让循环在**没有新输入**的那一步开始前跑一次归档。
+
+    为什么不在网页线程里直接跑：记忆图是整份 JSON 覆写，只有一个写者——循环自己。
+    网页只置这个开关，真正的活留给循环，图就不会被两边同时改。
+    """
+    _ARCHIVE.set()
+
+
+def archive_requested() -> bool:
+    return _ARCHIVE.is_set()
+
+
+def clear_archive() -> None:
+    _ARCHIVE.clear()

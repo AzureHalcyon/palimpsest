@@ -103,9 +103,11 @@ class LoopConfig:
     embed_model: str = "qwen3.7-text-embedding"
     embed_dim: int = 1024
 
-    # 四段旧记录的长度上限（字符）：0 最旧，末位最近。每老一格再截短。
-    band_chars: tuple = (1200, 2400, 4800, 9600)
-    # 往老一格至少缩到这个比例，保证分辨率从后往前单调下降。
+    # 旧记录压缩成的"那一层"：**只启用一档**（四档那套代码还在，不启用而已）。
+    # 一档就是一个上限——这块摘要压成多长；`add_band` 见到只有一个数就只留一条。
+    # 哪天想回到"多层"，把这个元组写成 (1200, 2400, 4800, 9600) 就行。
+    band_chars: tuple = (9600,)
+    # 往老一格至少缩到这个比例（只有一档时它不起作用，留着给多档那套）。
     band_decay: float = 0.8
 
     # 每块留最近几条超长工具结果原文，更早的折成一行；<=0 关。工具是持续调的，
@@ -126,6 +128,12 @@ class LoopConfig:
     persona_feed_chars: int = 30000   # 一次整理最多喂多少字；0 = 全部（含旧段摘要）
     persona_with_bands: bool = True   # 旧段摘要要不要一起喂（长程连续性）
     persona_model: str = ""           # 整理自我描述用哪个模型；空 = 跟主模型走
+    # 归档：把旧段摘要 + 上一块原文补录进事件图，写一段日记，重写自我描述，跑一次重放。
+    # 手动点「归档」触发；当前块不动——归档不改变她眼前的现场。
+    archive_enabled: bool = True
+    archive_max_events: int = 8       # 一次补录最多几件（克制：宁可少记）
+    archive_feed_chars: int = 40000   # 一次最多喂多少字材料
+    archive_short_days: int = 3       # scope=short 的默认有效期（天）
     # 墙钟多久刷一次（秒）：有人说话、刚醒来一定给；其余步按这个间隔给，
     # 中间那些步只放一句"接着上面"。0 = 每步都给。
     clock_refresh: int = 120

@@ -303,6 +303,18 @@ class LoopStore:
         return [{"role": str(row["role"]), "content": str(row["content"]),
                  "ts": str(row["ts"])} for row in rows]
 
+    def purge_block_entries(self, block_id: int) -> int:
+        """把一块的原文从库里删掉（搬进归档文件之后）。
+
+        块行留着：摘要、时间、关键词还在，网页按块分段的骨架不会塌；
+        删掉的只有原文那几行——`load_state` 只读 `previous` 与 `open` 两块，
+        所以运行起来一点不受影响。返回删了几条。
+        """
+        with self.db:
+            cursor = self.db.execute("DELETE FROM entries WHERE block_id = ?",
+                                     (int(block_id),))
+        return int(cursor.rowcount or 0)
+
     # ── 网页：增量流与状态 ────────────────────────────────────────────────
     def feed(self, since_block: int = 0, since_seq: int = 0,
              limit: int = 300) -> List[dict]:
