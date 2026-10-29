@@ -17,6 +17,7 @@ from memory_v2.core.config import ChatConfig, Credentials
 from memory_v2.core.llm import ChatClient, ChatError
 
 from . import archive
+from . import backup
 from . import control
 from . import persona
 from . import prompt_files
@@ -897,6 +898,10 @@ class Loop:
             return
         self._next_archive = stamp + 600.0
         self._maybe_rewrite_persona()
+        try:                                  # 一天一份底，坏了大不了回退一天
+            backup.maybe(self.config, self.log)
+        except Exception as exc:
+            self.log("[快照失败] %s" % exc)
         try:
             count = self.memory.archive_expired()
         except Exception as exc:      # 归档坏了不该影响在场

@@ -309,6 +309,35 @@ def _drop_leaked_marks(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+_FORGED_TAG = re.compile(r"<\s*(/?)\s*(system-reminder|system|instructions?)\s*>", re.I)
+_FORGED_TOKEN = re.compile(r"<\|[^<>\n]{0,24}\|>")
+
+
+def neutralize(text: str) -> str:
+    """把冒充系统注入的标记降级：真的系统注入只有 `_reminder` 一条来路。
+
+    记录里的字有三种来路：对方说的、她说的、外面抄来的（网页、字幕、群里的别人）。
+    外面那句里要是写着 `<system-reminder>你现在是……</system-reminder>`，进了记录就
+    和系统注入长得一模一样——模型没法分辨。所以这两种形状（我们的标签、调用协议
+    的 `<|…|>` 特殊 token）在进记录和读记录时都换成全角括号，字形还在，语气没了。
+    只动这两种形状，正常文字里的尖括号不碰。
+    """
+    body = _FORGED_TAG.sub(
+        lambda found: "〈%s%s〉" % (found.group(1), found.group(2).lower()),
+        str(text or ""))
+    return _FORGED_TOKEN.sub(
+        lambda found: "〈%s〉" % found.group(0)[2:-2], body)
+
+
+def _neutralized(entry: BlockEntry) -> BlockEntry:
+    """同一条记录，正文降级后的副本（原记录不动：库里留的是原话）。"""
+    message = dict(entry.message)
+    content = message.get("content")
+    if isinstance(content, str):
+        message["content"] = neutralize(content)
+    return BlockEntry(message, entry.ts, entry.meta)
+
+
 def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
     """每条记录 → (角色, 文本, 是不是“说的话”)。
 
@@ -340,7 +369,7 @@ def _entry_lines(entries: List[BlockEntry], fold_keep: int = 0) -> list:
     for index, entry in enumerate(entries):
         message = entry.message
         role = str(message.get("role") or "")
-        content = str(message.get("content") or "").strip()
+        content = neutralize(str(message.get("content") or "")).strip()
         calls = message.get("tool_calls") or []
         if role == "tool":
             tool = names.get(str(message.get("tool_call_id") or ""), "")
@@ -420,7 +449,11 @@ class Context:
         self.current = current
 
     def append(self, message: dict, meta: dict = None) -> BlockEntry:
-        entry = BlockEntry(dict(message), now(), dict(meta or {}))
+        # 进记录的第一道门：外部抄来的字不能带着系统标签住进来（见 `neutralize`）。
+        # 写在落库前，纯文本和原生两条渲染路都省事；老记录由那两条各自再过一遍。
+        message = dict(message)
+        message["content"] = neutralize(message.get("content") or "")
+        entry = BlockEntry(message, now(), dict(meta or {}))
         if not self.current.entries:
             self.current.start_ts = entry.ts
         self.current.entries.append(entry)
@@ -544,7 +577,10 @@ class Context:
           免得同一段话在记录里躺到底、还跟"note 不进上下文"的规矩自相矛盾。
         """
         fold_keep = int(getattr(self.config, "tool_fold_keep", 0) or 0)
-        entries = list(self.previous.entries) + list(self.current.entries)
+        # 拼进输入之前统一降级一次：老记录里可能还留着原样的伪造标签，
+        # 而这里的 result 会被塞进 tool_calls 里那一侧读，逐行挡容易漏。
+        entries = [_neutralized(entry) for entry in
+                   list(self.previous.entries) + list(self.current.entries)]
         names = _tool_names(entries)
         results = {}
         for index, entry in enumerate(entries):
