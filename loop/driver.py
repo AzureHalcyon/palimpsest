@@ -22,7 +22,8 @@ from . import control
 from . import persona
 from . import prompt_files
 from .compress import CompressError, Compressor, add_band
-from .context import Context, content_text, estimate_tokens, strip_fake_calls
+from .context import (IMAGE_DIR, Context, content_text, estimate_tokens,
+                      owner_mark_of, strip_fake_calls)
 from .store import LoopStore
 
 # 一个回复里只允许调一个的工具：阻塞的、必须独占一步的。多出来的不执行，直接
@@ -156,20 +157,17 @@ def _source_label(item: dict) -> str:
     return ("%s %s" % (head, sender)).strip() if sender else head
 
 
-def via_of(item: dict) -> dict:
-    """这条外部消息是**谁说给她的**：她说的话就打上这个标记，回给同一个会话。
+def _chat_title(item: dict) -> str:
+    """一个会话叫得上来的名字：`QQ · 私聊「Ranchel」`、`岛 · 串「接入测试」`。
 
-    本机直投的（`direct`：人就在这一头跟她说话，网页或命令行）没有"回给谁"可言，
-    返回空字典——没有这个标记，通道适配器就不会把话复述到别处去。
+    形状照实说：群的、串的（论坛帖子里那一串）、私聊的三样不一样，别一律叫私聊。
     """
-    source = str(item.get("source") or "").strip()
-    if not source or item.get("direct"):
-        return {}
-    return {"source": source,
-            "chat_type": str(item.get("chat_type") or "private"),
-            "chat_id": str(item.get("chat_id") or ""),
-            "chat_name": str(item.get("chat_name") or "")}
-
+    source = str(item.get("source") or "").strip() or "外部"
+    chat_type = str(item.get("chat_type") or "private")
+    name = (str(item.get("chat_name") or "").strip()
+            or str(item.get("chat_id") or "").strip())
+    kind = "群" if chat_type == "group" else ("串" if chat_type == "thread" else "私聊")
+    return ("%s · %s「%s」" % (source, kind, name)) if name else ("%s · %s" % (source, kind))
 
 
 def _with_images(content: str, item: dict):
@@ -228,15 +226,6 @@ def _unread_text(summary: dict) -> str:
     return "，".join([head] + parts) + "。"
 
 
-def _one_via(came: dict) -> dict:
-    """这一步只有**一个**外部会话在叫她时，才立"回给谁"；几个一起就立不了。"""
-    real = {key: via for key, via in (came or {}).items()
-            if via and via.get("chat_id")}
-    if len(real) == 1:
-        return dict(next(iter(real.values())))
-    return {}
-
-
 def _ring_text(item: dict) -> str:
     """有人来找她：谁、在哪儿。一句话就够。
 
@@ -247,10 +236,16 @@ def _ring_text(item: dict) -> str:
     chat_name = (str(item.get("chat_name") or "").strip()
                  or str(item.get("chat_id") or "").strip() or "?")
     source = str(item.get("source") or "").strip() or "外面"
-    who = (sender + " ") if sender else "有人"
-    if str(item.get("chat_type") or "private") == "group":
-        return "%s在群「%s」里 @ 你。" % (who, chat_name)
-    return "%s在 %s 上私聊你。" % (who, source)
+    chat_type = str(item.get("chat_type") or "private")
+    if chat_type == "group":
+        where = "在群「%s」里 @ 你" % chat_name
+    elif chat_type == "thread":
+        where = "在「%s」那个串里说话" % chat_name      # 论坛帖子底下：不是私聊
+    else:
+        where = "在 %s 上私聊你" % source
+    if not sender:
+        return "有人%s。" % where
+    return "%s %s。" % (sender, where)
 
 
 def _inbox_tools(text: dict) -> List[dict]:
@@ -278,13 +273,57 @@ def _inbox_tools(text: dict) -> List[dict]:
                           "before": {"type": "number",
                                      "description": text["messages.before"]},
                       }}}},
+        {"type": "function",
+         "function": {"name": "look", "description": text["look"],
+                      "parameters": {"type": "object", "properties": {
+                          "path": {"type": "string",
+                                   "description": text["look.path"]},
+                      }, "required": ["path"]}}},
     ]
 
 
-def _message_line(item: dict) -> str:
-    label = _source_label(item)
+def _message_line(item: dict, mark: str = "", where: bool = True) -> str:
+    """一条外面的消息读成一行。
+
+    对方发的话，行首挂【标记】——跟上下文里他那些 user 消息一个样子；别人的话
+    只写来路和发言人，不加标记。名字会改、会重名，方括号才是那句"这是我的人说的"。
+
+    `where=False`：这一行已经在「哪个会话」的小标题底下了，就不再重复来路。
+    """
     text = str(item.get("text") or "").strip().replace("\n", " ")
+    if item.get("from_user"):
+        return ("【%s】%s" % (mark, text)) if mark else text
+    if not where:
+        sender = str(item.get("sender_name") or "").strip()
+        return ("%s：%s" % (sender, text)) if sender else text
+    label = _source_label(item)
     return ("%s：%s" % (label, text)) if label else text
+
+
+def _message_lines(rows: list, mark: str = "") -> List[str]:
+    """几条进件读成几行；好几个会话混在一起时先分组，一组一个小标题。
+
+    不带 `chat` 读的时候，私聊、群、岛的串会一起回来。只靠行首那个来路，一眼
+    扫过去容易当成同一个人在说话——所以按会话分开写，谁在哪儿说的先立住。
+    只有一个会话时不加小标题（那时来路本来就在行首，不必写两遍）。
+    """
+    groups: List[list] = []              # [[标题, [行…]], …]，按第一次出现的先后
+    index: dict = {}
+    for row in rows:
+        key = (str(row.get("source") or ""), str(row.get("chat_id") or ""),
+               str(row.get("chat_name") or ""), str(row.get("chat_type") or ""))
+        if key not in index:
+            index[key] = len(groups)
+            groups.append([_chat_title(row), []])
+        groups[index[key]][1].append(row)
+    if len(groups) <= 1:
+        return [_message_line(row, mark) for row in rows]
+    out: List[str] = []
+    for title, group_rows in groups:
+        out.append("")
+        out.append("%s %d 条" % (title, len(group_rows)))
+        out.extend(_message_line(row, mark, where=False) for row in group_rows)
+    return out
 
 
 class Loop:
@@ -328,6 +367,8 @@ class Loop:
         self.parked = False
         self.last_prompt_tokens = 0
         self.last_usage = {}
+        # 当前块大小的锚：{block, prompt, tokens}。见 _measure_block。
+        self._block_anchor: dict = {}
         # 当前块的真实大小：上一次请求的 prompt_tokens 减去固定部分（sink、旧段、
         # 工具 schema）。没有真数可用时（刚重启、刚压完）先用估算顶上。
         self.current_real = self.context.current_tokens()
@@ -342,10 +383,6 @@ class Loop:
         self._unread_total = 0
         # 距上一次外部输入过了几步：用来拦「自己在跟自己转」。
         self.since_external = 0
-        # 这一串话是回给谁的：外部消息把她叫醒时记下来（`via_of`），她说的话
-        # 就带着这个标记落库，通道那边照它定向回发；网页里说的话不带，也就不会
-        # 被复述到别的通道上去。等回去没事（wait 到点）就清掉。
-        self.via: dict = {}
         self.retries = 0
         self._next_archive = 0.0
         self.archive_last = None       # 上一次「归档」的报告（手动或层满触发）
@@ -421,6 +458,9 @@ class Loop:
         if want_clock:
             self._clock_at = time.time()
         self._woke = False
+        # 墙钟里的「距上次有人说话」得算上通道来信：它们进记录时是一声铃（tool），
+        # 不是 user 行，只看记录会把正在聊天说成「一天前」。
+        self.context.last_incoming = self.store.last_incoming()
         messages = self.context.messages()
         # 心跳那句只在注入的那一步出现一次：它说完就清掉，不进历史。
         self.context.reminder = ""
@@ -586,19 +626,41 @@ class Loop:
 
     # ── 校准 ──────────────────────────────────────────────────────────────
     def _measure_block(self, tools) -> None:
-        """当前块的真实大小：真数减去固定部分。
+        """当前块有多大：一个锚 + 服务端实际涨了多少。
 
-        请求 = 固定部分（sink、旧段、工具 schema）+ 上一块 + 当前块。
-        固定部分和上一块在两次压缩之间不变，所以减掉它们剩下的就是当前块；
-        那两块只能用估算，但它们小、而且不增长，误差是常数，不是累积的。
+        服务端只报整次请求的总量（prompt_tokens），不报分项。所以拿**一次**估算当锚
+        （只在块小的时候做，误差几百 token），之后每一步都用"这次比锚那次多了多少"
+        往上加——**增长是服务端报的真数**，跟文本是中文、英文、还是图片无关（图片本来就
+        没算进估算，英文按字符估也不准；这些误差都不再累积）。
+        锚按块存在库里：重启回同一块时接着用，不用重新估一遍。
         """
         if self.last_prompt_tokens <= 0:
             return
-        fixed = estimate_tokens(self.context.system_text())
-        fixed += estimate_tokens(self.context.previous_text())
-        if tools:
-            fixed += estimate_tokens(json.dumps(tools, ensure_ascii=False))
-        self.current_real = max(0, self.last_prompt_tokens - fixed)
+        block_id = int(self.current_id or 0)
+        key = "block_anchor_%d" % block_id
+        if int((self._block_anchor or {}).get("block") or 0) != block_id:
+            self._block_anchor = {}
+            raw = self.store.kv_get(key, "")
+            if raw:
+                try:
+                    loaded = json.loads(raw)
+                except ValueError:
+                    loaded = {}
+                if int((loaded or {}).get("block") or 0) == block_id:
+                    self._block_anchor = loaded
+        if not self._block_anchor:
+            # 这一块第一次量（或刚滚过块）：估一个起点，之后只走增量
+            self._block_anchor = {"block": block_id,
+                                  "prompt": int(self.last_prompt_tokens),
+                                  "tokens": estimate_tokens(self.context.current_text())}
+            try:
+                self.store.kv_set(key, json.dumps(self._block_anchor))
+            except Exception:
+                pass
+            self.current_real = int(self._block_anchor["tokens"])
+            return
+        grown = int(self.last_prompt_tokens) - int(self._block_anchor.get("prompt") or 0)
+        self.current_real = max(0, int(self._block_anchor.get("tokens") or 0) + grown)
 
     def _maybe_reload(self) -> None:
         """网页刚改过记录（删了一条）：把两块原文按库里的重读一遍。
@@ -634,9 +696,6 @@ class Loop:
         elif str(message.get("role") or "") == "assistant":
             # 有就存，没有就记一笔——"这一步为什么没有思考行"能查
             self.log("[思考] 这一步模型没给 reasoning")
-        if str(message.get("role") or "") == "assistant" and self.via:
-            # 这句话是回给谁的：通道那边照它定向回发（网页也照它画「→ 去哪儿」）
-            meta["via"] = dict(self.via)
         entry = self.context.append(message, meta)
         self.store.append_entry(self.current_id, entry, step=self.turn)
         return entry
@@ -678,7 +737,8 @@ class Loop:
                           "content": text}, meta=self._tool_meta or None)
             self._tool_meta = {}
             self.log("[调用] %s %s" % (name, arguments))
-            self.log("[结果] %s" % str(text)[:300].replace("\n", " / "))
+            shown = text if isinstance(text, str) else content_text(text)
+            self.log("[结果] %s" % shown[:300].replace("\n", " / "))
         self._flush_after_tool()
 
     def _flush_after_tool(self) -> None:
@@ -703,6 +763,70 @@ class Loop:
                 self._turn_confirm = set()
         self._after_tool = []
 
+    def _look(self, arguments: str):
+        """看一眼那张图片：图片跟着**这条工具结果**回去。
+
+        工具结果以前只能是字符串（图片只能塞进一条 `user` 记录，看着像对方发来的）。
+        现在这条结果自己带图片：`tool` 消息的 content 可以是段数组，这个端点认
+        （带图片时 prompt token 明显上涨，模型说得出颜色）。过了 `image_keep_steps`
+        步图片就不发了，只剩这行字。
+
+        能看的只有两处：工作区（她自己画的、写进来的）和**图片库**（`<数据>/图片`，
+        收进来的图片都在那儿，她的 `run` / `write` 碰不到）。
+        """
+        try:
+            payload = json.loads(arguments or "{}")
+        except ValueError:
+            return "look 的参数不是 JSON。"
+        raw = str(payload.get("path") or "").strip()
+        if not raw:
+            return "要给一张图的路径（工作区里的相对路径，或者 图片/…）。"
+        data_dir = str(self.config.data_dir or ".")
+        roots = [(IMAGE_DIR, os.path.abspath(os.path.join(data_dir, IMAGE_DIR))),
+                 ("workspace", os.path.abspath(os.path.join(data_dir, "workspace")))]
+        target = ""
+        for head, root in roots:
+            text = raw[len(head) + 1:] if raw.startswith(head + "/") else (
+                raw if head == "workspace" else None)
+            if text is None:
+                continue
+            candidate = os.path.abspath(os.path.join(root, text))
+            if not (candidate == root or candidate.startswith(root + os.sep)):
+                return "只看得见工作区和图库里的图：%s 跑到外面去了。" % raw
+            target = candidate
+            break
+        if not target:
+            # 没有前缀的写法按工作区算（老用法：`收件/2026-10-30/x.jpg`）
+            root = os.path.abspath(os.path.join(data_dir, "workspace"))
+            target = os.path.abspath(os.path.join(root, raw))
+            if not (target == root or target.startswith(root + os.sep)):
+                return "只看得见工作区和图库里的图：%s 跑到外面去了。" % raw
+        if not os.path.isfile(target):
+            return "没有这个文件：%s" % raw
+        try:
+            size = os.path.getsize(target)
+            with open(target, "rb") as handle:
+                head = handle.read(12)
+        except OSError as exc:
+            return "读不了：%s" % exc
+        if size > 12 * 1024 * 1024:
+            return "这张太大了（%.1f MB）：先缩一下再看。" % (size / 1048576.0)
+        if not any(head.startswith(magic) for magic in
+                   (b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"RIFF")):
+            return "这不像图（文件头 %r）。" % head[:6]
+        rel_path = os.path.relpath(target, data_dir).replace(os.sep, "/")
+        width = height = 0
+        try:                             # 有 PIL 就顺手量一下尺寸；没有也不影响看图
+            from PIL import Image
+            with Image.open(target) as image:
+                width, height = int(image.size[0]), int(image.size[1])
+        except Exception:
+            pass
+        parts = [{"type": "text", "text": "看了：%s（%s×%s）。" % (
+                     rel_path, width or "?", height or "?")},
+                 {"type": "image", "path": rel_path, "w": width, "h": height}]
+        return parts
+
     def _unread_note(self) -> None:
         """被叫醒时把「攒了多少」拼一行进记录；同一批只拼一次，随后按步数过期。"""
         summary = self.store.unread_batches()
@@ -726,6 +850,8 @@ class Loop:
                 return self._set_channel(arguments)
             if name == "messages":
                 return self._read_messages(arguments)
+            if name == "look":
+                return self._look(arguments)
             for toolset in self.toolsets:
                 if toolset.owns(name):
                     return toolset.call(name, arguments)
@@ -740,31 +866,24 @@ class Loop:
     def _drain_inbox(self) -> int:
         """每步开始先把攒着的消息读进来：人在你说话的时候插一句也得看到。
 
-        `via`（这句话是回给谁的）只在**一个**会话叫她的时候才立：几个会话同时
-        说话的时候挑不出来，宁可不立——立错了会把回答发给另一个人。
+        通道来的（有来源、不经本机）只响铃，正文留在表里等她的 `messages` 来取；
+        本机直投的（网页 / 命令行，`direct`）正文直接进记录。
         """
         taken = 0
-        came: dict = {}              # chat_id -> via；本机直投记成空
         while True:
             item = self.store.peek(policies=["wake"], unnotified=True)
             if item is None:
                 break
-            # 带来源的（通道转进来的）只响铃：正文留在表里，等她的 messages 来取。
-            # 本机直投的（网页 / 命令行，`direct`）正文直接进记录。
             if item.get("direct"):
                 if not self.store.inbox_in_record(item["id"]):
                     self._append(_inbox_entry(item), meta=in_meta(item))
                 self.store.consume(item["id"])
-                came[str(item.get("chat_id") or "")] = {}
             else:
                 self.store.mark_notified(item["id"])
-                came[str(item.get("chat_id") or "")] = via_of(item)
             self._turn_calls = {}
             self._turn_confirm = set()
             taken += 1
             self.since_external = 0
-        if taken:
-            self.via = _one_via(came)
         return taken
 
     def _show_channels(self) -> str:
@@ -804,7 +923,7 @@ class Loop:
                 chat, policy)
         return "把 %s 改成 %s 了，影响到 %d 条没读的。" % (chat, policy, changed)
 
-    def _read_messages(self, arguments: str) -> str:
+    def _read_messages(self, arguments: str):
         try:
             payload = json.loads(arguments or "{}")
         except ValueError:
@@ -826,17 +945,30 @@ class Loop:
         # 把它们当成"丢了"，从而又插一条 user 消息（2026-10-28 就这么窜过一次）。
         self._tool_meta = {"inbox_ids": [int(row["id"]) for row in rows]}
         self._unread_total = 0
-        # 读完在跟谁说话：这批同属一个外部会话时，她接下来的话就该回到那儿
-        # （不然 batch 积压读回来再回答，回答根本发不出去）。
-        chats = {str(row.get("chat_id") or "") for row in rows
-                 if not row.get("direct") and str(row.get("source") or "")}
-        chats.discard("")
-        self.via = via_of(rows[-1]) if len(chats) == 1 else {}
+        # 带图片的进件：图片跟着**这条结果**回去，不另外补 `user` 记录——`user` 是对方
+        # 说话的位置，QQ / 岛上来的话连图片一起挂在结果里。一次最多四张（和一条消息
+        # 最多带四张图片一个口径）。
+        pictures = []
+        for row in rows:
+            for part in ((row.get("meta") or {}).get("images") or []):
+                if len(pictures) >= 4:
+                    break
+                path = str((part or {}).get("path") or "").strip()
+                if not path:
+                    continue
+                pictures.append({"type": "image", "path": path,
+                                 "w": int((part or {}).get("w") or 0),
+                                 "h": int((part or {}).get("h") or 0)})
         lines = ["读到 %d 条：" % len(rows)]
-        lines.extend(_message_line(row) for row in rows)
+        lines.extend(_message_lines(rows, owner_mark_of(self.config)))
+        if pictures:
+            lines.append("（其中 %d 张图就在这条结果里）" % len(pictures))
         if len(rows) >= limit:
             lines.append("（还有更早的；要往前翻把 before 设成 %d）" % rows[0]["id"])
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        if not pictures:
+            return text
+        return [{"type": "text", "text": text}] + pictures
 
     def _wait(self, arguments: str) -> str:
         """等到有动静或者到点；返回一行结果，动静本身跟在结果后面进记录。"""
@@ -867,7 +999,6 @@ class Loop:
                 if not item.get("direct"):
                     # 通道来的：响铃，正文等她自己读。
                     self.store.mark_notified(item["id"])
-                    self.via = via_of(item)
                     self.since_external = 0
                     self._woke = True
                     self.store.set_status("thinking")
@@ -875,15 +1006,11 @@ class Loop:
                 self._after_tool.append({"message": _inbox_entry(item),
                                          "meta": in_meta(item),
                                          "inbox_id": item["id"]})
-                self.via = {}
                 self.since_external = 0
                 self._woke = True
                 self.store.set_status("thinking")
                 return _woke_text(str(item["kind"]), time.time() - started)
             if deadline is not None and time.time() >= deadline:
-                # 等回去没事：上一句外部消息的回复窗口到此为止。否则过一阵她
-                # 自己想说的话，还会被当成在回那个会话。
-                self.via = {}
                 self._woke = True
                 self.store.set_status("thinking")
                 return _timeout_text(spec, time.time() - started)
@@ -1141,6 +1268,9 @@ class Loop:
         """当前块写满：先压上一块，再把当前块升成上一块。"""
         if not self.context.current.entries:
             return
+        # 归档 + 压缩是两次模型调用，跑起来要一两分钟。以前这段时间状态停在 idle，
+        # 页面上看着像"闲"着（2026-10-30 就被这么误会过）。
+        self.store.set_status("compressing", reason or "压上一块")
         # 滚块就是归档的时机：次新那块马上被压成摘要，第三新那块马上失去原文
         target_id = self._backfill_target()
         if target_id and self.context.previous.entries:
@@ -1166,6 +1296,7 @@ class Loop:
             except CompressError as exc:
                 self.echo("[压缩失败] %s；保留原文，等下一次" % exc)
                 self._compress_after = self.current_real + 1000
+                self.store.set_status("idle")
                 return
             bands = add_band(self.context.bands, result["summary"],
                              result["start_ts"], result["end_ts"],
@@ -1185,8 +1316,10 @@ class Loop:
         self.previous_id = old_current
         self.current_id = self.store.open_block(self.context.current.start_ts)
         self._compress_after = 0
-        # 新块是空的；下一步拿到真数再换掉这个估算。
+        # 新块是空的；锚要重新打（新块 id 不同，下次拿真数时会自己建）
         self.current_real = 0
+        self._block_anchor = {}
+        self.store.set_status("idle")
 
     # ── 挂起 ──────────────────────────────────────────────────────────────
     def _park(self, note: str) -> None:

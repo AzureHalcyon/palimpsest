@@ -90,24 +90,19 @@ def add_band(bands: List[Band], summary: str, start_ts: str, end_ts: str,
 
 def make_client(config, credentials, model: str, temperature: float = 0.2,
                 max_tokens: Optional[int] = None) -> ChatClient:
-    """给某个模型造一个客户端：渠道按 summary_provider（auto 时看模型名）。"""
+    """给某个模型造一个客户端：摘要和整理都走对话那一家。
+
+    换端点就是换对话地址（设置页「接口」那一组）；不再按模型名分渠道——
+    那个两家分流是早期只有 DeepSeek + 百炼时候的写法。
+    """
     if credentials is None:
         raise ValueError("没有凭证，调不了模型")
-    provider = str(getattr(config, "summary_provider", "auto") or "auto")
-    if provider == "auto":
-        provider = "bailian" if "qwen" in str(model).lower() else "deepseek"
-    if provider == "bailian":
-        key = credentials.summary_key or credentials.chat_key
-        url = credentials.summary_url or credentials.chat_url
-    else:
-        key = credentials.chat_key
-        url = credentials.chat_url
     return ChatClient(
         ChatConfig(model=str(model), temperature=temperature,
                    max_tokens=max_tokens or config.max_tokens,
                    timeout=config.timeout, retries=config.retries,
                    reasoning_effort=str(getattr(config, "reasoning_effort", "") or "")),
-        Credentials(api_key=key, chat_url=url))
+        Credentials(api_key=credentials.chat_key, chat_url=credentials.chat_url))
 
 
 class Compressor:

@@ -20,7 +20,8 @@ import time
 from datetime import datetime
 
 from testsupport import tempdir
-from .compress import CompressError, Compressor, add_band, parse_summary, truncate
+from .compress import (CompressError, Compressor, add_band, make_client,
+                       parse_summary, truncate)
 from . import archive
 from . import backup
 from . import control
@@ -30,7 +31,8 @@ from .config import LoopConfig, LoopCredentials
 from .context import (strip_fake_calls, Band, Block, BlockEntry, Context, content_text,
                       estimate_tokens, image_parts, neutralize, serialize_entries,
                       time_range)
-from .driver import Loop, _ring_text, _timeout_text, _unread_text, _woke_text, parse_until
+from .driver import (Loop, _message_line, _ring_text, _timeout_text, _unread_text,
+                     _woke_text, parse_until)
 from .store import LoopStore
 from .usage import collect, render
 from memory_v2.api import Memory
@@ -212,6 +214,18 @@ def check_compress() -> None:
           == "10-25 周日 23:00–10-26 周一 02:00",
           "跨午夜两边都要日期和星期")
 
+    # 摘要跟着对话那家走：模型名里带 qwen 也不换端点（早期的两家分流已经去掉）。
+    creds = LoopCredentials(chat_key="k",
+                            chat_url="https://main.test/v1/chat/completions",
+                            maas_key="m",
+                            maas_url="https://maas.test/v1/chat/completions")
+    client = make_client(config, creds, "qwen-plus")
+    check(client.credentials.chat_url == "https://main.test/v1/chat/completions",
+          "摘要要走对话那家，哪怕模型名叫 qwen-plus")
+    check(client.credentials.api_key == "k", "摘要的密钥也是对话那家的")
+    check(not hasattr(config, "summary_provider"),
+          "不该再有「摘要走哪家」这个旋钮：端点就是对话地址")
+
 
 def check_context_limits() -> None:
     config = _loop_config(name="自检", band_chars=(100, 200, 400, 800), band_budget=400)
@@ -266,6 +280,46 @@ def check_clock() -> None:
     check(text == "（现在 10-25 周日 15:42；距上次对方说话 1 小时 30 分；"
                   "距我上次开口 6 分钟）", "墙钟写得不对：%s" % text)
     check("现在" not in context.block_text(), "墙钟不该进记录")
+
+    # 通道转进来的话不进记录（先响一声，正文等她自己读）：只看记录会把「刚在通道上
+    # 聊过」算成一天前——2026-10-30 线上真这么说过。进件里那条 `from_user`
+    # （对方在通道上说的）也要算；群里别人、岛上陌生人的进件不算。
+    chatted = Context(_loop_config(name="自检"))
+    chatted.current = Block([
+        BlockEntry({"role": "user", "content": "网页上说的。"}, "2026-10-29 01:35:29"),
+        BlockEntry({"role": "assistant", "content": "嗯。"}, "2026-10-29 01:35:31"),
+    ], "2026-10-29 01:35:29", "2026-10-29 01:35:31")
+    chatted.last_incoming = {"ts": "2026-10-30 01:47:14", "who": "Ranchel",
+                             "chat_type": "private"}          # 刚响的那一声
+    text = chatted.clock_text(datetime(2026, 10, 30, 1, 47, 20))
+    check(text == "（现在 10-30 周五 01:47；距上次对方说话 刚刚；"
+                  "距我上次开口 1 天）", "通道来的话也得算「对方说话」：%s" % text)
+    chatted.last_incoming = {"ts": "2026-10-28 09:00:00", "who": "Ranchel"}
+    check("距上次对方说话 1 天；" in chatted.clock_text(datetime(2026, 10, 30, 1, 47, 20)),
+          "进件那条更早就按记录算：%s" % chatted.clock_text(datetime(2026, 10, 30, 1, 47, 20)))
+    chatted.last_incoming = {}                                # 不知道就只看记录
+    text = chatted.clock_text(datetime(2026, 10, 30, 1, 47, 20))
+    check(text.split("；")[1] == "距上次对方说话 1 天",
+          "没有进件时间时别乱算：%s" % text)
+
+    # 对方发的每一条，进上下文时前面都挂【标记】：设置里那个词，空就用对方的名字
+    marked = Context(_loop_config(name="自检", owner_mark="Ran"))
+    marked.current = Block([
+        BlockEntry({"role": "user", "content": "在吗"}, "2026-10-25 14:12:00"),
+        BlockEntry({"role": "assistant", "content": "在。"}, "2026-10-25 14:12:03"),
+    ], "2026-10-25 14:12:00", "2026-10-25 14:12:03")
+    turns = marked.messages()
+    users = [m for m in turns if m.get("role") == "user"]
+    check(users and str(users[0].get("content") or "").startswith("【Ran】在吗"),
+          "对方的消息该挂标记：%r" % users[:1])
+    check(str(users[-1].get("content") or "").startswith("<system-reminder>"),
+          "末尾那一帧是环境，不该挂标记：%r" % str(users[-1])[:40])
+    named = Context(_loop_config(name="自检", user_name="Ranchel"))
+    named.current = Block([BlockEntry({"role": "user", "content": "在吗"},
+                                      "2026-10-25 14:12:00")],
+                          "2026-10-25 14:12:00", "")
+    check(str(named.messages()[1].get("content") or "").startswith("【Ranchel】在吗"),
+          "没填标记时用对方的名字：%r" % named.messages()[1])
     # 这里走的是真时钟，日期得跟着今天走——写死 10-25 过一晚就红
     today = datetime.now().strftime("%m-%d")
     check("现在 %s" % today in context.messages()[-1]["content"],
@@ -302,6 +356,31 @@ def check_clock() -> None:
         check("现在" not in client.prompts[1],
               "120 秒内不重复念时间：%r" % client.prompts[1][-80:])
         check("接着上面" in client.prompts[1], "不带墙钟时要有边界那句")
+
+        # 进件里来一条通道来信：只有标了「这条是对方说的」才算「距上次对方说话」
+        store.push("user", "别人说的一句", source="某个通道", chat_id="666",
+                   sender_name="路人")
+        check(store.last_incoming() == {},
+              "外面别人的话不该顶成「对方说话」：%r" % store.last_incoming())
+        store.push("user", "通道上他说的一句", source="某个通道", chat_id="777",
+                   sender_name="Ranchel", from_user=True)
+        latest = store.last_incoming()
+        check(len(str(latest.get("ts") or "")) == 19
+              and str(latest.get("ts")).startswith(str(datetime.now().year)),
+              "进件里那条的时间该拿得到：%r" % latest)
+        check(latest.get("who") == "Ranchel", "谁说的要照实带上：%r" % latest)
+        # 更晚的别人说话也不顶替：那句话是「外面有动静」，不是对方说话
+        store.push("user", "更晚的一句闲话", source="某个通道", chat_id="666",
+                   sender_name="路人")
+        check(store.last_incoming().get("who") == "Ranchel",
+              "更晚的别人说话不该顶替对方：%r" % store.last_incoming())
+        # 藏着不叫人的（mute）不算：那几句本来就不该让她看见
+        store.push("user", "藏着的一句", source="某个通道", chat_id="888",
+                   sender_name="Ranchel", policy="mute")
+        check(store.last_incoming().get("who") == "Ranchel", "mute 的不算对方说话")
+        loop.context.last_incoming = latest
+        check("距上次对方说话 刚刚" in loop.context.clock_text(),
+              "刚来的话该说「刚刚」：%s" % loop.context.clock_text())
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -879,6 +958,11 @@ def check_archive_raw() -> None:
         store.append_entry(first, BlockEntry(
             {"role": "user", "content": "旧的这一段"},
             "2026-01-01 00:00:01"), step=1)
+        store.append_entry(first, BlockEntry(
+            {"role": "tool", "tool_call_id": "c1", "content": [
+                {"type": "text", "text": "看了：收件/x.jpg"},
+                {"type": "image", "path": "workspace/收件/x.jpg", "w": 64, "h": 48}]},
+            "2026-01-01 00:00:02"), step=1)
         store.promote_block(first, "2026-01-01 00:10:00")
         store.finish_previous(first, "压成一句了", ["关键词"], "")
         second = store.open_block("2026-01-01 00:10:00")
@@ -894,7 +978,7 @@ def check_archive_raw() -> None:
         folder = os.path.join(workdir, "archive", "now")
         os.makedirs(folder, exist_ok=True)
         raw = archive.export_raw(store, config, folder, keep_ids={second, third})
-        check(raw.get("blocks") == 1 and raw.get("entries") == 1,
+        check(raw.get("blocks") == 1 and raw.get("entries") == 2,
               "只该搬滚过去、又不在两块里的那块：%r" % raw)
         check(not store.entries(first), "旧块的原文要从库里删掉")
         check(len(store.entries(second)) == 1 and len(store.entries(third)) == 1,
@@ -903,8 +987,16 @@ def check_archive_raw() -> None:
             dumped = json.load(handle)
         check(dumped.get("id") == first and dumped.get("summary") == "压成一句了",
               "一块一个 JSON，摘要跟着走：%r" % list(dumped))
-        check([item["content"] for item in dumped.get("entries") or []] == ["旧的这一段"],
+        check([item["content"] for item in dumped.get("entries") or []]
+              == ["旧的这一段", "看了：收件/x.jpg"],
               "条目要结构化存：%r" % dumped.get("entries"))
+        # 图跟着归档一起走：content 是文字，images 是清单（只有路径和尺寸）
+        pictures = [item for item in dumped.get("entries") or [] if item.get("images")]
+        check(len(pictures) == 1 and pictures[0]["images"][0]["path"] == "workspace/收件/x.jpg",
+              "图要跟着归档走：%r" % dumped.get("entries"))
+        check(pictures[0]["images"][0].get("w") == 64
+              and pictures[0]["images"][0].get("h") == 48,
+              "尺寸也留着：%r" % (pictures[0]["images"],))
         with io.open(os.path.join(folder, "原文", "index.json"), encoding="utf-8") as handle:
             index = json.load(handle)
         check(index.get("blocks") and index["blocks"][0]["id"] == first,
@@ -1602,14 +1694,19 @@ def check_ring_text() -> None:
     把工具名塞进别人的话里，读起来像系统提示；工具怎么用归工具自己的说明。
     """
     private = {"source": "QQ", "chat_type": "private", "chat_id": "10001",
-               "chat_name": "Ranchel", "sender_name": "Ranchel"}
+               "chat_name": "Ranchel", "sender_name": "Ranchel", "from_user": 1}
     ring = _ring_text(private)
     check(ring == "Ranchel 在 QQ 上私聊你。", "私聊那句话：%r" % ring)
     check("messages" not in ring and "工具" not in ring,
           "叫醒那句话不该提工具名：%r" % ring)
 
+    # 别人说的话只写名字：不另加「别人」那种抽象标签
+    stranger = dict(private, sender_name="路人", from_user=0)
+    check(_ring_text(stranger) == "路人 在 QQ 上私聊你。",
+          "别人说的那句照样只写名字：%r" % _ring_text(stranger))
+
     group = {"source": "QQ", "chat_type": "group", "chat_id": "g1",
-             "chat_name": "群甲", "sender_name": "甲"}
+             "chat_name": "群甲", "sender_name": "甲", "from_user": 0}
     ring = _ring_text(group)
     check(ring == "甲 在群「群甲」里 @ 你。", "群里那句话：%r" % ring)
     check("messages" not in ring, "群里那句也不该提工具名：%r" % ring)
@@ -1617,6 +1714,27 @@ def check_ring_text() -> None:
     unknown = {"source": "QQ", "chat_type": "private", "chat_id": "9"}
     check(_ring_text(unknown) == "有人在 QQ 上私聊你。",
           "没名字时退到「有人」：%r" % _ring_text(unknown))
+
+    # 串里的话不是私聊：论坛帖子底下的回帖，地方要说对
+    thread = {"source": "岛", "chat_type": "thread", "chat_id": "xdao:1",
+              "chat_name": "接入测试", "sender_name": "Tips", "from_user": 0}
+    check(_ring_text(thread) == "Tips 在「接入测试」那个串里说话。",
+          "串里那句话：%r" % _ring_text(thread))
+
+    # 读回来的那一行：她那个人的话挂【标记】（设置里那个词，空就用对方的名字）；
+    # 别人的话不加标记——重名的时候，方括号才是“这句是我的人说的”的凭据。
+    line = _message_line({"source": "QQ", "chat_type": "private", "chat_id": "10001",
+                          "sender_name": "小号昵称", "from_user": 1,
+                          "text": "在吗"}, "Ran")
+    check(line == "【Ran】在吗", "那个人说的话要挂设置里的标记：%r" % line)
+    line = _message_line({"source": "岛", "chat_type": "thread", "chat_id": "xdao:1",
+                          "sender_name": "Ranchel", "from_user": 0,
+                          "text": "我也叫 Ranchel"}, "Ran")
+    check(line == "岛 Ranchel：我也叫 Ranchel", "同名的别人不挂括号：%r" % line)
+    line = _message_line({"source": "岛", "chat_type": "thread", "chat_id": "xdao:1",
+                          "sender_name": "Tips", "from_user": 0,
+                          "text": "这个月多了26只白羊"})
+    check(line == "岛 Tips：这个月多了26只白羊", "别人的话不加标记：%r" % line)
 
     note = _unread_text({"total": 3, "chat_total": 2, "chats": [
         {"chat_id": "a", "chat_name": "Ranchel", "count": 2,
@@ -1626,15 +1744,19 @@ def check_ring_text() -> None:
     check("messages" not in note, "计数那行也不该提工具名：%r" % note)
 
 
-def check_via_mark() -> None:
-    """她说的话带着「回给谁」：外部叫醒的那几轮才有，本机聊的不带。
+def check_messages_no_mark() -> None:
+    """她的话不带「回给谁」的标记；读消息几个会话混着来时要分开写。
 
-    通道适配器靠这个标记定向回发——没有它就不知道这句话该发给谁，
-    有了它，网页里跟她聊的话就不会被复述到 QQ 上去。
+    以前有条 `meta.via`：外部消息叫醒她那几轮，她说的话会带上「回给谁」，
+    通道适配器照它把正文自动发回去。2026-10-30 拆了——她已经在用 qq 工具
+    自己发，两条路并着走，同一句会被发两次；更糟的是读岛上的积压也会把这个
+    标记改到岛上去，而岛上根本没有回发的路，网页于是画出一句假的「已发到」。
+    现在发话只有一条路：她自己调工具发。
     """
-    workdir = tempdir("loop-via-")
+    workdir = tempdir("loop-mark-")
     try:
-        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000,
+                              owner_mark="Ran")
         store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
         loop = Loop(config, credentials=None, store=store,
                     compressor=Compressor(config, summarizer=fake_summarizer),
@@ -1653,33 +1775,78 @@ def check_via_mark() -> None:
         check(not saved["chat_id"], "本机直投没有会话")
         loop._append({"role": "assistant", "content": "本机这边回的一句"})
         check(not loop.context.current.entries[-1].meta.get("via"),
-              "本机对话不该带 via：%r" % loop.context.current.entries[-1].meta)
+              "记录里不该再有 via：%r" % loop.context.current.entries[-1].meta)
+        check(not hasattr(loop, "via"), "循环里不该留回复窗口")
 
-        # 通道来的：叫醒她，她说的话要带上是回给哪个会话
+        # 通道来的：叫醒她；她说的话照旧不带任何"回给谁"——要发得自己调工具
         store.push("user", "在吗", source="QQ", chat_type="private",
-                   chat_id="10001", chat_name="她的人", sender_name="甲")
+                   chat_id="10001", chat_name="她的人", sender_name="甲",
+                   from_user=True)
         loop._drain_inbox()
         loop._append({"role": "assistant", "content": "在的"})
-        via = loop.context.current.entries[-1].meta.get("via") or {}
-        check(via.get("source") == "QQ" and via.get("chat_id") == "10001",
-              "外部叫醒后要带 via：%r" % via)
-        check(via.get("chat_name") == "她的人" and via.get("chat_type") == "private",
-              "via 要能直接当回发地址用：%r" % via)
+        check(not loop.context.current.entries[-1].meta.get("via"),
+              "外部叫醒也不该带 via：%r" % loop.context.current.entries[-1].meta)
 
-        # 网页那边又说话：回复窗口换地方，之后的话不再算回给那个会话
-        store.push("user", "网页这边问一句")
-        loop._drain_inbox()
-        check(loop.via == {}, "本机说话要关掉回复窗口：%r" % loop.via)
-
-        # 等回去没事（到点没等到）：窗口也关掉
-        store.push("user", "再来一句", source="QQ", chat_type="private",
-                   chat_id="10001", chat_name="她的人", sender_name="甲")
-        loop._drain_inbox()
-        check(loop.via.get("chat_id") == "10001", "外部消息要开窗口")
-        loop.store.mark_notified(store.inbox_recent(1)[0]["id"])
+        # 等到点：没动静也照常返回一行
         said = loop._wait(json.dumps({"until": "1s"}))
         check("到点了" in said, "应该等到点：%r" % said)
-        check(loop.via == {}, "等回去没事要关窗口：%r" % loop.via)
+
+        # 攒着的两路一起来：读的时候按会话分开写，谁在哪儿说的先立住
+        store.push("user", "岛上有人回你", source="岛", chat_type="thread",
+                   chat_id="xdao:69699278", chat_name="接入测试", sender_name="Tips")
+        store.push("user", "另一边的第二句", source="QQ", chat_type="private",
+                   chat_id="777", chat_name="某乙", sender_name="乙")
+        text = loop._read_messages("{}")
+        for head in ("QQ · 私聊「她的人」 1 条", "岛 · 串「接入测试」 1 条",
+                     "QQ · 私聊「某乙」 1 条"):
+            check(head in text, "要按会话分开写（缺 %s）：%r" % (head, text))
+        check("【Ran】在吗" in text, "她的那句话仍要挂标记：%r" % text)
+        check("Tips：岛上有人回你" in text, "分组里只写发言人：%r" % text)
+        check("岛 Tips：" not in text, "分组里不该再重复来路：%r" % text)
+
+        # 点名一个会话读：不用小标题，跟以前一样平着写
+        store.push("user", "某乙又说一句", source="QQ", chat_type="private",
+                   chat_id="777", chat_name="某乙", sender_name="乙")
+        one = loop._read_messages(json.dumps({"chat": "777"}))
+        check("某乙又说一句" in one, "点名读要能读到：%r" % one)
+        check("QQ · 私聊" not in one and one.count("\n") == 1,
+              "单会话读不该加小标题：%r" % one)
+
+        # 带图的进件：图跟着**这条结果**回去，不再补一条带图片段的 user 记录。
+        # `user` 只留给对方本人说的话；QQ / 岛上来的话连图一起挂在工具结果里。
+        os.makedirs(os.path.join(workdir, "workspace", "收件"), exist_ok=True)
+        with open(os.path.join(workdir, "workspace", "收件", "x.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+        store.push("user", "（一张 100×100 的图：收件/x.jpg）", source="QQ",
+                   chat_type="private", chat_id="9", chat_name="某丙",
+                   sender_name="丙",
+                   meta={"images": [{"path": "workspace/收件/x.jpg",
+                                     "w": 100, "h": 100}]})
+        said = loop._read_messages("{}")
+        check(isinstance(said, list), "带图时结果自己要带图：%r" % (said,))
+        check("就在这条结果里" in str(said[0].get("text")),
+              "文字要交代图在这条结果里：%r" % (said[0],))
+        pictures = [part for part in said if str(part.get("type")) == "image"]
+        check(len(pictures) == 1
+              and str(pictures[0].get("path")) == "workspace/收件/x.jpg",
+              "图要挂在结果里：%r" % (said,))
+        check(not loop._after_tool, "不许再排一条 user 记录：%r" % loop._after_tool)
+
+        # 进请求时：图在 tool 上，user 那条不出现
+        loop._append({"role": "assistant", "content": "",
+                      "tool_calls": [{"id": "r1", "type": "function",
+                                      "function": {"name": "messages",
+                                                   "arguments": "{}"}}]})
+        loop._append({"role": "tool", "tool_call_id": "r1", "content": said})
+        turns = loop.context.messages()
+        users = [turn for turn in turns if turn.get("role") == "user"]
+        check(all("100×100" not in str(turn.get("content")) for turn in users),
+              "渠道来的话连图都不许走 user：%r" % [turn.get("content") for turn in users])
+        tools = [turn for turn in turns if turn.get("role") == "tool"]
+        check(bool(tools) and isinstance(tools[-1].get("content"), list)
+              and any(str(part.get("type")) == "image_url"
+                      for part in tools[-1]["content"]),
+              "图要挂在 tool 结果上：%r" % (tools[-1:],))
 
         # 仪表盘那一份：读过的也列出来，数字对得上
         recent = store.inbox_recent(limit=20)
@@ -1687,24 +1854,8 @@ def check_via_mark() -> None:
               "最近的进件要按时间正序：%r" % [row["text"] for row in recent])
         check(any(row["consumed"] for row in recent), "读过的也要列出来")
         counts = store.inbox_counts()
-        check(counts["outside"] == 2, "外部来过几条要数对：%r" % counts)
-        check(counts["waiting"] >= 1, "还没读的条数要数对：%r" % counts)
-
-        # 读回积压（batch）也要立 via：不然她读完再答，回答根本发不出去
-        store.push("user", "攒着的之一", source="QQ", chat_type="private",
-                   chat_id="777", chat_name="某乙", sender_name="乙")
-        store.push("user", "攒着的之二", source="QQ", chat_type="private",
-                   chat_id="777", chat_name="某乙", sender_name="乙")
-        loop._read_messages(json.dumps({"chat": "777"}))
-        check(loop.via.get("chat_id") == "777", "读完积压要立 via：%r" % loop.via)
-
-        # 一步里两个会话同时叫她：挑不出来就别立（立错了会把话发给另一个人）
-        store.push("user", "甲这边", source="QQ", chat_type="private",
-                   chat_id="111", chat_name="甲", sender_name="甲")
-        store.push("user", "乙那边", source="QQ", chat_type="private",
-                   chat_id="222", chat_name="乙", sender_name="乙")
-        loop._drain_inbox()
-        check(loop.via == {}, "两个会话一起叫，不该立 via：%r" % loop.via)
+        check(counts["outside"] == 5, "外部来过几条要数对：%r" % counts)
+        check(counts["waiting"] == 0, "读完了就不该有等着数的：%r" % counts)
 
         # 外部编号：同一个编号只收一次（补拉历史、重连补漏都靠它）
         first = store.push("user", "带编号的一条", source="QQ", chat_id="c1",
@@ -1716,6 +1867,217 @@ def check_via_mark() -> None:
         check(not store.inbox_has_ext("m-78"), "没见过的编号不该认")
         check(store.inbox_recent(1)[0]["ext_id"] == "m-77",
               "仪表盘那份要带出编号：%r" % store.inbox_recent(1)[0])
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_feed_pages() -> None:
+    """网页首屏要尾、往上要页：`feed_tail` / `feed_before` 跟 `feed` 对得上。
+
+    以前首屏是 `since=0:0` 整块重放，手机上九百多条、七百多 KB，先画出来的是最早的。
+    """
+    workdir = tempdir("loop-feed-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=Memory.disabled(), client=FakeClient())
+        for index in range(5):
+            loop._append({"role": "assistant", "content": "第%d句" % index})
+
+        whole = store.feed(0, 0)
+        check([row["text"] for row in whole] == ["第%d句" % i for i in range(5)],
+              "feed 从头给全、按序：%r" % [row["text"] for row in whole])
+
+        tail = store.feed_tail(2)
+        check([row["text"] for row in tail] == ["第3句", "第4句"],
+              "feed_tail 给最后两条、还是正序：%r" % [row["text"] for row in tail])
+
+        older = store.feed_before(tail[0]["block"], tail[0]["seq"], 2)
+        check([row["text"] for row in older] == ["第1句", "第2句"],
+              "feed_before 给紧挨着的前一页：%r" % [row["text"] for row in older])
+
+        head = store.feed_before(whole[0]["block"], whole[0]["seq"], 2)
+        check(head == [], "到了头就是空的：%r" % head)
+
+        # 尾和增量接得上：从尾游标往后问，不该重复给已经画过的
+        check(store.feed(tail[-1]["block"], tail[-1]["seq"]) == [],
+              "尾游标之后不该再给同一条")
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_block_measure() -> None:
+    """块大小怎么量：一次估算当锚，之后只跟服务端报的增量走。
+
+    以前每一步都拿"prompt_tokens − 估算的固定部分"算，估错多少就错多少（中文按
+    0.76 token/字，实测要 1.5，于是量出来的块偏小三成）。锚 + 增量之后，增长是
+    服务端报的真数：中文、英文、图片都不影响它。
+    """
+    workdir = tempdir("loop-measure-")
+    try:
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=Memory.disabled(), client=FakeClient())
+        loop._append({"role": "assistant", "content": "第一句"})
+
+        loop.last_prompt_tokens = 1000
+        loop._measure_block([])
+        first = loop.current_real
+        check(first > 0, "第一次要估出个起点：%r" % first)
+
+        # 服务端多报 500，就是块长了 500——里面是中文还是英文都不参与运算
+        loop.last_prompt_tokens = 1500
+        loop._measure_block([])
+        check(loop.current_real == first + 500,
+              "之后只跟服务端增量走：%r → %r" % (first, loop.current_real))
+
+        # 重启回同一块：锚从库里捞回来，不重新估一遍
+        loop._block_anchor = {}
+        loop.last_prompt_tokens = 1700
+        loop._measure_block([])
+        check(loop.current_real == first + 700,
+              "重启之后接着用同一个锚：%r" % loop.current_real)
+
+        # 换块（滚块之后）要重新打锚，不能把上一块的账算进来
+        loop.current_id = store.open_block("2026-10-31 00:00:00")
+        loop._block_anchor = {}
+        loop.last_prompt_tokens = 2000
+        loop._measure_block([])
+        check(loop.current_real < 2000,
+              "新块要重新打锚，不能沿用上一块的增量：%r" % loop.current_real)
+        store.close()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def check_look_tool() -> None:
+    """`look`：图跟着这条**工具结果**回去，不另造一条 `user`。
+
+    `user` 这个位置只留给对方本人说的话（网页 / 命令行直投）。以前图只能塞进一条
+    `user` 记录，读起来像对方发来一句「看这张图」，2026-10-30 真把她绕进去了。
+    """
+    workdir = tempdir("loop-look-")
+    try:
+        folder = os.path.join(workdir, "workspace", "收件", "2026-10-30")
+        os.makedirs(folder, exist_ok=True)
+        image_path = os.path.join(folder, "x.jpg")
+        with open(image_path, "wb") as handle:
+            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+        text_path = os.path.join(folder, "note.txt")
+        with open(text_path, "wb") as handle:
+            handle.write(b"not an image")
+
+        config = _loop_config(name="自检", data_dir=workdir, block_tokens=100000)
+        store = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        loop = Loop(config, credentials=None, store=store,
+                    compressor=Compressor(config, summarizer=fake_summarizer),
+                    memory=Memory.disabled(), client=FakeClient())
+
+        out = loop._look(json.dumps({"path": "收件/2026-10-30/x.jpg"}))
+        check(isinstance(out, list) and len(out) == 2,
+              "look 的结果自己带图：%r" % (out,))
+        check(str(out[0].get("type")) == "text"
+              and "看了" in str(out[0].get("text"))
+              and "x.jpg" in str(out[0].get("text")),
+              "文字里要说清是哪张：%r" % (out[0],))
+        check(str(out[1].get("type")) == "image"
+              and str(out[1].get("path")) == "workspace/收件/2026-10-30/x.jpg",
+              "第二段是图：%r" % (out[1],))
+        check(not loop._after_tool, "不许再补一条 user 记录：%r" % loop._after_tool)
+
+        # 真当一条 tool 结果走一遍：图成了 image_url 段，且不再冒出 user 那条
+        loop._append({"role": "assistant", "content": "",
+                      "tool_calls": [{"id": "c1", "type": "function",
+                                      "function": {"name": "look", "arguments": "{}"}}]})
+        loop._append({"role": "tool", "tool_call_id": "c1", "content": out})
+        turns = loop.context.messages()
+        tools = [turn for turn in turns if turn.get("role") == "tool"]
+        check(bool(tools) and isinstance(tools[-1].get("content"), list),
+              "tool 结果要能带图：%r" % (tools[-1:],))
+        parts = tools[-1]["content"] if tools else []
+        check(any(part.get("type") == "image_url" for part in parts),
+              "图要变成 image_url 段：%r" % ([part.get("type") for part in parts],))
+        users = [turn for turn in turns if turn.get("role") == "user"]
+        check(not any("看这张图" in str(turn.get("content")) for turn in users),
+              "不该再有「看这张图」那条 user：%r" % [turn.get("content") for turn in users])
+        check(all("【Ran】" not in str(turn.get("content")) for turn in users),
+              "user 里不该有引擎自己编的话：%r" % [turn.get("content") for turn in users])
+
+        # 落库：图清单单独一列，重开库还能拼回图片段（以前重启就只剩 `[图片]` 一行字）
+        again = LoopStore(os.path.join(workdir, "loop.sqlite3"))
+        try:
+            rebuilt = again.load_block(loop.current_id).entries[-1].message.get("content")
+            check(isinstance(rebuilt, list)
+                  and any(str(part.get("type")) == "image" for part in rebuilt),
+                  "重开库要能拼回图片段：%r" % (rebuilt,))
+            check(any(str(part.get("path")) == "workspace/收件/2026-10-30/x.jpg"
+                      for part in rebuilt if str(part.get("type")) == "image"),
+                  "路径要原样回来：%r" % (rebuilt,))
+            check(any(str(part.get("type")) == "text"
+                      and "看了" in str(part.get("text")) for part in rebuilt),
+                  "文字段也要在：%r" % (rebuilt,))
+        finally:
+            again.close()
+
+        # 工作区外面的一律不看
+        out = loop._look(json.dumps({"path": "../loop.sqlite3"}))
+        check("跑到外面" in str(out) or "只看得见" in str(out), "不许越界：%r" % out)
+        out = loop._look(json.dumps({"path": "/etc/passwd"}))
+        check("跑到外面" in str(out) or "只看得见" in str(out) or "没有这个文件" in str(out),
+              "绝对路径也不许：%r" % out)
+        # 不是图的文件要当场拒
+        out = loop._look(json.dumps({"path": "收件/2026-10-30/note.txt"}))
+        check("不像图" in str(out), "不是图要拒：%r" % out)
+        # 没这个文件
+        out = loop._look(json.dumps({"path": "收件/nope.jpg"}))
+        check("没有这个文件" in str(out), "没有就说没有：%r" % out)
+        # 图库（`<数据>/图片`）里的图也看得见——收进来的图都在那儿，她的工具碰不到
+        gallery = os.path.join(workdir, "图片", "2026-10")
+        os.makedirs(gallery, exist_ok=True)
+        with open(os.path.join(gallery, "g.jpg"), "wb") as handle:
+            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+        kept = loop._look(json.dumps({"path": "图片/2026-10/g.jpg"}))
+        check(isinstance(kept, list)
+              and str(kept[1].get("path")) == "图片/2026-10/g.jpg",
+              "图库里的图要能看：%r" % (kept,))
+        check("图片/2026-10/g.jpg" in str(kept[0].get("text")),
+              "文字里的路径要照原样：%r" % (kept[0],))
+        out = loop._look(json.dumps({"path": "图片/../../etc/passwd"}))
+        check("跑到外面" in str(out), "图库也不许越界：%r" % out)
+
+        # 路径解析：图库和工作区都按数据目录算，http 地址原样交给端点
+        from loop.context import image_file
+
+        check(image_file(workdir, "图片/2026-10/g.jpg")
+              == os.path.join(workdir, "图片", "2026-10", "g.jpg"),
+              "`图片/` 要落到图库：%r" % image_file(workdir, "图片/2026-10/g.jpg"))
+        check(image_file(workdir, "workspace/收件/x.jpg")
+              == os.path.join(workdir, "workspace", "收件", "x.jpg"),
+              "老路径照旧：%r" % image_file(workdir, "workspace/收件/x.jpg"))
+        check(image_file(workdir, "http://x/y.png") == "http://x/y.png",
+              "地址原样返回")
+
+        # 老记录（2026-10-30 之前）：写成 user 的「看这张图」，现在当环境说明读
+        loop._append({"role": "user",
+                      "content": "（看这张图：workspace/收件/2026-10-30/x.jpg）\n[图片]"},
+                     meta={})
+        turns = loop.context.messages()
+        check(not any(turn.get("role") == "user"
+                      and "看这张图" in str(turn.get("content")) for turn in turns),
+              "老的 look 记录不许再冒充对方：%r"
+              % [turn.get("content") for turn in turns if turn.get("role") == "user"])
+        check(any(turn.get("role") == "system"
+                  and "她自己看过：workspace/收件/2026-10-30/x.jpg"
+                  in str(turn.get("content")) for turn in turns),
+              "老记录要改成一句自述：%r"
+              % [turn.get("content") for turn in turns if turn.get("role") == "system"])
+
         store.close()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -2243,7 +2605,10 @@ def main() -> int:
     check_unread_fade()
     check_inbox_repair()
     check_ring_text()
-    check_via_mark()
+    check_messages_no_mark()
+    check_feed_pages()
+    check_block_measure()
+    check_look_tool()
     check_call_cap()
     check_effort()
     check_images()

@@ -16,8 +16,8 @@
 
 ## 0 范围与取舍
 
-- 全部走 API：主模型用 DeepSeek（Flash 等）或百炼的 Qwen；摘要用百炼；memory_v2 的嵌入用
-  百炼。本地模型不参与。
+- 全部走 API：主模型用 DeepSeek（Flash 等）或百炼的 Qwen；摘要和整理跟对话同一家；
+  memory_v2 的嵌入用百炼。本地模型不参与。
 - 两层：上下文 cover 最近，memory_v2 cover 历史。上下文丢了的就丢了，不回头补。
 - 上下文压缩由运行时独立完成，和主模型无关；压缩不写 memory_v2。
 - 记忆写入放宽：主模型想记就记，不强制每轮。没写的，等摘要淡掉就没了。
@@ -254,8 +254,8 @@ memory_v2 侧只改两处：`read/activate.py` 的读集（启动时并入 `冻�
   表（prompt / completion / 缓存命中）。块满按真数判：上一次请求的 `prompt_tokens`
   减掉固定部分（sink、旧段、工具 schema）就是当前块的真实大小；没有真数时（刚重启、
   刚压完）才用估算顶一步，估算常数按实测校准（汉字 0.76 token/字、其余 4.11 字符/token）。
-- 压缩日志只打在运行时输出里，不进上下文。摘要默认 `deepseek-flash`（同端点），
-  `--summary-model qwen-plus` 走百炼；失败保留原文，等块再长 1k 再试。
+- 压缩日志只打在运行时输出里，不进上下文。摘要默认 `deepseek-flash`，跟对话同一家
+  （换端点就是换对话地址）；失败保留原文，等块再长 1k 再试。
 - 工具：`remember` / `recall` / `recollect` / `wait` / `fetch` / `search` / `run` / `write`
   （`run` 默认关，开了才出现在工具面里）；正文是说，空回复即停。
 - 网页：`rin:gateway.py` 只读库、只往 `inbox` 写，界面是单个 `rin:web/index.html`；令牌走

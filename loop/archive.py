@@ -26,7 +26,7 @@ import shutil
 import time
 
 from . import persona, prompt_files
-from .context import serialize_entries
+from .context import content_text, image_parts, serialize_entries, spoken_text
 
 MAX_EVENTS = 8
 MAX_LINKS = 12
@@ -167,10 +167,22 @@ def export_raw(store, config, folder: str, keep_ids=(), only_ids=None) -> dict:
         entries = []
         for entry in block.entries:
             message = entry.message or {}
+            content = message.get("content")
+            pictures = []
+            for part in image_parts(content):
+                path = str(part.get("path") or part.get("url") or "").strip()
+                if not path:
+                    continue
+                pictures.append({"path": path,
+                                 "w": int(part.get("w") or 0),
+                                 "h": int(part.get("h") or 0)})
             entries.append({"seq": int(getattr(entry, "seq", 0) or 0),
                             "ts": str(getattr(entry, "ts", "") or ""),
                             "role": str(message.get("role") or ""),
-                            "content": str(message.get("content") or ""),
+                            "content": (spoken_text(content) if pictures
+                                        else content_text(content)),
+                            # 图跟别的历史一样进归档：只存路径和尺寸，字节不入库。
+                            "images": pictures,
                             "tool_calls": list(message.get("tool_calls") or []),
                             "tool_call_id": str(message.get("tool_call_id") or ""),
                             "meta": dict(getattr(entry, "meta", None) or {})})

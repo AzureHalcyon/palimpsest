@@ -121,6 +121,9 @@ _register_tool("channels_set", "工具 · channels_set",
                ["chat", "policy"], _DIR)
 _register_tool("messages", "工具 · messages",
                "把攒着没读的消息读回来。", ["chat", "limit", "before"], _DIR)
+_register_tool("look", "工具 · look",
+               "把工作区里的一张图接进记录，真的看一眼。",
+               ["path"], _DIR)
 
 
 def use_overrides(data_dir: str) -> None:

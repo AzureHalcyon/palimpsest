@@ -15,7 +15,7 @@ import yaml
 
 DEFAULT_CREDENTIALS = os.path.join("~", ".dsh", ".credentials.yaml")
 DEFAULT_CHAT_URL = "https://api.deepseek.com/chat/completions"
-DEFAULT_SUMMARY_MODEL = "qwen-plus"
+DEFAULT_SUMMARY_MODEL = "deepseek-flash"   # 摘要走对话那家，默认跟主模型同一族
 
 
 class LoopConfigError(RuntimeError):
@@ -26,15 +26,12 @@ class LoopConfigError(RuntimeError):
 class LoopCredentials:
     chat_key: str
     chat_url: str = DEFAULT_CHAT_URL
-    # 摘要走百炼的 compatible-mode；步骤 0 用桩，还没用到这里。
-    summary_key: str = ""
-    summary_url: str = ""
-    summary_model: str = DEFAULT_SUMMARY_MODEL
+    # 百炼（阿里云 MAAS）那一组：语音转写的键、嵌入地址的提示用它。
+    # 摘要不走这里——它跟上面的对话那家（换端点就是换对话地址）。
+    maas_key: str = ""
+    maas_url: str = ""
     # 搜索用的 key（Tavily）；没有就用免费的 Bing RSS，质量差一截。
     tavily_key: str = ""
-
-    def can_summarize(self) -> bool:
-        return bool(self.summary_key and self.summary_url)
 
 
 def chat_url_of(value) -> str:
@@ -65,9 +62,8 @@ def load_credentials(path: str = "") -> LoopCredentials:
     return LoopCredentials(
         chat_key=key,
         chat_url=chat_url_of(refs.get("LOOP_CHAT_URL") or refs.get("DEEPSEEK_CHAT_URL")),
-        summary_key=str(refs.get("ALIYUN_MAAS_API_KEY") or ""),
-        summary_url=(base + "/chat/completions") if base else "",
-        summary_model=str(refs.get("LOOP_SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL),
+        maas_key=str(refs.get("ALIYUN_MAAS_API_KEY") or ""),
+        maas_url=(base + "/chat/completions") if base else "",
         tavily_key=str(refs.get("TAVILY_API_KEY") or ""),
     )
 
@@ -78,6 +74,9 @@ class LoopConfig:
     user_name: str = "对方"          # 对方的称呼：压缩文本里"它："代替"对方："，sink 第一句也用它
     recall_tool: str = "recall"       # sink 里写的搜索工具名
     wait_tool: str = "wait"           # sink 里写的「停下等」工具名
+    # 对方发来的每一条，进上下文时前面拼一个【标记】：名字会改、会重名，
+    # 这个方括号才是「这句是我的人说的」的凭据。空 = 用 user_name。
+    owner_mark: str = ""
     lexical: bool = False             # 词面检索；默认关，只用嵌入
     recent_steps: int = 0             # 最近 N 步不入召回；0=关
     model: str = "deepseek-flash"
@@ -93,10 +92,11 @@ class LoopConfig:
     context_budget: int = 200000      # 一次请求最多多少 token（官方 V4.1 有 1M，先吃 200k）
     band_budget: int = 30000          # 四段旧摘要合计
     block_tokens: int = 50000         # 当前块攒到这么多就攒块
-    summary_model: str = "deepseek-flash"
-    # auto：模型名带 qwen 就走百炼端点，其余走主模型端点。
-    summary_provider: str = "auto"
-    summary_max_tokens: int = 4000
+    summary_model: str = DEFAULT_SUMMARY_MODEL
+    # 0 = 跟主模型同一份预算（config.max_tokens）。别给摘要单独卡一个小额度：
+    # 这个模型会先把 token 花在思考上，小额度的结果是"想了 4000 token、正文一个字没有"，
+    # 压缩每次都失败、块永远压不下去（2026-10-30 线上就这么卡住的）。
+    summary_max_tokens: int = 0
 
     # 嵌入（memory_v2 的向量身份）：模型与维度要配对，换一个就得连另一个一起对，
     # 不然缓存里旧向量按 (model, dim) 认不出来，召回会静默变差。

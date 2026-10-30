@@ -11,7 +11,51 @@ import os
 import sqlite3
 from typing import List, Optional
 
-from .context import Band, Block, BlockEntry, content_text, now
+from .context import (Band, Block, BlockEntry, content_text, image_parts, now,
+                      strip_image_placeholders)
+
+
+def _stored_images(content) -> List[dict]:
+    """这一条里的图片段，只留拼请求要用的字段（字节从来不进库）。
+
+    `content` 落库时被摊平成文字（图片写成 `[图片]` 一行），图片清单单独一列存；
+    重新打开时拼回段数组。不然重启之后那条记录就只剩一行"看这张图"、图片没了。
+    """
+    out = []
+    for part in image_parts(content):
+        item = {"type": "image"}
+        for key in ("path", "url", "w", "h"):
+            value = part.get(key)
+            if value not in (None, ""):
+                item[key] = value
+        if item.get("path") or item.get("url"):
+            out.append(item)
+    return out
+
+
+def _loaded_images(raw) -> List[dict]:
+    """库里的那一列 → 图片段（坏数据当没有）。"""
+    try:
+        items = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("url") or "").strip()
+        if not path:
+            continue
+        part = {"type": "image", "path": path}
+        for key in ("w", "h"):
+            try:
+                part[key] = int(item.get(key) or 0)
+            except (TypeError, ValueError):
+                part[key] = 0
+        out.append(part)
+    return out
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bands (
@@ -38,6 +82,7 @@ CREATE TABLE IF NOT EXISTS entries (
     tool_call_id TEXT NOT NULL DEFAULT '',
     ts TEXT NOT NULL,
     meta TEXT NOT NULL DEFAULT '{}',
+    images TEXT NOT NULL DEFAULT '[]',
     step INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (block_id, seq)
 );
@@ -76,6 +121,9 @@ CREATE TABLE IF NOT EXISTS inbox (
     state TEXT NOT NULL DEFAULT 'pending',
     notified INTEGER NOT NULL DEFAULT 0,
     direct INTEGER NOT NULL DEFAULT 0,
+    -- 这条是「对方」（她那个人）说的，还是外面别人说的：墙钟里那句「距上次对方
+    -- 说话」只认这一列。直投的显然是对方；通道来的由通道那侧按白名单标。
+    from_user INTEGER NOT NULL DEFAULT 0,
     ext_id TEXT NOT NULL DEFAULT '',
     meta TEXT NOT NULL DEFAULT '{}'
 );
@@ -129,6 +177,10 @@ class LoopStore:
             # 旧库的原文不知道是哪一步写的；补 0，网页上归到「没有步号」那一档。
             self.db.execute(
                 "ALTER TABLE entries ADD COLUMN step INTEGER NOT NULL DEFAULT 0")
+        if "images" not in entry_columns:
+            # 旧库的图只在内存里活过，正文被摊成了 `[图片]`——补不了，但新的一条能存住。
+            self.db.execute(
+                "ALTER TABLE entries ADD COLUMN images TEXT NOT NULL DEFAULT '[]'")
         inbox_columns = {row[1] for row in self.db.execute("PRAGMA table_info(inbox)")}
         had_direct = "direct" in inbox_columns
         for name, ddl in (
@@ -142,10 +194,15 @@ class LoopStore:
                 ("state", "TEXT NOT NULL DEFAULT 'pending'"),
                 ("notified", "INTEGER NOT NULL DEFAULT 0"),
                 ("direct", "INTEGER NOT NULL DEFAULT 0"),
+                ("from_user", "INTEGER NOT NULL DEFAULT 0"),
                 ("ext_id", "TEXT NOT NULL DEFAULT ''"),
                 ("meta", "TEXT NOT NULL DEFAULT '{}'")):
             if name not in inbox_columns:
                 self.db.execute("ALTER TABLE inbox ADD COLUMN %s %s" % (name, ddl))
+        if "from_user" not in inbox_columns:
+            # 老库没有这一列：直投的（网页/命令行）就是对方说的，先这么补上；
+            # 通道来的旧进件补不了（那要通道自己认人），以后新来的会带上。
+            self.db.execute("UPDATE inbox SET from_user = 1 WHERE direct = 1")
         if "ext_id" not in inbox_columns:
             # 老的通道进件把外部编号存在 meta.message_id 里：搬到列上，
             # 补拉历史时才认得出"这条已经收过"。
@@ -197,6 +254,19 @@ class LoopStore:
                 [(band.level, band.text, band.start_ts, band.end_ts)
                  for band in sorted(bands, key=lambda band: band.level)])
 
+    # ── 一把小钥匙：给"跨重启要记住的东西"用（比如块大小的锚）────────────
+    def kv_get(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM state WHERE key = ?",
+                              (str(key),)).fetchone()
+        return str(row["value"]) if row else default
+
+    def kv_set(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(key), str(value)))
+        self.db.commit()
+
     # ── 块与原文 ──────────────────────────────────────────────────────────
     def load_state(self) -> dict:
         previous_row = self.db.execute(
@@ -231,10 +301,18 @@ class LoopStore:
             return Block()
         entries = []
         for item in self.db.execute(
-                "SELECT seq, role, content, tool_calls, tool_call_id, ts, meta"
+                "SELECT seq, role, content, tool_calls, tool_call_id, ts, meta, images"
                 " FROM entries WHERE block_id = ? ORDER BY seq", (block_id,)):
-            message = {"role": str(item["role"]),
-                       "content": str(item["content"] or "")}
+            text = str(item["content"] or "")
+            pictures = _loaded_images(item["images"])
+            content = text
+            if pictures:
+                # 存的时候文字摊平、图分开存；读回来再拼成段数组（那时怎么发的，
+                # 现在还是怎么发——`_turns` 只看 content 的形状）。拼之前把正文里
+                # 那行 `[图片]` 去掉：图已经从 images 这列回来了。
+                text = strip_image_placeholders(text)
+                content = ([{"type": "text", "text": text}] + pictures) if text else pictures
+            message = {"role": str(item["role"]), "content": content}
             calls = json.loads(item["tool_calls"] or "[]")
             if calls:
                 message["tool_calls"] = calls
@@ -253,18 +331,21 @@ class LoopStore:
 
     def append_entry(self, block_id: int, entry: BlockEntry, step: int = 0) -> None:
         message = entry.message
+        content = message.get("content")
         seq = int(self.db.execute(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE block_id = ?",
             (block_id,)).fetchone()[0])
         with self.db:
             self.db.execute(
                 "INSERT INTO entries (block_id, seq, role, content, tool_calls,"
-                " tool_call_id, ts, meta, step) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " tool_call_id, ts, meta, images, step) VALUES"
+                " (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block_id, seq, str(message.get("role") or ""),
-                 content_text(message.get("content")),
+                 content_text(content),
                  json.dumps(list(message.get("tool_calls") or []), ensure_ascii=False),
                  str(message.get("tool_call_id") or ""), entry.ts,
                  json.dumps(dict(entry.meta or {}), ensure_ascii=False),
+                 json.dumps(_stored_images(content), ensure_ascii=False),
                  int(step or 0)))
 
     def promote_block(self, block_id: int, end_ts: str) -> None:
@@ -316,22 +397,48 @@ class LoopStore:
         return int(cursor.rowcount or 0)
 
     # ── 网页：增量流与状态 ────────────────────────────────────────────────
+    _FEED_COLUMNS = ("SELECT block_id, seq, role, content, tool_calls, tool_call_id,"
+                     " ts, meta, step FROM entries")
+
+    @staticmethod
+    def _feed_entry(row) -> dict:
+        return {"block": int(row["block_id"]), "seq": int(row["seq"]),
+                "role": str(row["role"]), "text": str(row["content"] or ""),
+                "calls": json.loads(row["tool_calls"] or "[]"),
+                "call_id": str(row["tool_call_id"] or ""),
+                "ts": str(row["ts"]), "meta": json.loads(row["meta"] or "{}"),
+                "step": int(row["step"])}
+
     def feed(self, since_block: int = 0, since_seq: int = 0,
              limit: int = 300) -> List[dict]:
         """按 (block_id, seq) 增量读原文：网页断线重连靠它补齐，不重不漏。"""
         rows = self.db.execute(
-            "SELECT block_id, seq, role, content, tool_calls, tool_call_id, ts,"
-            " meta, step FROM entries"
+            self._FEED_COLUMNS +
             " WHERE block_id > ? OR (block_id = ? AND seq > ?)"
             " ORDER BY block_id, seq LIMIT ?",
             (int(since_block), int(since_block), int(since_seq),
              max(1, int(limit)))).fetchall()
-        return [{"block": int(row["block_id"]), "seq": int(row["seq"]),
-                 "role": str(row["role"]), "text": str(row["content"] or ""),
-                 "calls": json.loads(row["tool_calls"] or "[]"),
-                 "call_id": str(row["tool_call_id"] or ""),
-                 "ts": str(row["ts"]), "meta": json.loads(row["meta"] or "{}"),
-                 "step": int(row["step"])} for row in rows]
+        return [self._feed_entry(row) for row in rows]
+
+    def feed_tail(self, limit: int = 60) -> List[dict]:
+        """最后这么多条（正序）。
+
+        网页首屏只画这一小段：整块从头重放到今天有九百多条、七百多 KB，
+        手机上要等好几秒，而且先看见的是最早的，最新的排在最后才出来。
+        """
+        rows = self.db.execute(
+            self._FEED_COLUMNS + " ORDER BY block_id DESC, seq DESC LIMIT ?",
+            (max(1, int(limit)),)).fetchall()
+        return [self._feed_entry(row) for row in reversed(rows)]
+
+    def feed_before(self, block: int, seq: int, limit: int = 60) -> List[dict]:
+        """比 (block, seq) 更早的最后几条（正序）：首屏之后往上翻页用。"""
+        rows = self.db.execute(
+            self._FEED_COLUMNS +
+            " WHERE block_id < ? OR (block_id = ? AND seq < ?)"
+            " ORDER BY block_id DESC, seq DESC LIMIT ?",
+            (int(block), int(block), int(seq), max(1, int(limit)))).fetchall()
+        return [self._feed_entry(row) for row in reversed(rows)]
 
     def usage_since(self, since_step: int = 0, limit: int = 300) -> List[dict]:
         rows = self.db.execute(
@@ -481,7 +588,8 @@ class LoopStore:
     def push(self, kind: str, text: str, policy: str = "", source: str = "",
              chat_type: str = "", chat_id: str = "", chat_name: str = "",
              sender_id: str = "", sender_name: str = "", meta=None,
-             direct: Optional[bool] = None, ext_id: str = "") -> int:
+             direct: Optional[bool] = None, ext_id: str = "",
+             from_user: Optional[bool] = None) -> int:
         """往 inbox 放一条。
 
         别的进程也能直接 INSERT 进来（网关的 `/inbox` 就是这么做的），这就是入口。
@@ -495,6 +603,8 @@ class LoopStore:
         `ext_id` 是外头那条消息自己的编号，带通道前缀（`QQ:12345`）：同一个编号
         只收一次，补拉历史、重连补漏都靠它去重；重复的返回原来那条的 id（0 = 编号
         收过但那条进件已经被 trim 掉了）。
+        `from_user` 是"这条是对方说的"：墙钟里那句「距上次对方说话」只认它。不传就
+        跟 `direct` 走（直投的本来就是对方在说话）；通道前面认得出是谁的，就显式标 true。
         """
         ext = str(ext_id or "")
         if ext and self.inbox_has_ext(ext):
@@ -504,6 +614,7 @@ class LoopStore:
         chat = str(chat_id or "")
         if direct is None:
             direct = not str(source or "").strip()
+        mine = bool(direct) if from_user is None else bool(from_user)
         policy = str(policy or "").strip().lower()
         if chat:
             self._remember_chat(str(source or ""), str(chat_type or "private"),
@@ -529,12 +640,13 @@ class LoopStore:
                     return int(row["id"]) if row is not None else 0
             cursor = self.db.execute(
                 "INSERT INTO inbox (ts, kind, text, source, chat_type, chat_id,"
-                " chat_name, sender_id, sender_name, policy, direct, ext_id, meta)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " chat_name, sender_id, sender_name, policy, direct, from_user,"
+                " ext_id, meta)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (stamp, str(kind or "user"), str(text or ""), str(source or ""),
                  str(chat_type or "private"), chat, str(chat_name or ""),
                  str(sender_id or ""), str(sender_name or ""), policy,
-                 1 if direct else 0, ext,
+                 1 if direct else 0, 1 if mine else 0, ext,
                  json.dumps(meta or {}, ensure_ascii=False)))
             if not direct and str(source or "").strip():
                 # "外部一共来过多少"要只增：进件会被 trim 掉，数行会越数越少
@@ -543,6 +655,29 @@ class LoopStore:
                     " ON CONFLICT(key) DO UPDATE SET"
                     " value = CAST(value AS INTEGER) + 1")
         return int(cursor.lastrowid)
+
+    def last_incoming(self) -> dict:
+        """对方最后一次说话是什么时候（谁说的照实带上）。
+
+        墙钟里那句「距上次对方说话」用它，而不是记录里的 `user` 行：通道转进来的话
+        **不进记录**（先响一声，正文等她自己 `messages` 去取），记录里只有本机直投的
+        才写成 `user`。只看记录的话，正在通道上聊着也会算成「一天前」（线上出过）。
+
+        只认 `from_user`（这条是对方说的）：群里别人、岛上的陌生人都算「外面有人
+        说话」，不该顶替成「对方」。通道名这一层核心不认识——`source` 只是标签。
+        `mute`（藏着不叫人）的不算。
+        """
+        row = self.db.execute(
+            "SELECT ts, sender_name, chat_name, chat_id, chat_type FROM inbox "
+            "WHERE kind = 'user' AND from_user = 1 AND policy != 'mute' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            return {}
+        who = str(row["sender_name"] or "").strip()
+        if not who:
+            who = str(row["chat_name"] or "").strip() or str(row["chat_id"] or "").strip()
+        return {"ts": str(row["ts"] or ""), "who": who,
+                "chat_type": str(row["chat_type"] or "private")}
 
     def inbox_has_ext(self, ext_id: str) -> bool:
         """这个外部编号收过没有：补拉历史先问一句，省得白插一条。
@@ -902,6 +1037,11 @@ class LoopStore:
         # 只认列值：写入时已经归一（没来源的就是直投）。这里再"按有没有来源"
         # 猜一遍，会和 SQL 那边的口径打架。
         item["direct"] = stored
+        # 「这条是对方说的」：墙钟拿它算「距上次对方说话」。旧库没这一列时按直投算。
+        try:
+            item["from_user"] = int(row["from_user"] or 0)
+        except (IndexError, KeyError, TypeError, ValueError):
+            item["from_user"] = stored
         return item
 
     # ── 检索记录 ──────────────────────────────────────────────────────────

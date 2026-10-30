@@ -30,6 +30,9 @@ FILES = ("persona.md", "persona.log", "persona.stamp",
          "settings.json", "prompts.json")
 MEMORY_DIR = "memory"
 DIARY_DIR = os.path.join("workspace", "日记")
+# 图片库：收进来的图片都在这儿（和工作区平级，`run` 碰不到）。记录里只存路径，
+# 文件本身要是丢了就再也找不回来——所以跟记录库一起备。
+IMAGES_DIR = "图片"
 STAMP = "manifest.json"
 
 
@@ -106,6 +109,8 @@ def run(config, log=None, moment: float = None) -> str:
         items.append(MEMORY_DIR + "/")
     if _copy_tree(os.path.join(data, DIARY_DIR), os.path.join(target, "日记")):
         items.append("日记/")
+    if _copy_tree(os.path.join(data, IMAGES_DIR), os.path.join(target, IMAGES_DIR)):
+        items.append(IMAGES_DIR + "/")
     if not items:
         try:
             os.rmdir(target)

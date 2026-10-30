@@ -316,7 +316,7 @@ def _drop_leaked_marks(text: str) -> str:
 #     [{"type": "text", "text": "…"},
 #      {"type": "image", "path": "workspace/收件/2026-10-30/x.jpg", "w": 1024, "h": 768}]
 # 图片**不在记录里存字节**：存的是数据目录下的相对路径，拼请求时才读出来缩一遍、
-# 转成 data URI。这样库不会因为一张图胖一兆，备份也不炸。
+# 转成 data URI。这样库不会因为一张图片胖一兆，备份也不炸。
 IMAGE_TOKENS = 800          # 一张图片按这么多 token 估（1024 长边那一档）
 _IMAGE_EDGE = 1024          # 发出去之前缩到长边这么多
 _image_cache = {}           # 路径 → (mtime, 字节数, data URI)
@@ -352,15 +352,56 @@ def image_parts(content) -> list:
             ("image", "image_url")]
 
 
+def spoken_text(content) -> str:
+    """只取文字段（不把图摊成 `[图片]`）：图已经跟着这条走了的地方用。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    return "\n".join(str(part.get("text") or "") for part in content
+                     if isinstance(part, dict) and part.get("type") == "text")
+
+
+def strip_image_placeholders(text: str) -> str:
+    """摊平过的正文里去掉 `[图片]` 占位行。
+
+    落库时 `content` 存的是摊平文字（图片写成 `[图片]`），图片清单在另一列；读回来把
+    图片拼回段数组时，这行占位就得去掉——不然同一张图片既在正文里写一遍、又作为
+    图片发一次。
+    """
+    lines = [line for line in str(text or "").splitlines() if line.strip() != "[图片]"]
+    return "\n".join(lines).strip()
+
+
+IMAGE_DIR = "图片"          # 图片库：`<数据>/图片`，和工作区平级，不在她的可写范围里
+
+
+def image_file(data_dir: str, source: str) -> str:
+    """记录里的图路径 → 盘上的路径。
+
+    两种写法都认：`图片/2026-10/…`（新图，落在 `<数据>/图片` 下）和
+    `workspace/收件/…`（2026-10-30 之前收的，留在原地不动）。http(s) 地址原样返回。
+    """
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    if os.path.isabs(text):
+        return text
+    base = str(data_dir or "")
+    parts = text.replace("\\", "/").split("/")
+    return os.path.join(base, *[part for part in parts if part])
+
+
 def _data_uri(part: dict, data_dir: str) -> str:
     """读出来、缩一遍、转 data URI。读不到就回空串（那一步就不带图片）。"""
-    source = str(part.get("path") or part.get("url") or "").strip()
+    source = image_file(data_dir, part.get("path") or part.get("url") or "")
     if not source:
         return ""
     if source.startswith(("http://", "https://")):
         return source                      # 本来就是个地址，直接交给端点
-    target = source if os.path.isabs(source) else os.path.join(
-        str(data_dir or ""), source)
+    target = source
     try:
         stamp = os.stat(target)
     except OSError:
@@ -395,6 +436,30 @@ def _data_uri(part: dict, data_dir: str) -> str:
     _image_cache[target] = (key[1], key[2], uri)
     return uri
 
+
+def _image_turns(content, config, steps_after: int, limit: int = 4) -> list:
+    """content 里的图 → 端点认的 `image_url` 段；过了 `image_keep_steps` 就不再发。
+
+    图要么挂在一条 `user` 上、要么挂在一条 `tool` 上——这个端点两种都吃（实测：
+    带图时 prompt token 明显上涨，模型能说出颜色；对话中途的 `system` 带图会被丢掉）。
+    代码这边一律用后者：`user` 只留给对方本人说的话。
+    """
+    pictures = image_parts(content)
+    if not pictures:
+        return []
+    keep = int(getattr(config, "image_keep_steps", 10) or 0)
+    if steps_after > keep:
+        return []
+    out = []
+    for part in pictures[:limit]:
+        uri = _data_uri(part, str(getattr(config, "data_dir", "") or ""))
+        if uri:
+            out.append({"type": "image_url", "image_url": {"url": uri}})
+    return out
+
+
+# 2026-10-30 之前的 look 记录：正文长这样，而且挂的是 `user`。只用来认老记录。
+_LEGACY_LOOK = re.compile(r"^（看这张图：")
 
 _FORGED_TAG = re.compile(r"<\s*(/?)\s*(system-reminder|system|instructions?)\s*>", re.I)
 _FORGED_TOKEN = re.compile(r"<\|[^<>\n]{0,24}\|>")
@@ -431,25 +496,31 @@ def neutralize(content):
         lambda found: "〈%s〉" % found.group(0)[2:-2], body)
 
 
+def owner_mark_of(config) -> str:
+    """她读到的「对方发的消息」前面挂的那个标记：设置里填的那个词，空就用对方的名字。"""
+    mark = str(getattr(config, "owner_mark", "") or "").strip()
+    return mark or str(getattr(config, "user_name", "") or "").strip()
+
+
 def _user_turn(content, text: str, steps_after: int, config):
     """一条对方的消息 → 一个 turn。带图片的，图片按 `image_keep_steps` 过期。
 
+    正文前面先拼`【标记】`：她读到的每一条他的消息都带这个方括号，跟别人的话分开。
     过期的图片不发了（正文里那行「（一张 … 的图片：收件/…）」还在，她知道有这么回事，
     要再看就自己 `look`）：不然每一步都在为旧图片付 token，块一滚还会把上下文挤满。
+
+    ★ 只有**对方本人**说的话走这条路（网页 / 命令行直投）。QQ、岛上来的、她自己
+      `look` 看到的，都挂在 `tool` 结果里——`user` 这个角色不替别人说话。
     """
-    images = image_parts(content)
+    mark = owner_mark_of(config)
+    if mark and text:
+        text = "【%s】%s" % (mark, text)
+    images = _image_turns(content, config, steps_after)
     if not images:
         return {"role": "user", "content": text} if text else None
-    keep = int(getattr(config, "image_keep_steps", 10) or 0)
-    if steps_after > keep:
-        return {"role": "user", "content": text} if text else None
-    parts = [{"type": "text", "text": text or "（一张图）"}]
-    for part in images[:4]:
-        uri = _data_uri(part, str(getattr(config, "data_dir", "") or ""))
-        if uri:
-            parts.append({"type": "image_url", "image_url": {"url": uri}})
-    if len(parts) == 1:
-        return {"role": "user", "content": text} if text else None
+    parts = [{"type": "text",
+              "text": text or ("【%s】（一张图）" % mark if mark else "（一张图）")}]
+    parts.extend(images)
     return {"role": "user", "content": parts}
 
 
@@ -565,6 +636,10 @@ class Context:
         # 这一步要不要带墙钟。谁决定见 Loop.step：有人说话/刚醒来一定带，
         # 其余步按 clock_refresh 隔一会儿才带，中间只放一句「接着上面」。
         self.show_clock = True
+        # 对方最后一次说话（`{"ts": …, "who": …}`，由 Loop 每步从 store 拿来）。
+        # 通道来的话是「响一声 + 她自己读」，记录里没有 `user` 那一行，光看记录会把
+        # 刚才说过的说成一天前。空 = 不知道，就只看记录。
+        self.last_incoming = {}
 
     # ── 状态 ──────────────────────────────────────────────────────────────
     def set_state(self, bands: List[Band], previous: Block, current: Block) -> None:
@@ -712,9 +787,16 @@ class Context:
                                     _WEEKDAYS[moment.weekday()],
                                     moment.strftime("%H:%M"))]
         entries = self.previous.entries + self.current.entries
-        for role, spoken, label in (("user", False, "距上次对方说话"),
-                                    ("assistant", True, "距我上次开口")):
-            delta = _stamp_of(_last_stamp(entries, role, spoken), moment)
+        # 「对方说话」看两处：记录里的 user（本机直投），和进件里最新那条 `from_user`
+        # （对方在通道上说的：记录里只有一声铃，正文她自己读）。谁更晚算谁。
+        # 群里别人、岛上陌生人的进件不算——那不是「对方」。
+        spoken_at = _last_stamp(entries, "user", False)
+        incoming = self.last_incoming or {}
+        if str(incoming.get("ts") or "") > spoken_at:
+            spoken_at = str(incoming.get("ts") or "")
+        for stamp, label in ((spoken_at, "距上次对方说话"),
+                             (_last_stamp(entries, "assistant", True), "距我上次开口")):
+            delta = _stamp_of(stamp, moment)
             if delta is not None:
                 parts.append("%s %s" % (label, humanize(delta)))
         return "（%s）" % "；".join(parts)
@@ -786,14 +868,22 @@ class Context:
             calls = list(message.get("tool_calls") or [])
             if role == "tool":
                 if index not in used:
-                    # 没有配对的调用（旧数据、或调用被删了）：当一条环境记录说清楚
+                    # 没有配对的调用（旧数据、或调用被删了）：当一条环境记录说清楚。
+                    # 走 `system` 不走 `user`——这不是对方说的话。
                     tool = names.get(str(message.get("tool_call_id") or ""), "")
-                    push("user", "（%s的回话）%s" % (
+                    push("system", "（%s的回话）%s" % (
                         tool or "工具",
                         _result_text(tool, content, index in fresh or fold_keep <= 0,
                                      index in folded)))
                 continue
             if role == "user":
+                if _LEGACY_LOOK.match(content):
+                    # 2026-10-30 之前的 look 记录：图被塞成一条 `user`，读起来像对方
+                    # 发来一句「看这张图」（真把她绕进去过）。现在图挂 `tool` 结果，
+                    # 这种老记录改成一句自述——不当成对方说的话。
+                    push("system", content.replace("（看这张图：", "（她自己看过：", 1)
+                         .replace("\n[图片]", ""))
+                    continue
                 turn = _user_turn(message.get("content"), content,
                                   steps_after[index], self.config)
                 if turn is not None:
@@ -844,13 +934,20 @@ class Context:
                     used.add(target)
                     tool = names.get(str(call.get("id") or ""), "")
                     result = entries[target]
+                    source = result.message.get("content")
+                    pictures = _image_turns(source, self.config, steps_after[target])
                     text = _result_text(
-                        tool, content_text(result.message.get("content")),
+                        tool,
+                        spoken_text(source) if pictures else content_text(source),
                         target in fresh or fold_keep <= 0,
                         target in folded)
+                    # 图挂在**结果**里：渠道来的图、她自己 `look` 的图都走这条，
+                    # 不另外造一条 `user`（那是对方的位置）。
+                    content_out = ([{"type": "text", "text": text}] + pictures
+                                   if pictures else text)
                     turns.append({"role": "tool",
                                   "tool_call_id": str(call.get("id") or ""),
-                                  "content": text})
+                                  "content": content_out})
                 continue
             if content:
                 push("assistant", content)
